@@ -28,7 +28,7 @@ This application is a feature-rich, terminal-based AI assistant client built in 
 
 1. **Install Required Packages**:
    ```bash
-   pip install ollama prompt_toolkit duckduckgo_search requests beautifulsoup4 psutil
+   pip install -r requirments.txt
    ```
 
 2. **Pull an Ollama Model**:
