@@ -1,0 +1,7 @@
+memory.json
+tmp/
+*venv*/
+sessions/
+__pycache__/
+.chat_history
+.clauderc

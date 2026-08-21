@@ -1,0 +1,6 @@
+ollama
+prompt_toolkit
+duckduckgo_search
+requests
+beautifulsoup4
+psutil
