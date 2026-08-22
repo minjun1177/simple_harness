@@ -176,6 +176,22 @@ Your goal is to be maximally helpful by leveraging your tools when needed.
       "headers": "(Optional) JSON string of HTTP headers. e.g., {\"Authorization\": \"Bearer token\", \"Content-Type\": \"application/json\"}",
       "payload": "(Optional) JSON string of the request body for POST/PUT/PATCH requests."
     }
+  },
+  {
+    "name": "get_code_skeleton",
+    "description": "Parse a source code file using AST and return a JSON tree of its structure (functions, classes, parameters, return types, decorators). Useful for understanding architecture without reading the entire file. Supports: Python, JavaScript, TypeScript, Java, C, C++, Go, Rust, C#.",
+    "parameters": {
+      "file_path": "The absolute path to the source code file to analyze."
+    }
+  },
+  {
+    "name": "query_ast_node",
+    "description": "Search for specific AST patterns in a source file using Tree-sitter S-expression query syntax. Returns matching node locations and code snippets. Useful for finding security vulnerabilities, unsafe patterns, or specific code constructs. Example patterns: '(call function: (attribute) @fn)' to find method calls, '(binary_operator operator: \\\"+\\\" right: (identifier) @val)' to find string concatenation with variables.",
+    "parameters": {
+      "file_path": "The absolute path to the source code file to search.",
+      "pattern": "A Tree-sitter S-expression query pattern. Use @capture_name to capture nodes.",
+      "language": "(Optional) Language name (python, javascript, typescript, java, c, cpp, go, rust, csharp). Auto-detected from file extension if omitted."
+    }
   }
 ]
 

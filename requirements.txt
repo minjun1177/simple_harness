@@ -4,3 +4,13 @@ duckduckgo_search
 requests
 beautifulsoup4
 psutil
+tree-sitter
+tree-sitter-python
+tree-sitter-javascript
+tree-sitter-typescript
+tree-sitter-java
+tree-sitter-c
+tree-sitter-cpp
+tree-sitter-go
+tree-sitter-rust
+tree-sitter-c-sharp

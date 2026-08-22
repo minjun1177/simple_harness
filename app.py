@@ -19,6 +19,49 @@ import random
 import psutil
 import hashlib
 
+# ── Tree-sitter AST 분석 ──────────────────────────────────────────────
+try:
+    from tree_sitter import Language, Parser, Query, QueryCursor
+    import tree_sitter_python as _ts_python
+    import tree_sitter_javascript as _ts_javascript
+    import tree_sitter_typescript as _ts_typescript
+    import tree_sitter_java as _ts_java
+    import tree_sitter_c as _ts_c
+    import tree_sitter_cpp as _ts_cpp
+    import tree_sitter_go as _ts_go
+    import tree_sitter_rust as _ts_rust
+    import tree_sitter_c_sharp as _ts_csharp
+    TREE_SITTER_AVAILABLE = True
+
+    _TS_LANGUAGES = {
+        "python":     Language(_ts_python.language()),
+        "javascript": Language(_ts_javascript.language()),
+        "typescript":  Language(_ts_typescript.language_typescript()),
+        "tsx":         Language(_ts_typescript.language_tsx()),
+        "java":       Language(_ts_java.language()),
+        "c":          Language(_ts_c.language()),
+        "cpp":        Language(_ts_cpp.language()),
+        "go":         Language(_ts_go.language()),
+        "rust":       Language(_ts_rust.language()),
+        "csharp":     Language(_ts_csharp.language()),
+    }
+
+    _EXT_TO_LANG = {
+        ".py": "python", ".pyw": "python",
+        ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+        ".ts": "typescript", ".tsx": "tsx",
+        ".java": "java",
+        ".c": "c", ".h": "c",
+        ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".hxx": "cpp",
+        ".go": "go",
+        ".rs": "rust",
+        ".cs": "csharp",
+    }
+except ImportError:
+    TREE_SITTER_AVAILABLE = False
+    _TS_LANGUAGES = {}
+    _EXT_TO_LANG = {}
+
 try:
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import FileHistory
@@ -67,13 +110,12 @@ SESSION_DIR = "sessions"
 
 SEARCH_MAX_RESULTS = 5
 
-NUM_CTX = 6144
+NUM_CTX = 32768
 NUM_PREDICT = 2048
 
 AUTO_ALLOW = False
 RETURN_ALL_FILE_CONTENT = False
 SAVE_CHAT_HISTORY = True
-MAX_TOKEN = 6000
 CUSTOM_PERSONA = ""
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -271,37 +313,202 @@ def _approval_prompt(action_label: str, details: list[tuple[str, str]]) -> bool:
 
 # ─────────────────────────── 스트리밍 응답 렌더링 ───────────────────────────
 
-def _render_line(line: str, in_code: bool) -> tuple[str, bool]:
-    """한 줄의 텍스트를 마크다운 렌더링하여 반환한다. (상태 유지)"""
+# LaTeX → 유니코드 근사 변환 테이블
+_LATEX_SYMBOLS: list[tuple[str, str]] = [
+    # 그리스 대문자
+    (r'\Gamma', 'Γ'), (r'\Delta', 'Δ'), (r'\Theta', 'Θ'), (r'\Lambda', 'Λ'),
+    (r'\Xi', 'Ξ'), (r'\Pi', 'Π'), (r'\Sigma', 'Σ'), (r'\Upsilon', 'Υ'),
+    (r'\Phi', 'Φ'), (r'\Psi', 'Ψ'), (r'\Omega', 'Ω'),
+    # 그리스 소문자
+    (r'\alpha', 'α'), (r'\beta', 'β'), (r'\gamma', 'γ'), (r'\delta', 'δ'),
+    (r'\epsilon', 'ε'), (r'\varepsilon', 'ε'), (r'\zeta', 'ζ'), (r'\eta', 'η'),
+    (r'\theta', 'θ'), (r'\vartheta', 'ϑ'), (r'\iota', 'ι'), (r'\kappa', 'κ'),
+    (r'\lambda', 'λ'), (r'\mu', 'μ'), (r'\nu', 'ν'), (r'\xi', 'ξ'),
+    (r'\pi', 'π'), (r'\varpi', 'ϖ'), (r'\rho', 'ρ'), (r'\varrho', 'ϱ'),
+    (r'\sigma', 'σ'), (r'\varsigma', 'ς'), (r'\tau', 'τ'), (r'\upsilon', 'υ'),
+    (r'\phi', 'φ'), (r'\varphi', 'φ'), (r'\chi', 'χ'), (r'\psi', 'ψ'),
+    (r'\omega', 'ω'),
+    # 수학 연산자
+    (r'\cdot', '·'), (r'\times', '×'), (r'\div', '÷'), (r'\pm', '±'),
+    (r'\mp', '∓'), (r'\leq', '≤'), (r'\geq', '≥'), (r'\neq', '≠'),
+    (r'\approx', '≈'), (r'\equiv', '≡'), (r'\sim', '∼'), (r'\propto', '∝'),
+    (r'\infty', '∞'), (r'\partial', '∂'), (r'\nabla', '∇'), (r'\forall', '∀'),
+    (r'\exists', '∃'), (r'\in', '∈'), (r'\notin', '∉'), (r'\subset', '⊂'),
+    (r'\supset', '⊃'), (r'\subseteq', '⊆'), (r'\supseteq', '⊇'),
+    (r'\cup', '∪'), (r'\cap', '∩'), (r'\emptyset', '∅'), (r'\varnothing', '∅'),
+    (r'\sum', 'Σ'), (r'\prod', 'Π'), (r'\int', '∫'), (r'\oint', '∮'),
+    (r'\sqrt', '√'), (r'\ldots', '…'), (r'\cdots', '⋯'), (r'\vdots', '⋮'),
+    (r'\ddots', '⋱'), (r'\to', '→'), (r'\rightarrow', '→'), (r'\leftarrow', '←'),
+    (r'\Rightarrow', '⇒'), (r'\Leftarrow', '⇐'), (r'\Leftrightarrow', '⇔'),
+    (r'\leftrightarrow', '↔'), (r'\uparrow', '↑'), (r'\downarrow', '↓'),
+    (r'\langle', '⟨'), (r'\rangle', '⟩'),
+    # 공백·기타
+    (r'\quad', '  '), (r'\qquad', '    '), (r'\,', ' '), (r'\;', ' '),
+    (r'\!', ''), (r'\ ', ' '),
+    # 함수명
+    (r'\log', 'log'), (r'\ln', 'ln'), (r'\exp', 'exp'), (r'\sin', 'sin'),
+    (r'\cos', 'cos'), (r'\tan', 'tan'), (r'\arcsin', 'arcsin'),
+    (r'\arccos', 'arccos'), (r'\arctan', 'arctan'), (r'\lim', 'lim'),
+    (r'\max', 'max'), (r'\min', 'min'), (r'\sup', 'sup'), (r'\inf', 'inf'),
+    (r'\det', 'det'), (r'\dim', 'dim'), (r'\ker', 'ker'),
+    # 위 첨자 숫자 (^{n} 패턴은 별도 처리)
+    (r'\mathbb{R}', 'ℝ'), (r'\mathbb{N}', 'ℕ'), (r'\mathbb{Z}', 'ℤ'),
+    (r'\mathbb{Q}', 'ℚ'), (r'\mathbb{C}', 'ℂ'),
+    # 괄호
+    (r'\left(', '('), (r'\right)', ')'), (r'\left[', '['), (r'\right]', ']'),
+    (r'\left\{', '{'), (r'\right\}', '}'), (r'\left|', '|'), (r'\right|', '|'),
+    # 기타 제거
+    (r'\text{', ''), (r'\mathrm{', ''), (r'\mathbf{', ''), (r'\mathit{', ''),
+    (r'\boldsymbol{', ''), (r'\hat{', ''), (r'\bar{', ''), (r'\tilde{', ''),
+    (r'\vec{', ''), (r'\dot{', ''), (r'\ddot{', ''), (r'\textbf{', ''), (r'\textit{', ''),
+]
+
+# 위첨자·아래첨자 유니코드 맵
+_SUP_MAP = str.maketrans('0123456789+-=()', '⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾')
+_SUB_MAP = str.maketrans('0123456789+-=()', '₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎')
+
+
+def _render_latex(expr: str) -> str:
+    """LaTeX 수식을 터미널 유니코드 근사 텍스트로 변환한다."""
+    s = expr.strip()
+
+    # \frac{a}{b} → (a/b)
+    s = re.sub(r'\\frac\{([^}]*)\}\{([^}]*)\}', r'(\1/\2)', s)
+    # \sqrt{x} → √(x)
+    s = re.sub(r'\\sqrt\{([^}]*)\}', r'√(\1)', s)
+    # ^{...} → 위첨자 (단일 문자)
+    s = re.sub(r'\^\{([^}]*)\}', lambda m: m.group(1).translate(_SUP_MAP), s)
+    # _{...} → 아래첨자 (단일 문자)
+    s = re.sub(r'_\{([^}]*)\}', lambda m: m.group(1).translate(_SUB_MAP), s)
+    # ^x (단일 문자) → 위첨자
+    s = re.sub(r'\^([0-9a-zA-Z])', lambda m: m.group(1).translate(_SUP_MAP), s)
+    # _x (단일 문자) → 아래첨자
+    s = re.sub(r'_([0-9a-zA-Z])', lambda m: m.group(1).translate(_SUB_MAP), s)
+
+    # 심볼 치환 (긴 것부터 처리해야 충돌 방지)
+    for latex_sym, unicode_sym in sorted(_LATEX_SYMBOLS, key=lambda x: -len(x[0])):
+        s = s.replace(latex_sym, unicode_sym)
+
+    # 남은 \cmd 명령어 제거
+    s = re.sub(r'\\[a-zA-Z]+', '', s)
+    # 중괄호 제거
+    s = re.sub(r'[{}]', '', s)
+
+    return s.strip()
+
+
+def _apply_inline_md(line: str) -> str:
+    """인라인 마크다운(bold, italic, code, strikethrough, latex)을 ANSI 코드로 치환한다."""
+    # 인라인 LaTeX ($...$) 먼저 처리 — `...` 보다 먼저 해야 충돌 없음
+    # $$...$$는 블록으로 처리되므로 여기서는 단일 $ 만
+    def replace_inline_latex(m: re.Match) -> str:
+        rendered = _render_latex(m.group(1))
+        return f"{S.PURPLE}{rendered}{S.R}"
+
+    line = re.sub(r'(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)', replace_inline_latex, line)
+
+    # Bold+italic: ***...***
+    line = re.sub(r'\*\*\*(.+?)\*\*\*', f'{S.BOLD}{S.ITAL}\\1{S.R}', line)
+    # Bold: **...** 또는 __...__
+    line = re.sub(r'\*\*(.+?)\*\*', f'{S.BOLD}\\1{S.R}', line)
+    line = re.sub(r'__(.+?)__', f'{S.BOLD}\\1{S.R}', line)
+    # Italic: *...* 또는 _..._  (이미 bold 처리된 이후)
+    line = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', f'{S.ITAL}\\1{S.R}', line)
+    line = re.sub(r'(?<!_)_(?!_)(.+?)(?<!_)_(?!_)', f'{S.ITAL}\\1{S.R}', line)
+    # Strikethrough: ~~...~~
+    line = re.sub(r'~~(.+?)~~', f'{S.DIM}{S.MUTED}\\1{S.R}', line)
+    # Inline code: `...`
+    line = re.sub(r'`([^`]+)`', f'{S.ACCENT}\\1{S.R}', line)
+
+    return line
+
+
+def _render_line(line: str, in_code: bool, in_latex_block: bool = False) -> tuple[str, bool, bool]:
+    """한 줄의 텍스트를 마크다운 렌더링하여 반환한다. (상태 유지)
+    반환: (rendered_line, in_code, in_latex_block)
+    """
     stripped = line.strip()
 
+    # ── 코드 블록 ───────────────────────────────────────────────────────
     if stripped.startswith("```"):
         in_code = not in_code
         if in_code:
             lang = stripped[3:].strip() or "code"
             w = max(1, tw() - len(lang) - 9)
-            return f"  {S.MUTED}╭─ {lang} {'─' * w}{S.R}", in_code
+            return f"  {S.MUTED}╭─ {lang} {'─' * w}{S.R}", in_code, in_latex_block
         else:
             w = max(1, tw() - 6)
-            return f"  {S.MUTED}╰{'─' * w}{S.R}", in_code
+            return f"  {S.MUTED}╰{'─' * w}{S.R}", in_code, in_latex_block
 
     if in_code:
-        return f"  {S.MUTED}│{S.R} {line}", in_code
+        return f"  {S.MUTED}│{S.R} {line}", in_code, in_latex_block
 
+    # ── 디스플레이 LaTeX 인라인 ($$...$$, 또는 \[...\] 가 한 줄에 시작과 끝) ─────────────
+    inline_display = re.match(r'^(\$\$|\\\[)(.+?)(\$\$|\\\])$', stripped)
+    if inline_display and not in_latex_block:
+        rendered_math = _render_latex(inline_display.group(2))
+        w = max(1, tw() - 8)
+        return (
+            f"  {S.PURPLE}╭─ math {'─' * w}{S.R}\n"
+            f"  {S.PURPLE}│{S.R} {S.PURPLE}{rendered_math}{S.R}\n"
+            f"  {S.PURPLE}╰{'─' * w}{S.R}"
+        ), in_code, in_latex_block
+
+    # ── 디스플레이 LaTeX 블록 ($$, \[, \begin{...}) ─────────────────
+    is_latex_open = re.match(r'^(\$\$|\\\[|\\begin\{[a-zA-Z*]+\})', stripped)
+    is_latex_close = re.match(r'^(\$\$|\\\]|\\end\{[a-zA-Z*]+\})', stripped)
+
+    if not in_latex_block and is_latex_open:
+        in_latex_block = True
+        w = max(1, tw() - 8)
+        return f"  {S.PURPLE}╭─ math {'─' * w}{S.R}", in_code, in_latex_block
+
+    if in_latex_block and is_latex_close:
+        in_latex_block = False
+        w = max(1, tw() - 6)
+        return f"  {S.PURPLE}╰{'─' * w}{S.R}", in_code, in_latex_block
+
+    if in_latex_block:
+        if stripped.startswith(r'\item'):
+            stripped = "* " + stripped[5:].strip()
+        rendered_math = _render_latex(stripped)
+        return f"  {S.PURPLE}│{S.R} {S.PURPLE}{rendered_math}{S.R}", in_code, in_latex_block
+
+    # ── 헤딩 (h1 ~ h6) ──────────────────────────────────────────────────
+    # 순서 중요: 더 긴 것(####)부터 먼저 체크
+    if stripped.startswith("###### "):
+        return f"  {S.DIM}{S.GRAY}{stripped[7:]}{S.R}", in_code, in_latex_block
+    if stripped.startswith("##### "):
+        return f"  {S.GRAY}{stripped[6:]}{S.R}", in_code, in_latex_block
+    if stripped.startswith("#### "):
+        return f"  {S.BOLD}{S.MUTED}{stripped[5:]}{S.R}", in_code, in_latex_block
     if stripped.startswith("### "):
-        return f"  {S.BOLD}{S.INFO}{stripped[4:]}{S.R}", in_code
+        return f"  {S.BOLD}{S.INFO}{stripped[4:]}{S.R}", in_code, in_latex_block
     if stripped.startswith("## "):
-        return f"  {S.BOLD}{S.ACCENT}{stripped[3:]}{S.R}", in_code
+        return f"  {S.BOLD}{S.ACCENT}{stripped[3:]}{S.R}", in_code, in_latex_block
     if stripped.startswith("# "):
-        return f"  {S.BOLD}{S.WHITE}{stripped[2:]}{S.R}", in_code
+        return f"  {S.BOLD}{S.WHITE}{stripped[2:]}{S.R}", in_code, in_latex_block
 
-    line = re.sub(r'\*\*(.+?)\*\*', f'{S.BOLD}\\1{S.R}', line)
-    line = re.sub(r'__(.+?)__', f'{S.BOLD}\\1{S.R}', line)
-    line = re.sub(r'`([^`]+)`', f'{S.ACCENT}\\1{S.R}', line)
+    # ── 수평선 (---, ***, ___) ──────────────────────────────────────────
+    if re.match(r'^(\-{3,}|\*{3,}|_{3,})$', stripped):
+        w = max(1, tw() - 4)
+        return f"  {S.MUTED}{'─' * w}{S.R}", in_code, in_latex_block
+
+    # ── 블록쿼트 (>) ─────────────────────────────────────────────────────
+    if stripped.startswith("> ") or stripped == ">":
+        inner = stripped[2:] if stripped.startswith("> ") else ""
+        inner = _apply_inline_md(inner)
+        return f"  {S.MUTED}┃{S.R} {S.ITAL}{S.GRAY}{inner}{S.R}", in_code, in_latex_block
+
+    # ── 인라인 마크다운 적용 ─────────────────────────────────────────────
+    line = _apply_inline_md(line)
+
+    # 불릿·순서 목록
     line = re.sub(r'^(\s*)[-*]\s', f'\\1{S.ACCENT}•{S.R} ', line)
     line = re.sub(r'^(\s*)(\d+\.)\s', f'\\1{S.ACCENT}\\2{S.R} ', line)
 
-    return f"  {line}", in_code
+    return f"  {line}", in_code, in_latex_block
+
 
 def _clean_md(text: str) -> str:
     t = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
@@ -428,8 +635,9 @@ def _render_full(text: str) -> str:
     lines = text.split('\n')
     out = []
     in_c = False
+    in_lb = False  # in_latex_block
     table_buf = []
-    
+
     def flush_t():
         if table_buf:
             out.extend(_format_table(table_buf))
@@ -437,14 +645,16 @@ def _render_full(text: str) -> str:
 
     for line in lines:
         stripped = line.strip()
-        if not in_c and stripped.startswith('|') and stripped.endswith('|'):
+        if not in_c and not in_lb and stripped.startswith('|') and stripped.endswith('|'):
             table_buf.append(line)
         else:
             flush_t()
-            rendered, in_c = _render_line(line, in_c)
+            rendered, in_c, in_lb = _render_line(line, in_c, in_lb)
+            # rendered 자체가 \n을 포함할 수 있음 ($$...$$가 한 줄인 경우)
             out.append(rendered)
     flush_t()
     return '\n'.join(out)
+
 
 
 def _fmt_tokens(prompt_t: int, comp_t: int, total_dur: float, eval_dur: float):
@@ -956,6 +1166,313 @@ def handle_call_api(url: str, method: str, headers: str = "", payload: str = "")
         return f"[Error] API call failed: {e}"
 
 
+# ═══════════════════════════════════════════════════════════════════════
+#  AST 기반 코드 분석 도구 (Tree-sitter)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _get_ts_parser(lang_name: str):
+    """언어 이름에 해당하는 Tree-sitter Parser를 반환한다."""
+    lang = _TS_LANGUAGES.get(lang_name)
+    if lang is None:
+        return None, None
+    parser = Parser(lang)
+    return parser, lang
+
+
+def _detect_language(filepath: str) -> str | None:
+    """파일 확장자로 언어를 자동 감지한다."""
+    _, ext = os.path.splitext(filepath)
+    return _EXT_TO_LANG.get(ext.lower())
+
+
+def _extract_params_python(node, src: bytes) -> list[dict]:
+    """Python 함수의 매개변수 정보를 추출한다."""
+    params = []
+    param_node = None
+    for child in node.children:
+        if child.type == "parameters":
+            param_node = child
+            break
+    if param_node is None:
+        return params
+    for child in param_node.children:
+        if child.type in ("identifier",):
+            params.append({"name": child.text.decode(), "type": None, "default": None})
+        elif child.type == "typed_parameter":
+            name = default = ptype = None
+            for sub in child.children:
+                if sub.type == "identifier" and name is None:
+                    name = sub.text.decode()
+                elif sub.type == "type":
+                    ptype = sub.text.decode()
+            params.append({"name": name, "type": ptype, "default": None})
+        elif child.type == "default_parameter":
+            name = default = None
+            for sub in child.children:
+                if sub.type == "identifier" and name is None:
+                    name = sub.text.decode()
+                elif sub.type not in ("=",):
+                    default = sub.text.decode()
+            params.append({"name": name, "type": None, "default": default})
+        elif child.type == "typed_default_parameter":
+            name = default = ptype = None
+            for sub in child.children:
+                if sub.type == "identifier" and name is None:
+                    name = sub.text.decode()
+                elif sub.type == "type":
+                    ptype = sub.text.decode()
+                elif sub.type not in ("=", ":"):
+                    default = sub.text.decode()
+            params.append({"name": name, "type": ptype, "default": default})
+        elif child.type in ("list_splat_pattern", "dictionary_splat_pattern"):
+            prefix = "*" if child.type == "list_splat_pattern" else "**"
+            for sub in child.children:
+                if sub.type == "identifier":
+                    params.append({"name": prefix + sub.text.decode(), "type": None, "default": None})
+    return params
+
+
+def _extract_params_generic(node, src: bytes) -> list[dict]:
+    """Python 이외 언어의 매개변수를 간이 추출한다."""
+    params = []
+    for child in node.children:
+        if child.type in ("formal_parameters", "parameter_list", "parameters",
+                          "formal_parameter_list"):
+            for p in child.named_children:
+                params.append({"name": p.text.decode(), "type": None, "default": None})
+            break
+    return params
+
+
+def _extract_return_type(node, src: bytes) -> str | None:
+    """함수 노드에서 리턴 타입 어노테이션을 추출한다."""
+    for child in node.children:
+        if child.type == "type":
+            return child.text.decode()
+        if child.type == "return_type":
+            return child.text.decode()
+    return None
+
+
+def _extract_decorators(node, src: bytes) -> list[str]:
+    """Python 데코레이터를 추출한다."""
+    decorators = []
+    sibling = node.prev_named_sibling
+    while sibling and sibling.type == "decorator":
+        decorators.insert(0, sibling.text.decode())
+        sibling = sibling.prev_named_sibling
+    # 또는 자식으로 들어있을 수 있음
+    for child in node.children:
+        if child.type == "decorator":
+            decorators.append(child.text.decode())
+    return decorators
+
+
+# ── 언어별 스켈레톤 빌더 매핑 ──────────────────────────────────────────
+# 공통 노드 타입 → 역할 매핑
+_FUNC_TYPES = {
+    "function_definition", "function_declaration",
+    "method_definition", "method_declaration",
+    "arrow_function", "generator_function_declaration",
+    "function_item",  # Rust
+}
+_CLASS_TYPES = {
+    "class_definition", "class_declaration",
+    "struct_item", "enum_item", "impl_item",  # Rust
+    "interface_declaration", "enum_declaration",
+    "type_declaration",
+}
+
+
+def _walk_skeleton(node, src: bytes, lang: str) -> list[dict]:
+    """AST 노드를 재귀적으로 순회하며 스켈레톤 정보를 수집한다."""
+    results = []
+    for child in node.children:
+        entry = None
+        if child.type in _FUNC_TYPES:
+            name_node = child.child_by_field_name("name")
+            name = name_node.text.decode() if name_node else "<anonymous>"
+            if lang == "python":
+                params = _extract_params_python(child, src)
+            else:
+                params = _extract_params_generic(child, src)
+            ret = _extract_return_type(child, src)
+            decorators = _extract_decorators(child, src) if lang == "python" else []
+            entry = {
+                "type": "function",
+                "name": name,
+                "line": child.start_point[0] + 1,
+                "end_line": child.end_point[0] + 1,
+                "parameters": params,
+                "return_type": ret,
+            }
+            if decorators:
+                entry["decorators"] = decorators
+            # 함수 안의 중첩 함수/클래스
+            body = child.child_by_field_name("body")
+            if body:
+                inner = _walk_skeleton(body, src, lang)
+                if inner:
+                    entry["children"] = inner
+
+        elif child.type in _CLASS_TYPES:
+            name_node = child.child_by_field_name("name")
+            name = name_node.text.decode() if name_node else "<anonymous>"
+            # 상속 정보
+            bases = []
+            for sub in child.children:
+                if sub.type in ("argument_list", "superclass", "type_list",
+                                "class_heritage"):
+                    bases.append(sub.text.decode())
+            entry = {
+                "type": "class",
+                "name": name,
+                "line": child.start_point[0] + 1,
+                "end_line": child.end_point[0] + 1,
+                "bases": bases,
+            }
+            body = child.child_by_field_name("body")
+            if body:
+                inner = _walk_skeleton(body, src, lang)
+                if inner:
+                    entry["methods"] = inner
+            else:
+                inner = _walk_skeleton(child, src, lang)
+                if inner:
+                    entry["methods"] = inner
+
+        if entry:
+            results.append(entry)
+        else:
+            # 현재 노드가 함수/클래스가 아니면 자식을 더 탐색
+            deeper = _walk_skeleton(child, src, lang)
+            results.extend(deeper)
+    return results
+
+
+def handle_get_code_skeleton(file_path: str) -> str:
+    """소스코드 파일의 함수/클래스/매개변수 구조를 JSON 트리로 반환한다."""
+    if not TREE_SITTER_AVAILABLE:
+        return "[Error] tree-sitter is not installed. Run: pip install tree-sitter tree-sitter-python (and other language grammars)"
+
+    if not file_path:
+        return "[Error] file_path is required."
+
+    if not os.path.isfile(file_path):
+        return f"[Error] File not found: {file_path}"
+
+    lang_name = _detect_language(file_path)
+    if lang_name is None:
+        return (f"[Error] Unsupported file extension. "
+                f"Supported: {', '.join(sorted(set(_EXT_TO_LANG.values())))}")
+
+    parser, lang = _get_ts_parser(lang_name)
+    if parser is None:
+        return f"[Error] Language grammar not available: {lang_name}"
+
+    try:
+        with open(file_path, "rb") as f:
+            src = f.read()
+    except Exception as e:
+        return f"[Error] Failed to read file: {e}"
+
+    tree = parser.parse(src)
+    skeleton = _walk_skeleton(tree.root_node, src, lang_name)
+
+    result = {
+        "file": file_path,
+        "language": lang_name,
+        "skeleton": skeleton,
+    }
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+
+def handle_query_ast_node(file_path: str, pattern: str, language: str = "") -> str:
+    """Tree-sitter S-expression 패턴으로 AST 노드를 검색하여 위치·스니펫을 반환한다."""
+    if not TREE_SITTER_AVAILABLE:
+        return "[Error] tree-sitter is not installed."
+
+    if not file_path:
+        return "[Error] file_path is required."
+    if not pattern:
+        return "[Error] pattern is required."
+
+    if not os.path.isfile(file_path):
+        return f"[Error] File not found: {file_path}"
+
+    # 언어 결정: 명시 > 확장자 자동감지
+    lang_name = language.strip().lower() if language else _detect_language(file_path)
+    if not lang_name or lang_name not in _TS_LANGUAGES:
+        return (f"[Error] Could not determine language. "
+                f"Supported: {', '.join(sorted(_TS_LANGUAGES.keys()))}")
+
+    parser, lang = _get_ts_parser(lang_name)
+    if parser is None:
+        return f"[Error] Language grammar not available: {lang_name}"
+
+    try:
+        with open(file_path, "rb") as f:
+            src = f.read()
+    except Exception as e:
+        return f"[Error] Failed to read file: {e}"
+
+    tree = parser.parse(src)
+
+    try:
+        query = Query(lang, pattern)
+    except Exception as e:
+        return f"[Error] Invalid Tree-sitter query pattern: {e}"
+
+    cursor = QueryCursor(query)
+    matches_raw = list(cursor.matches(tree.root_node))
+
+    if not matches_raw:
+        return json.dumps({"file": file_path, "pattern": pattern, "matches": []},
+                          indent=2, ensure_ascii=False)
+
+    lines = src.split(b"\n")
+    results = []
+    max_results = 50
+
+    for pattern_idx, captures in matches_raw:
+        if len(results) >= max_results:
+            break
+        for cap_name, nodes in captures.items():
+            for node in nodes:
+                if len(results) >= max_results:
+                    break
+                start_line = node.start_point[0]
+                end_line = node.end_point[0]
+                # 전후 1줄 컨텍스트 포함 (최대 10줄)
+                ctx_start = max(0, start_line - 1)
+                ctx_end = min(len(lines) - 1, end_line + 1)
+                if ctx_end - ctx_start > 10:
+                    ctx_end = ctx_start + 10
+                snippet_lines = []
+                for i in range(ctx_start, ctx_end + 1):
+                    prefix = ">>>" if start_line <= i <= end_line else "   "
+                    snippet_lines.append(f"{prefix} {i + 1}: {lines[i].decode(errors='replace')}")
+                results.append({
+                    "capture": cap_name,
+                    "node_type": node.type,
+                    "text": node.text.decode(errors="replace"),
+                    "start_line": start_line + 1,
+                    "end_line": end_line + 1,
+                    "start_col": node.start_point[1],
+                    "end_col": node.end_point[1],
+                    "snippet": "\n".join(snippet_lines),
+                })
+
+    output = {
+        "file": file_path,
+        "language": lang_name,
+        "pattern": pattern,
+        "total_matches": len(results),
+        "matches": results,
+    }
+    return json.dumps(output, indent=2, ensure_ascii=False)
+
+
 def dispatch_tool(function_name: str, arguments: dict) -> str | None:
     _fmt_tool_call(function_name, arguments)
     if function_name == "search_web": return handle_search_web(arguments.get("query", ""))
@@ -979,6 +1496,8 @@ def dispatch_tool(function_name: str, arguments: dict) -> str | None:
     if function_name == "search_in_file": return handle_search_in_file(arguments.get("query", ""), arguments.get("is_regex", False)) # like a grep
     if function_name == "get_system_info": return handle_get_system_info()
     if function_name == "call_api": return handle_call_api(arguments.get("url", ""), arguments.get("method", ""), arguments.get("headers",""), arguments.get("payload",""))
+    if function_name == "get_code_skeleton": return handle_get_code_skeleton(arguments.get("file_path", ""))
+    if function_name == "query_ast_node": return handle_query_ast_node(arguments.get("file_path", ""), arguments.get("pattern", ""), arguments.get("language", ""))
 
     print(f"  {S.WARN}⚠ Unknown tool: {function_name}{S.R}")
     return None
@@ -987,8 +1506,6 @@ def dispatch_tool(function_name: str, arguments: dict) -> str | None:
 # ═══════════════════════════════════════════════════════════════════════
 #  토큰 히스토리 & 그래프
 # ═══════════════════════════════════════════════════════════════════════
-
-MAX_HISTORY_LEN = 50
 
 token_history = []
 
@@ -1043,11 +1560,7 @@ def display_usage_graph():
 # ═══════════════════════════════════════════════════════════════════════
 
 async def call_ollama(client: ollama.AsyncClient, messages: list[dict]) -> str:
-    if len(messages) > MAX_HISTORY_LEN + 1:
-        trimmed_messages = [messages[0]] + messages[-MAX_HISTORY_LEN:]
-    else:
-        trimmed_messages = messages
-        
+
     async def spinner():
         # frames = [
         #     f"{S.ACCENT}      ·{S.R}",
@@ -1109,6 +1622,7 @@ async def call_ollama(client: ollama.AsyncClient, messages: list[dict]) -> str:
     in_code = False
     
     table_buffer = []
+    in_latex_block = False
 
     def flush_table():
         if table_buffer:
@@ -1116,42 +1630,45 @@ async def call_ollama(client: ollama.AsyncClient, messages: list[dict]) -> str:
             table_buffer.clear()
 
     def process_line(line: str, in_c: bool) -> bool:
+        nonlocal in_latex_block
         stripped = line.strip()
-        if not in_c and stripped.startswith('|') and stripped.endswith('|'):
+        if not in_c and not in_latex_block and stripped.startswith('|') and stripped.endswith('|'):
             table_buffer.append(line)
             return in_c
         else:
             flush_table()
-            rendered, out_c = _render_line(line, in_c)
-            print(rendered)
+            rendered, out_c, in_latex_block = _render_line(line, in_c, in_latex_block)
+            # rendered에 \n이 포함된 경우($$...$$) 각 줄을 별도 출력
+            for r_line in rendered.split('\n'):
+                print(r_line)
             return out_c
-    
+
     prompt_tokens = 0
     completion_tokens = 0
     total_duration = 0.0
     eval_duration = 0.0
-    
+
     start_time = None
     chunk_count = 0
 
     try:
-        response_stream = await client.chat(model=MODEL, messages=trimmed_messages, stream=True, options={"num_ctx": NUM_CTX, "num_predict": NUM_PREDICT})
-        
+        response_stream = await client.chat(model=MODEL, messages=messages, stream=True, options={"num_ctx": NUM_CTX, "num_predict": NUM_PREDICT})
+
         async for chunk in response_stream:
             if start_time is None:
                 start_time = time.time()
-                
+
             chunk_count += 1
-            
+
             content = chunk['message'].get('content', '')
             full_text += content
-            
+
             if chunk.get('done'):
                 prompt_tokens = chunk.get("prompt_eval_count", 0)
                 completion_tokens = chunk.get("eval_count", 0)
                 total_duration = chunk.get("total_duration", 0) / 1e9
                 eval_duration = chunk.get("eval_duration", 0) / 1e9
-            
+
             if not is_tool_call_check_done:
                 if "<tool_call>" in full_text:
                     is_tool_call = True
@@ -1170,7 +1687,7 @@ async def call_ollama(client: ollama.AsyncClient, messages: list[dict]) -> str:
                         else:
                             line_buffer += char
                 continue
-                
+
             if not is_tool_call:
                 for char in content:
                     if char == '\n':
@@ -1180,13 +1697,13 @@ async def call_ollama(client: ollama.AsyncClient, messages: list[dict]) -> str:
                         line_buffer = ""
                     else:
                         line_buffer += char
-                
+
                 elapsed = time.time() - start_time
                 if elapsed > 0.1:
                     tps = chunk_count / elapsed
                     sys.stdout.write(f"\r\033[K  {S.MUTED}TPS: {tps:.1f}{S.R}")
                     sys.stdout.flush()
-                        
+
         if not is_tool_call:
             sys.stdout.write('\r\033[K')
             sys.stdout.flush()
@@ -1207,44 +1724,96 @@ async def call_ollama(client: ollama.AsyncClient, messages: list[dict]) -> str:
         
     return full_text
 
-def get_dynamic_summary_params(model_name: str, used_tokens: int) -> tuple[int, int, int]:
+
+# ═══════════════════════════════════════════════════════════════════════
+#  컨텍스트 관리 (통합)
+# ═══════════════════════════════════════════════════════════════════════
+
+# 토큰 예산: NUM_CTX에서 응답 여유분을 뺀 값이 입력 한도
+# 실제 토큰 수는 tokenizer마다 다르지만 chars/3.5 ≈ 괜찮은 근사
+_CHARS_PER_TOKEN = 3.5
+
+def _estimate_tokens(messages: list[dict]) -> int:
+    """메시지 리스트의 토큰 수를 chars/3.5 방식으로 추정한다."""
+    total_chars = sum(len(m.get("content", "")) for m in messages)
+    return int(total_chars / _CHARS_PER_TOKEN)
+
+
+def _get_ctx_budget() -> int:
+    """Ollama에 보낼 수 있는 최대 입력 토큰 추정치."""
+    # NUM_CTX 전체에서 응답 예약분(NUM_PREDICT)과 여유 10%를 제외
+    return int(NUM_CTX * 0.85) - NUM_PREDICT
+
+
+def _get_summary_predict_tokens() -> int:
+    """모델 크기에 맞게 요약에 쓸 출력 토큰 수를 계산한다."""
     try:
         model_list = ollama.list()
         m_list = model_list.get("models", []) if isinstance(model_list, dict) else getattr(model_list, 'models', [])
-        model_size_gb = 4.0
         for m in m_list:
             name = m.get("model", m.get("name", "")) if isinstance(m, dict) else getattr(m, 'model', getattr(m, 'name', ''))
-            if name == model_name:
-                size_bytes = m.get("size", 0) if isinstance(m, dict) else getattr(m, 'size', 0)
-                model_size_gb = size_bytes / (1024**3)
-                break
+            if name == MODEL:
+                size_gb = (m.get("size", 0) if isinstance(m, dict) else getattr(m, 'size', 0)) / (1024 ** 3)
+                # 큰 모델일수록 더 긴 요약 가능
+                if size_gb >= 15.0: return 600
+                if size_gb >= 7.0:  return 400
+                return 250
     except Exception:
-        model_size_gb = 4.0
+        pass
+    return 300
 
-    if model_size_gb >= 15.0:
-        trigger_turns, trigger_max_tokens = 20, 4000
-    elif model_size_gb >= 7.0:
-        trigger_turns, trigger_max_tokens = 30, 6000
-    else:
-        trigger_turns, trigger_max_tokens = 40, 8000
 
-    base_predict = 150 + (used_tokens * 0.05)
-    size_factor = max(0.6, min(1.5, 4.0 / max(1.0, model_size_gb)))
-    predict_tokens = max(150, min(800, int(base_predict * size_factor)))
+def _trim_tool_results(messages: list[dict], max_chars: int = 3000) -> list[dict]:
+    """tool result 메시지가 max_chars를 넘으면 잘라낸다 (원본 수정 없이 복사 반환)."""
+    result = []
+    for m in messages:
+        content = m.get("content", "")
+        if m["role"] == "user" and content.startswith("[Tool Result") and len(content) > max_chars:
+            trimmed = content[:max_chars] + f"\n...[Tool result truncated – {len(content) - max_chars} chars omitted]"
+            result.append({**m, "content": trimmed})
+        else:
+            result.append(m)
+    return result
 
-    return trigger_turns, trigger_max_tokens, predict_tokens
 
-async def summarize_chat(client: ollama.AsyncClient, messages: list[dict], predict_tokens: int = 250) -> str:
-    chat_to_summarize = [m for m in messages if m["role"] != "system"]
+def _get_conv_pairs(messages: list[dict]) -> list[list[dict]]:
+    """system 메시지를 제외한 대화를 user-assistant 페어 단위로 묶는다.
+    tool result(user role)는 선행 assistant와 같은 페어로 취급."""
+    pairs: list[list[dict]] = []
+    current: list[dict] = []
+    for m in messages:
+        if m["role"] == "system":
+            continue
+        if m["role"] == "user" and not m["content"].startswith("[Tool Result"):
+            if current:
+                pairs.append(current)
+            current = [m]
+        else:
+            current.append(m)
+    if current:
+        pairs.append(current)
+    return pairs
+
+
+async def _compress_context(client: ollama.AsyncClient, messages: list[dict]) -> bool:
+    """컨텍스트를 요약하여 압축한다. 성공하면 True를 반환한다."""
+    conv_msgs = [m for m in messages if m["role"] != "system"]
+    if not conv_msgs:
+        return False
+
+    predict_tokens = _get_summary_predict_tokens()
     prompt = smrp()
-    for m in chat_to_summarize:
+    for m in conv_msgs:
         role = "User" if m["role"] == "user" else "Assistant"
         content = re.sub(r'<tool_call>.*?</tool_call>', '', m['content'], flags=re.DOTALL).strip()
         if content:
+            # tool result는 간략히만 포함
+            if m["role"] == "user" and m["content"].startswith("[Tool Result"):
+                content = content[:400] + ("..." if len(content) > 400 else "")
             prompt += f"[{role}]: {content}\n\n"
-        
+
     summary_msg = [{"role": "user", "content": prompt}]
-    
+
     async def spinner():
         frames = [
             f"{S.PURPLE}    ·  {S.R}",
@@ -1258,7 +1827,7 @@ async def summarize_chat(client: ollama.AsyncClient, messages: list[dict], predi
         try:
             while True:
                 frame = next(cycle)
-                sys.stdout.write(f'\r  {frame} {S.GRAY}Summarizing context to save tokens...{S.R}  ')
+                sys.stdout.write(f'\r  {frame} {S.GRAY}Compressing context…{S.R}  ')
                 sys.stdout.flush()
                 await asyncio.sleep(0.15)
         except asyncio.CancelledError:
@@ -1266,19 +1835,92 @@ async def summarize_chat(client: ollama.AsyncClient, messages: list[dict], predi
             sys.stdout.flush()
 
     spin_task = asyncio.create_task(spinner())
-    
     try:
-        # 출력 토큰 수(num_predict)를 동적으로 제한하여 요약 속도를 높임
-        response = await client.chat(model=MODEL, messages=summary_msg, stream=False, options={"num_predict": predict_tokens})
+        response = await client.chat(
+            model=MODEL, messages=summary_msg, stream=False,
+            options={"num_predict": predict_tokens, "num_ctx": NUM_CTX}
+        )
         summary = response['message']['content'].strip()
-        return summary
     except Exception as e:
-        return f"(Summary failed: {e})"
+        summary = ""
     finally:
         if not spin_task.done():
             spin_task.cancel()
             try: await spin_task
             except asyncio.CancelledError: pass
+
+    if not summary or summary.startswith("(Summary failed"):
+        return False
+
+    # 시스템 메시지의 이전 <SUMMARY> 태그 교체
+    sys_content = messages[0]["content"]
+    sys_content = re.sub(r'\n\n<SUMMARY>.*?</SUMMARY>', '', sys_content, flags=re.DOTALL).strip()
+    new_sys = f"{sys_content}\n\n<SUMMARY>\n{summary}\n</SUMMARY>"
+    messages[0]["content"] = new_sys
+    return True
+
+
+async def manage_context(client: ollama.AsyncClient, messages: list[dict]) -> None:
+    """
+    매 turn 시작 전 호출하여 컨텍스트 크기를 사전에 통제한다.
+
+    전략 (순서대로 시도):
+    1. 토큰 예산 이내 → 아무것도 하지 않음
+    2. 예산 초과 → tool result를 트리밍한 후 재확인
+    3. 여전히 초과 → 전체 대화 요약 후 오래된 페어 드롭
+    4. 최소 2 페어는 반드시 보존 (최신 문맥 유지)
+    """
+    budget = _get_ctx_budget()
+
+    # 1단계: tool result 트리밍 (원본 교체)
+    trimmed = _trim_tool_results(messages)
+    if _estimate_tokens(trimmed) <= budget:
+        # 트리밍된 내용이 있으면 messages에 반영
+        if trimmed != messages:
+            messages[:] = trimmed
+        return
+
+    messages[:] = trimmed  # 어쨌든 트리밍 적용
+
+    # 현재 페어 목록
+    pairs = _get_conv_pairs(messages)
+    n_pairs = len(pairs)
+
+    if n_pairs <= 2:
+        # 이미 최소 상태 — 요약만 시도하고 종료
+        if _estimate_tokens(messages) > budget:
+            print(f"\n  {S.WARN}⚠ Context limit approaching. Compressing…{S.R}")
+            ok = await _compress_context(client, messages)
+            if ok:
+                # 요약 후 오래된 페어 모두 드롭, 최신 1 페어만 보존
+                latest = pairs[-1] if pairs else []
+                messages[:] = [messages[0]] + latest
+                print(f"  {S.OK}✓ Context compressed.{S.R}\n")
+        return
+
+    # 2단계: 요약 시도
+    print(f"\n  {S.WARN}⚠ Context limit approaching. Compressing…{S.R}")
+    ok = await _compress_context(client, messages)
+    if ok:
+        # 요약 성공 → 최신 2 페어만 보존 (대화 연속성 유지)
+        keep = pairs[-2:]
+        keep_msgs = [msg for pair in keep for msg in pair]
+        messages[:] = [messages[0]] + keep_msgs
+        print(f"  {S.OK}✓ Context compressed ({n_pairs} → {len(keep)} pairs kept).{S.R}\n")
+        return
+
+    # 3단계: 요약 실패 → 오래된 페어부터 드롭 (최소 2 페어 보존)
+    print(f"  {S.WARN}⚠ Summary failed. Dropping oldest turns…{S.R}")
+    while _estimate_tokens(messages) > budget and len(_get_conv_pairs(messages)) > 2:
+        cur_pairs = _get_conv_pairs(messages)
+        keep_pairs = cur_pairs[1:]  # 가장 오래된 페어 제거
+        keep_msgs = [msg for pair in keep_pairs for msg in pair]
+        messages[:] = [messages[0]] + keep_msgs
+
+    dropped = n_pairs - len(_get_conv_pairs(messages))
+    if dropped > 0:
+        print(f"  {S.OK}✓ Dropped {dropped} oldest turn(s).{S.R}\n")
+
 
 
 def parse_tool_call(response_text: str) -> tuple[str, dict] | None:
@@ -1409,8 +2051,14 @@ async def main() -> None:
             continue
         if cmd == "/model":
             print(f"\n  {S.GRAY}model{S.R}  {S.WHITE}{MODEL}{S.R}")
-            print(f"  {S.GRAY}turns{S.R}  {S.WHITE}{(len(messages) - 1) // 2}{S.R}")
+            est_tokens = _estimate_tokens(messages)
+            budget = _get_ctx_budget()
+            usage_pct = min(100, int(est_tokens / max(1, budget) * 100))
+            usage_color = S.OK if usage_pct < 60 else (S.WARN if usage_pct < 85 else S.ERR)
+            pairs = _get_conv_pairs(messages)
+            print(f"  {S.GRAY}turns{S.R}  {S.WHITE}{len(pairs)}{S.R}")
             print(f"  {S.GRAY}ctx{S.R}    {S.WHITE}{len(messages)} messages{S.R}")
+            print(f"  {S.GRAY}tokens{S.R} {usage_color}~{est_tokens:,}{S.R} {S.MUTED}/ {budget:,} ({usage_pct}%){S.R}")
             print()
             try:
                 model_list = ollama.list()
@@ -1554,33 +2202,13 @@ async def main() -> None:
         current_session_id = save_session(messages, current_session_id)
 
         try:
+            # 📦 사전 컨텍스트 관리: Ollama 호출 전에 예산 초과 여부를 확인하고 압축
+            await manage_context(client, messages)
+
             result = await chat_turn(client, messages)
-            
-            last_prompt_len = token_history[-1]["prompt"] if token_history else 0
-            
-            dyn_turns, dyn_max_tokens, dyn_predict = get_dynamic_summary_params(MODEL, last_prompt_len)
-            
-            if len(messages) >= dyn_turns or last_prompt_len > dyn_max_tokens:
-                print(f"\n  {S.WARN}⚠ Context limit approaching. Compressing memory...{S.R}")
-                summary = await summarize_chat(client, messages, dyn_predict)
-                
-                system_content = messages[0]["content"]
-                if "<SUMMARY>" in system_content:
-                    system_content = re.sub(r'\n\n<SUMMARY>.*?</SUMMARY>', '', system_content, flags=re.DOTALL).strip()
-                    
-                new_system_content = f"{system_content}\n\n<SUMMARY>\n{summary}\n</SUMMARY>"
-                
-                new_messages = [{"role": "system", "content": new_system_content}]
-                if len(messages) > 3:
-                    new_messages.extend(messages[-2:])
-                else:
-                    new_messages.extend(messages[1:])
-                    
-                messages.clear()
-                messages.extend(new_messages)
-                print(f"  {S.OK}✓ Memory compressed successfully.{S.R}\n")
 
             current_session_id = save_session(messages, current_session_id)
+
         except Exception as e:
             print(f"\n  {S.ERR}✗ Error: {e}{S.R}\n")
 
