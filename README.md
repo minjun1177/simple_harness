@@ -18,6 +18,8 @@ This application is a feature-rich, terminal-based AI assistant client built in 
 - **Hashline Line-Level Hashing**: File reading appends 2-character MD5 hashes to line numbers (`LINE_NUM:HASH|`) allowing the agent to target precise code locations when making edits.
 - **Multi-Source Web Search**: Queries several keyless sources (DuckDuckGo, Wikipedia, Stack Exchange, GitHub, optional self-hosted SearXNG), reads the actual pages, ranks passages locally with BM25, and reports "no relevant results" rather than returning off-topic pages.
 - **Agent Skills**: Folder-based instruction packs (`skills/<name>/SKILL.md`) that the model loads on demand. Only each skill's name and description sit in the system prompt, so a large library stays cheap until a skill is actually needed.
+- **Tool Permissions**: Rules in `.permissions.json` decide what runs without asking and what never runs at all, filling the gap between prompting for everything and `/automode` allowing everything. Answering `a` at any approval prompt saves a rule.
+- **Reasoning Model Support**: A model's `<think>` blocks (and Ollama's separate `thinking` field) are kept out of the answer, off the screen by default, and out of the conversation history - so scratch work never eats the context budget.
 - **MCP Servers**: Any Model Context Protocol server declared in `.mcp.json` is started with the app, and its tools join the built-in ones as `mcp__<server>__<tool>`. Local subprocesses (stdio) and remote endpoints (streamable HTTP, legacy SSE) are all supported, with the same approval prompt guarding every call.
 
 ---
@@ -78,7 +80,7 @@ The client equips the LLM with 25 function-calling tools divided into five core 
 - `get_memory_list`: List stored memory IDs with timestamp and preview.
 - `edit_memory`: Update content of an existing memory record.
 - `delete_memory`: Remove a memory entry from disk.
-- `get_user_input`: Display interactive prompt choices or ask for direct user input.
+- `get_user_input`: Ask the user one or more questions, each with its own list of options plus a free-text choice.
 
 ### MCP Tools
 Present only when an MCP server is attached (see MCP Servers below).
@@ -242,7 +244,60 @@ The protocol client is a self-contained JSON-RPC implementation in
 
 ---
 
-## 8. Slash Commands
+## 8. Tool Permissions
+
+Until now the only gate was the approval prompt, and `/automode on` turned it
+off for everything at once - including `run_cmd` and `delete_file`. Rules give
+the middle ground.
+
+Rules are read from `./.permissions.json` and `~/.localchat/permissions.json`;
+rules from both files apply. Copy `.permissions.json.example` to start.
+
+```json
+{
+  "allow": ["run_cmd(git status)", "mcp__filesystem__*"],
+  "deny":  ["delete_file", "run_cmd(rm *)", "write_file(*/.env)"]
+}
+```
+
+A rule is a tool name, optionally followed by a pattern in parentheses matched
+against the call's main argument - the command for `run_cmd`, the path for a
+file tool, the URL for a network tool. Both halves accept `*` and `?`. A pattern
+with no wildcard also covers `<pattern> <anything>`, so `run_cmd(git status)`
+already allows `git status --short`.
+
+- **deny** never runs and never asks. The tool's handler is never reached, and
+  the model is told it is blocked so it stops retrying.
+- **allow** runs without a prompt.
+- Everything else asks, exactly as before - an empty rule set changes nothing.
+
+At an approval prompt the choices are now `[y/n/a]`, where `a` allows this
+exact call from now on and appends the rule to `.permissions.json`. `/perms`
+lists the active rules, `/perms allow <rule>` and `/perms deny <rule>` add one
+by hand, and `/perms reload` re-reads the files.
+
+---
+
+## 9. Reasoning Models
+
+Reasoning models (qwen3, deepseek-r1, gpt-oss) emit their scratch work before
+the answer - either wrapped in `<think>` tags in the content stream, or in
+Ollama's separate `thinking` field. It is not the answer, so:
+
+- it is **not printed** (`/think on` shows it dimmed if you want to watch),
+- it is **never stored** in the conversation history, which matters most: on a
+  local model the context budget is small, and reasoning is often longer than
+  the answer it produces.
+
+Set `config.STORE_THINKING = True` to keep it in history anyway, or
+`config.SHOW_THINKING = True` to have it shown from startup.
+
+The same stream filter hides the `<tool_call>` tag, so a model that explains
+itself and *then* calls a tool shows only the explanation.
+
+---
+
+## 10. Slash Commands
 
 The interactive terminal supports special slash commands to control options and inspect state:
 
@@ -274,11 +329,16 @@ The interactive terminal supports special slash commands to control options and 
 | `/mcp connect <name>` | Reconnect a single server |
 | `/mcp prompt <server> <name> [k=v]` | Run a prompt template the server offers |
 | `/mcp <on/off>` | Attach or detach every MCP server for this session |
+| `/perms` | Show the active tool permission rules |
+| `/perms reload` | Re-read the permission rule files |
+| `/perms allow <rule>` | Add an allow rule, e.g. `/perms allow run_cmd(git *)` |
+| `/perms deny <rule>` | Add a deny rule |
+| `/think <on/off>` | Show or hide a reasoning model's thinking |
 | `/exit` or `/quit` | Exit the application |
 
 ---
 
-## 9. Architecture
+## 11. Architecture
 
 The codebase is organized cleanly around the following components:
 
@@ -286,6 +346,7 @@ The codebase is organized cleanly around the following components:
 - **`ollama_client.py`**: Streaming chat turns, tool-call parsing, and the agent loop.
 - **`tools.py`**: Tool implementations and the dispatch table.
 - **`skills.py`**: Skill discovery, frontmatter parsing, and on-demand loading.
+- **`permissions.py`**: Permission rule loading, matching, and the allow/deny/ask decision.
 - **`mcp_client.py`**: MCP transports (stdio / streamable HTTP / SSE), the JSON-RPC session, tool and resource calls, and the prompt section they are advertised in.
 - **`websearch.py`**: Multi-source retrieval, page extraction, and BM25 reranking.
 - **`context.py`**: Token budgeting, tool-result trimming, and context compression.
@@ -293,6 +354,7 @@ The codebase is organized cleanly around the following components:
 - **`session.py`**: Session save/load/list and the persistent memory store.
 - **`systemprompt.py`**: System prompt builder, tool specification schemas (in JSON format), and context summarization prompt definitions.
 - **`skills/`**: Project-level skills. Personal skills live in `~/.localchat/skills/`.
+- **`.permissions.json`**: Project-level tool permission rules (see `.permissions.json.example`). Personal ones live in `~/.localchat/permissions.json`.
 - **`.mcp.json`**: Project-level MCP server declarations (see `.mcp.json.example`). Personal ones live in `~/.localchat/mcp.json`.
 - **`memory.json`**: Key-value JSON storage backing the long-term memory system.
 - **`sessions/`**: Session directory containing JSON transcript backups for conversation history. Each file is named after the session's title (slugified, e.g. `웹-검색-랭킹-개선.json`); untitled sessions fall back to a timestamp until a title exists.

@@ -159,10 +159,9 @@ Your goal is to be maximally helpful by leveraging your tools when needed.
   },
   {
     "name": "get_user_input",
-    "description": "Prompt the user for input and return their response.",
+    "description": "Ask the user one or more questions and get their answers. Each question is asked separately, with its own list of options; the user picks a number or types their own answer. Use this when a choice is genuinely the user's to make.",
     "parameters": {
-      "what_do": "what to do",
-      "prompt": ["The message to display to the user when asking for input.", "MessaThe message to display to the user when asking for inputge 2", "The message to display to the user when asking for input 3", "..."]
+      "questions": "A list of questions. Each item is an object: {\"question\": \"the question text\", \"options\": [\"choice 1\", \"choice 2\", \"choice 3\"]}. Give 2-4 options per question, or an empty list to ask for free text. Ask every question you need in ONE call - do not call this tool repeatedly."
     }
   },
   {

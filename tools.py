@@ -1,7 +1,6 @@
 import os
 import re
 import json
-import shlex
 import subprocess
 import shutil
 import hashlib
@@ -12,6 +11,7 @@ from config import S, TREE_SITTER_AVAILABLE, _TS_LANGUAGES, _EXT_TO_LANG
 from tui import _fmt_tool_call, _approval_prompt
 from skills import handle_use_skill
 import mcp_client
+import permissions
 from websearch import search_web as search_pipeline, strip_html
 
 if TREE_SITTER_AVAILABLE:
@@ -23,30 +23,34 @@ def handle_search_web(query: str) -> str:
 
 
 def safe_run_cmd(command_string: str) -> str:
-    try:
-        args = shlex.split(command_string)
-    except ValueError:
-        return "[Error] Invalid command format."
-    if not args: return "[Error] Empty command."
+    """Run a shell command. The approval prompt and permission rules are the gate.
 
-    base_cmd = args[0]
-    if base_cmd in config.ALLOWED_COMMANDS:
-        safe_executable_list = list(config.ALLOWED_COMMANDS[base_cmd])
-        if len(args) > 1:
-            safe_executable_list.extend(args[1:])
-    else:
-        safe_executable_list = args
+    The command is handed to the shell as written. It used to be split with
+    `shlex` and then passed to `shell=True`, which mangled Windows paths (shlex
+    eats backslashes) and left the shell to re-quote a list it had never been
+    given - so `run_cmd` and what actually ran could differ.
+    """
+    command = (command_string or "").strip()
+    if not command:
+        return "[Error] Empty command."
 
-    cmd_display = ' '.join(safe_executable_list)
-    approved = _approval_prompt("Run Command", [("command", cmd_display)])
-    if not approved: return "[System] User denied command execution."
+    approved = _approval_prompt("Run Command", [("command", command)],
+                                rule=f"run_cmd({command})")
+    if not approved:
+        return "[System] User denied command execution."
 
     try:
-        result = subprocess.run(safe_executable_list, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, shell=True)
-        output = result.stdout if result.returncode == 0 else result.stderr
-        return output.strip()
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", check=False, shell=True)
     except Exception as e:
         return f"[Error] Failed to execute command: {e}"
+
+    parts = [stream.strip() for stream in (result.stdout, result.stderr) if stream and stream.strip()]
+    output = "\n".join(parts)
+    if result.returncode != 0:
+        header = f"[Error] Command failed (exit code {result.returncode})."
+        return f"{header}\n{output}" if output else header
+    return output or "(the command produced no output)"
 
 
 _HASHLINE_PATTERN = re.compile(r'^\d+:[0-9a-f]{2}\|')
@@ -100,7 +104,8 @@ def handle_read_file(filepath: str) -> str:
 def handle_write_file(filepath: str, content: str) -> str:
     content = _strip_hashlines(content)
     preview = content if len(content) <= 200 else content[:200] + "...[truncated]"
-    approved = _approval_prompt("Write File", [("path", filepath), ("preview", preview)])
+    approved = _approval_prompt("Write File", [("path", filepath), ("preview", preview)],
+                                rule=f"write_file({filepath})")
     if not approved: return "[System] User denied file write."
     try:
         with open(filepath, "w", encoding="utf-8") as f:
@@ -126,7 +131,8 @@ def handle_edit_file(filepath: str, old_content: str, new_content: str) -> str:
 
     old_preview = old_content[:150] + ('...' if len(old_content) > 150 else '')
     new_preview = new_content[:150] + ('...' if len(new_content) > 150 else '')
-    approved = _approval_prompt("Edit File", [("path", filepath), ("from", old_preview), ("to", new_preview)])
+    approved = _approval_prompt("Edit File", [("path", filepath), ("from", old_preview), ("to", new_preview)],
+                                rule=f"edit_file({filepath})")
     if not approved: return "[System] User denied file edit."
 
     new_file_content = file_content.replace(old_content, new_content, 1)
@@ -138,7 +144,7 @@ def handle_edit_file(filepath: str, old_content: str, new_content: str) -> str:
         return f"[Error] Cannot write file: {e}"
 
 def handle_delete_file(filepath: str) -> str:
-    approved = _approval_prompt("Delete File", [("path", filepath)])
+    approved = _approval_prompt("Delete File", [("path", filepath)], rule=f"delete_file({filepath})")
     if not approved: return "[System] User denied file deletion."
     try:
         os.remove(filepath)
@@ -147,7 +153,7 @@ def handle_delete_file(filepath: str) -> str:
         return f"[Error] Cannot delete file: {e}"
 
 def handle_copy_file(src: str, dst: str) -> str:
-    approved = _approval_prompt("Copy File", [("from", src), ("to", dst)])
+    approved = _approval_prompt("Copy File", [("from", src), ("to", dst)], rule=f"copy_file({src})")
     if not approved: return "[System] User denied file copy."
     try:
         shutil.copy2(src, dst)
@@ -156,7 +162,7 @@ def handle_copy_file(src: str, dst: str) -> str:
         return f"[Error] Cannot copy file: {e}"
 
 def handle_create_dir(dirpath: str) -> str:
-    approved = _approval_prompt("Create Directory", [("path", dirpath)])
+    approved = _approval_prompt("Create Directory", [("path", dirpath)], rule=f"create_dir({dirpath})")
     if not approved: return "[System] User denied directory creation."
     try:
         os.makedirs(dirpath, exist_ok=True)
@@ -179,23 +185,111 @@ def handle_get_url(url: str) -> str:
     except Exception as e:
         return f"[Error] Cannot fetch URL: {e}"
 
-def handle_get_input(what_do: str, prompts: list) -> str:
-    print(f"\n  {S.INFO}?{S.R} {S.BOLD}Input Required{S.R}")
-    print(f"  {S.MUTED}\u2502{S.R}  {what_do}\n  {S.MUTED}\u2502{S.R}")
-    prompts = prompts if isinstance(prompts, list) else ([prompts] if prompts else [])
-    for i, p in enumerate(prompts):
-        print(f"  {S.MUTED}\u2502{S.R}  {S.ACCENT}{i+1}.{S.R} {p}")
-    custom_idx = len(prompts) + 1
+def _as_option_list(value) -> list[str]:
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _normalise_questions(what_do, prompt, questions) -> list[dict]:
+    """Accept every shape a model might send and return [{question, options}].
+
+    The preferred shape is a list of questions, each with its own options. The
+    old single-question form (`what_do` plus a flat `prompt` list of choices) is
+    still understood, because that is what half the models will keep emitting.
+    """
+    items = []
+
+    if isinstance(questions, dict):
+        questions = [questions]
+    if isinstance(questions, list):
+        for entry in questions:
+            if isinstance(entry, dict):
+                text = str(entry.get("question") or entry.get("prompt")
+                           or entry.get("what_do") or "").strip()
+                options = _as_option_list(entry.get("options") or entry.get("choices")
+                                          or entry.get("answers"))
+            else:
+                text, options = str(entry).strip(), []
+            if text:
+                items.append({"question": text, "options": options})
+    elif isinstance(questions, str) and questions.strip():
+        items.append({"question": questions.strip(), "options": []})
+
+    if items:
+        return items
+
+    # The old form: one question in `what_do`, its choices in `prompt`.
+    text = str(what_do or "").strip()
+    options = _as_option_list(prompt)
+    if not text and options:
+        text, options = options[0], options[1:]
+    if text:
+        items.append({"question": text, "options": options})
+    return items
+
+
+def _ask_one(question: str, options: list[str], index: int, total: int) -> str | None:
+    """Show one question with its own choices. None means the user gave up."""
+    counter = f" {S.MUTED}({index}/{total}){S.R}" if total > 1 else ""
+    print(f"\n  {S.INFO}?{S.R} {S.BOLD}Input Required{S.R}{counter}")
+    print(f"  {S.MUTED}\u2502{S.R}  {question}\n  {S.MUTED}\u2502{S.R}")
+    for i, option in enumerate(options, 1):
+        print(f"  {S.MUTED}\u2502{S.R}  {S.ACCENT}{i}.{S.R} {option}")
+    custom_idx = len(options) + 1
     print(f"  {S.MUTED}\u2502{S.R}  {S.GRAY}{custom_idx}.  Custom Input{S.R}\n  {S.MUTED}\u2502{S.R}")
+
     while True:
         try:
-            user_input_str = input(f"  {S.MUTED}\u2570\u2500{S.R} {S.INFO}Chosen{S.R} {S.MUTED}(1~{custom_idx}){S.R} {S.INFO}\u203a{S.R} ").strip()
-            if not user_input_str: continue
-            user_input = int(user_input_str)
-            if 1 <= user_input <= len(prompts): return str(prompts[user_input - 1])
-            elif user_input == custom_idx: return input(f"  {S.INFO}  \u203a{S.R} ").strip()
-            else: print(f"  {S.ERR}    Input 1 to {custom_idx} number.{S.R}")
-        except ValueError: print(f"  {S.ERR}    Input correct number.{S.R}")
+            if options:
+                raw = input(f"  {S.MUTED}\u2570\u2500{S.R} {S.INFO}Chosen{S.R} "
+                            f"{S.MUTED}(1~{custom_idx}){S.R} {S.INFO}\u203a{S.R} ").strip()
+                if not raw:
+                    continue
+                choice = int(raw)
+                if 1 <= choice <= len(options):
+                    return options[choice - 1]
+                if choice == custom_idx:
+                    return input(f"  {S.INFO}  \u203a{S.R} ").strip()
+                print(f"  {S.ERR}    Input 1 to {custom_idx} number.{S.R}")
+            else:
+                answer = input(f"  {S.MUTED}\u2570\u2500{S.R} {S.INFO}\u203a{S.R} ").strip()
+                if answer:
+                    return answer
+        except ValueError:
+            print(f"  {S.ERR}    Input correct number.{S.R}")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+
+
+def handle_get_input(what_do="", prompt=None, questions=None) -> str:
+    items = _normalise_questions(what_do, prompt, questions)
+    if not items:
+        return "[Error] No question was given. Pass 'questions': [{'question': ..., 'options': [...]}]."
+
+    answers = []
+    for i, item in enumerate(items, 1):
+        answer = _ask_one(item["question"], item["options"], i, len(items))
+        if answer is None:
+            if not answers:
+                return "[System] User cancelled the questions without answering."
+            return ("[System] User stopped after answering the first "
+                    f"{len(answers)} question(s):\n" + _format_answers(answers))
+        answers.append((item["question"], answer))
+
+    if len(answers) == 1:
+        return answers[0][1]
+    return _format_answers(answers)
+
+
+def _format_answers(answers: list[tuple[str, str]]) -> str:
+    lines = []
+    for i, (question, answer) in enumerate(answers, 1):
+        lines.append(f"{i}. {question}\n   -> {answer}")
+    return "\n".join(lines)
 
 def handle_list_dir(dirpath: str) -> str:
     if not os.path.exists(dirpath):
@@ -323,7 +417,7 @@ def handle_call_api(url: str, method: str, headers: str = "", payload: str = "")
     if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
         return f"[Error] Unsupported HTTP method: {method}"
 
-    approved = _approval_prompt("API Call", [("URL", url), ("Method", method)])
+    approved = _approval_prompt("API Call", [("URL", url), ("Method", method)], rule=f"call_api({url})")
     if not approved:
         return "[System] User denied API call."
 
@@ -734,8 +828,6 @@ def handle_read_mcp_resource(uri: str, server_name: str = "") -> str:
 
 
 def dispatch_tool(function_name: str, arguments: dict) -> str | None:
-    from session import (handle_write_memory, handle_get_memory_list,
-                         handle_read_memory, handle_delete_memory, handle_edit_memory)
     # Small models sometimes emit "arguments" as a JSON string rather than an
     # object. Normalise once here so no handler has to defend against it.
     if isinstance(arguments, str):
@@ -745,7 +837,25 @@ def dispatch_tool(function_name: str, arguments: dict) -> str | None:
             arguments = {}
     if not isinstance(arguments, dict):
         arguments = {}
+
     _fmt_tool_call(function_name, arguments)
+
+    verdict, rule = permissions.decide(function_name, arguments)
+    if verdict == "deny":
+        print(f"  {S.ERR}✗ Blocked by permission rule: {rule}{S.R}")
+        return (f"[System] '{function_name}' is blocked by your permission rules "
+                f"(rule: {rule}). Do not retry it; tell the user it is blocked.")
+
+    config.POLICY_AUTO_ALLOW = verdict == "allow"
+    try:
+        return _run_tool(function_name, arguments)
+    finally:
+        config.POLICY_AUTO_ALLOW = False
+
+
+def _run_tool(function_name: str, arguments: dict) -> str | None:
+    from session import (handle_write_memory, handle_get_memory_list,
+                         handle_read_memory, handle_delete_memory, handle_edit_memory)
     if function_name == "search_web": return handle_search_web(arguments.get("query", ""))
     if function_name == "run_cmd": return safe_run_cmd(arguments.get("command", ""))
     if function_name == "read_file": return handle_read_file(arguments.get("filepath", ""))
@@ -763,7 +873,7 @@ def dispatch_tool(function_name: str, arguments: dict) -> str | None:
     if function_name == "read_memory": return handle_read_memory(arguments.get("id", ""))
     if function_name == "delete_memory": return handle_delete_memory(arguments.get("id", ""))
     if function_name == "edit_memory": return handle_edit_memory(arguments.get("id", ""), arguments.get("new_content", ""))
-    if function_name == "get_user_input": return handle_get_input(arguments.get("what_do", ""), arguments.get("prompt", []))
+    if function_name == "get_user_input": return handle_get_input(arguments.get("what_do", ""), arguments.get("prompt", []), arguments.get("questions"))
     if function_name == "search_in_file": return handle_search_in_file(arguments.get("query", ""), arguments.get("is_regex", False))
     if function_name == "get_system_info": return handle_get_system_info()
     if function_name == "call_api": return handle_call_api(arguments.get("url", ""), arguments.get("method", ""), arguments.get("headers",""), arguments.get("payload",""))

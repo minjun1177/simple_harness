@@ -90,15 +90,6 @@ MODEL = "gemma4:e4b"
 
 CURRENT_OS = platform.system()
 
-ALLOWED_COMMANDS = {
-    "cmd": ["cmd"],
-    "dir": ["dir"],
-    "ls": ["ls", "-l"],
-    "pwd": ["pwd"],
-    "whoami": ["whoami"],
-    "echo": ["echo"],
-}
-
 SYSTEM_PROMPT = syp()
 
 FILE_MAX_DISPLAY_LENGTH = 1000
@@ -141,6 +132,19 @@ MAX_TOOL_CALLS = 10
 PLANMODE = False
 
 LOADED_SKILLS = []
+
+# --- tool permissions --------------------------------------------------------
+# Rules live in .permissions.json / ~/.localchat/permissions.json. Empty rules
+# behave exactly as before: the approval prompt decides.
+PERMISSIONS_ENABLED = True
+POLICY_AUTO_ALLOW = False       # set per call by dispatch_tool; not a user setting
+
+# --- reasoning ("thinking") models -------------------------------------------
+# Reasoning models wrap their scratch work in <think> tags, or return it in
+# Ollama's separate `thinking` field. It is never the answer, so by default it
+# is neither shown nor kept in the conversation history.
+SHOW_THINKING = False
+STORE_THINKING = False
 
 # --- MCP (Model Context Protocol) -------------------------------------------
 # Servers are declared in ./.mcp.json (project) or ~/.localchat/mcp.json (user).

@@ -7,14 +7,15 @@ import ollama
 import config
 import skills
 import mcp_client
+import permissions
 from config import S
 from systemprompt import systemprompt as _build_system_prompt
-from tui import _welcome, _show_help, _show_skills, _show_mcp, _fmt_tool_call, _fmt_tool_result, display_usage_graph, _hr
+from tui import _welcome, _show_help, _show_skills, _show_mcp, _show_perms, _fmt_tool_call, _fmt_tool_result, display_usage_graph, _hr
 from renderer import _render_full
 from session import (save_session, load_session, list_sessions, find_sessions,
                      rename_session, generate_session_title, clean_title)
 from context import manage_context
-from ollama_client import chat_turn, parse_tool_call
+from ollama_client import chat_turn, parse_tool_calls, strip_thinking
 
 
 def _compose_system_prompt(summary: str = "") -> str:
@@ -86,7 +87,7 @@ async def main() -> None:
 
     if config.PROMPT_TOOLKIT_AVAILABLE:
         from config import SlashCommandCompleter, PromptSession, FileHistory, ANSI
-        completer = SlashCommandCompleter(['/help', '/clear', '/usage', '/model', '/models', '/exit', '/quit', '/sessions', '/load', '/title', '/autotitle', '/automode', '/fullcontent', '/record', '/export', '/system', '/planmode', '/skills', '/skill', '/mcp'])
+        completer = SlashCommandCompleter(['/help', '/clear', '/usage', '/model', '/models', '/exit', '/quit', '/sessions', '/load', '/title', '/autotitle', '/automode', '/fullcontent', '/record', '/export', '/system', '/planmode', '/skills', '/skill', '/mcp', '/perms', '/think'])
         session_pt = PromptSession(
             history=FileHistory('.chat_history'),
             completer=completer,
@@ -243,11 +244,11 @@ async def main() -> None:
                             continue
                         print(f"  {S.USER_CLR}{S.BOLD}❯{S.R} {msg['content']}")
                     elif msg["role"] == "assistant":
-                        parsed = parse_tool_call(msg["content"])
-                        if parsed:
-                            _fmt_tool_call(parsed[0], parsed[1])
-                            
-                        c = re.sub(r'<tool_call>.*?</tool_call>', '', msg["content"], flags=re.DOTALL).strip()
+                        for name, arguments in parse_tool_calls(msg["content"], quiet=True):
+                            _fmt_tool_call(name, arguments)
+
+                        c = re.sub(r'<tool_call>.*?</tool_call>', '', msg["content"], flags=re.DOTALL)
+                        c = strip_thinking(c)
                         if c:
                             print(_render_full(c))
                             print()
@@ -318,7 +319,8 @@ async def main() -> None:
                     for m in messages:
                         if m["role"] == "system": continue
                         role_name = "User" if m["role"] == "user" else "Assistant"
-                        c = re.sub(r'<tool_call>.*?</tool_call>', '', m["content"], flags=re.DOTALL).strip()
+                        c = re.sub(r'<tool_call>.*?</tool_call>', '', m["content"], flags=re.DOTALL)
+                        c = strip_thinking(c)
                         if c: f.write(f"### {role_name}\n\n{c}\n\n")
                 print(f"  {S.OK}✓ Conversation exported to {filename}{S.R}\n")
             except Exception as e:
@@ -452,6 +454,42 @@ async def main() -> None:
             if not injected:
                 continue
             user_input = injected
+        if cmd == "/perms" or cmd.startswith("/perms "):
+            parts = user_input.split(" ", 2)
+            sub = parts[1].lower() if len(parts) > 1 else ""
+            argument = parts[2].strip() if len(parts) > 2 else ""
+
+            if not sub:
+                _show_perms()
+            elif sub in ("reload", "refresh"):
+                permissions.load_rules(force=True)
+                allowed = len(permissions.rules_for("allow"))
+                denied = len(permissions.rules_for("deny"))
+                print(f"  {S.OK}✓ Permission rules reloaded: {allowed} allow, {denied} deny.{S.R}\n")
+                for problem in permissions.errors:
+                    print(f"  {S.ERR}✗ {problem}{S.R}")
+            elif sub in ("allow", "deny"):
+                if not argument:
+                    print(f"  {S.ERR}✗ Usage: /perms {sub} <rule>   e.g. /perms {sub} run_cmd(git *){S.R}\n")
+                else:
+                    saved, where = permissions.add_rule(argument, sub)
+                    if saved:
+                        print(f"  {S.OK}✓ {sub}: {argument}{S.R} {S.MUTED}({where}){S.R}\n")
+                    else:
+                        print(f"  {S.ERR}✗ Could not save the rule: {where}{S.R}\n")
+            else:
+                print(f"  {S.ERR}✗ Usage: /perms [reload|allow <rule>|deny <rule>]{S.R}\n")
+            continue
+        if cmd == "/think" or cmd.startswith("/think "):
+            parts = cmd.split(" ", 1)
+            if len(parts) < 2 or parts[1].strip() not in ("on", "off"):
+                state = "shown" if config.SHOW_THINKING else "hidden"
+                print(f"  {S.ERR}✗ Usage: /think <on/off>  (a model's reasoning is currently {state}){S.R}\n")
+                continue
+            config.SHOW_THINKING = parts[1].strip() == "on"
+            print(f"  {S.INFO}✓ Model reasoning is {'SHOWN' if config.SHOW_THINKING else 'HIDDEN'}."
+                  f"{S.MUTED} It is never kept in the conversation history.{S.R}\n")
+            continue
 
         if config.PLANMODE:
             if config.AUTO_ALLOW:

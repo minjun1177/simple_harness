@@ -112,6 +112,10 @@ def _show_help():
         ("/mcp tools [name]", "List the tools an MCP server exposes"),
         ("/mcp resources [name]", "List MCP resources"),
         ("/mcp prompt <server> <name>", "Insert an MCP prompt into the conversation"),
+        ("/perms", "Show the tool permission rules"),
+        ("/perms reload", "Re-read the permission rule files"),
+        ("/perms allow|deny <rule>", "Add a rule, e.g. /perms allow run_cmd(git *)"),
+        ("/think <on/off>", "Show or hide a reasoning model's thinking"),
     ]
     print()
     print(f"  {S.BOLD}{S.ACCENT}Commands{S.R}")
@@ -144,6 +148,51 @@ def _show_skills():
             print(f"  {S.MUTED}│{S.R}  {S.MUTED}tools: {', '.join(skill['allowed_tools'])}{S.R}")
         print(f"  {S.MUTED}╰─ {skill['path']}{S.R}")
     print(f"\n  {S.GRAY}Load one with {S.ACCENT}/skill <name>{S.GRAY}, or let the model call {S.ACCENT}use_skill{S.GRAY} on its own.{S.R}\n")
+
+
+def _show_perms():
+    """`/perms` - the rules that decide what runs without asking."""
+    import permissions
+
+    permissions.load_rules()
+    print()
+    print(f"  {S.BOLD}{S.ACCENT}Tool Permissions{S.R}")
+    print(f"  {_hr(width=60)}")
+
+    if not config.PERMISSIONS_ENABLED:
+        print(f"  {S.WARN}Permission rules are off (config.PERMISSIONS_ENABLED = False).{S.R}\n")
+        return
+
+    for problem in permissions.errors:
+        print(f"  {S.ERR}✗ {problem}{S.R}")
+
+    denied = permissions.rules_for("deny")
+    allowed = permissions.rules_for("allow")
+
+    if denied:
+        print(f"  {S.ERR}deny{S.R} {S.MUTED}(never runs, never asks){S.R}")
+        for rule, source in denied:
+            print(f"  {S.MUTED}│{S.R}  {S.WHITE}{rule}{S.R}")
+    if allowed:
+        if denied:
+            print(f"  {S.MUTED}│{S.R}")
+        print(f"  {S.OK}allow{S.R} {S.MUTED}(runs without asking){S.R}")
+        for rule, source in allowed:
+            print(f"  {S.MUTED}│{S.R}  {S.WHITE}{rule}{S.R}")
+
+    if not denied and not allowed:
+        print(f"  {S.GRAY}No rules. Every guarded tool asks for approval.{S.R}")
+        print(f"  {S.GRAY}Answer {S.ACCENT}a{S.GRAY} at an approval prompt to add one, or write:{S.R}")
+        for source, path in permissions.config_paths()[::2]:
+            print(f"  {S.GRAY}•{S.R} {path} {S.MUTED}({source}){S.R}")
+    else:
+        print(f"  {S.MUTED}╰─{S.R}")
+        for path in permissions.rule_sources():
+            print(f"  {S.MUTED}   {path}{S.R}")
+
+    state = "OFF" if config.AUTO_ALLOW else "ON"
+    print(f"\n  {S.GRAY}Approval prompts are {state}"
+          f"{S.MUTED} (/automode toggles them for everything at once){S.R}\n")
 
 
 def _plural(n: int, noun: str) -> str:
@@ -260,8 +309,14 @@ def _fmt_tool_result(name: str, result: str):
         print(f"  {S.OK}╰─ done{S.R}")
 
 
-def _approval_prompt(action_label: str, details: list[tuple[str, str]]) -> bool:
+def _approval_prompt(action_label: str, details: list[tuple[str, str]], rule: str = "") -> bool:
     from renderer import _disp_width
+    import permissions
+
+    # A permission rule already said yes, or /automode is on.
+    if config.AUTO_ALLOW or config.POLICY_AUTO_ALLOW:
+        return True
+
     print()
     print(f"  {S.WARN}⚠  {S.BOLD}Approval Required{S.R}")
 
@@ -287,12 +342,25 @@ def _approval_prompt(action_label: str, details: list[tuple[str, str]]) -> bool:
                 print(f"  {S.WARN}│{S.R}  {pad_left}{vl}{pad}{S.WARN}│{S.R}")
     print(f"  {S.WARN}╰{'─' * w}╯{S.R}")
 
+    if rule:
+        print(f"  {S.MUTED}a = always allow {S.GRAY}{rule}{S.MUTED} (saved to .permissions.json){S.R}")
+        choices = f"{S.MUTED}[{S.OK}y{S.MUTED}/{S.ERR}n{S.MUTED}/{S.INFO}a{S.MUTED}]{S.R}"
+    else:
+        choices = f"{S.MUTED}[{S.OK}y{S.MUTED}/{S.ERR}n{S.MUTED}]{S.R}"
+
     try:
-        if config.AUTO_ALLOW is True: return True
-        answer = input(f"  {S.WARN}Allow? {S.MUTED}[{S.OK}y{S.MUTED}/{S.ERR}n{S.MUTED}]{S.R} {S.WARN}›{S.R} ").strip().lower()
+        answer = input(f"  {S.WARN}Allow? {choices} {S.WARN}›{S.R} ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         print()
         return False
+
+    if answer == "a" and rule:
+        saved, where = permissions.add_rule(rule, "allow")
+        if saved:
+            print(f"  {S.OK}✓ Always allowing {rule}{S.R} {S.MUTED}({where}){S.R}")
+        else:
+            print(f"  {S.ERR}✗ Could not save the rule: {where}{S.R}")
+        return True
     return answer == "y"
 
 
