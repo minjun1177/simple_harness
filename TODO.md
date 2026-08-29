@@ -14,3 +14,4 @@
 * [x] Reasoning models: keep <think> off the screen and out of the history
 * [x] Tool permissions (.permissions.json allow/deny, 'a' at the prompt)
 * [x] Several tool calls in one turn
+* [x] Repair console input that arrives as surrogate escapes (Korean input on a cp949 console)

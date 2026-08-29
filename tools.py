@@ -252,10 +252,10 @@ def _ask_one(question: str, options: list[str], index: int, total: int) -> str |
                 if 1 <= choice <= len(options):
                     return options[choice - 1]
                 if choice == custom_idx:
-                    return input(f"  {S.INFO}  \u203a{S.R} ").strip()
+                    return config.safe_text(input(f"  {S.INFO}  \u203a{S.R} ").strip())
                 print(f"  {S.ERR}    Input 1 to {custom_idx} number.{S.R}")
             else:
-                answer = input(f"  {S.MUTED}\u2570\u2500{S.R} {S.INFO}\u203a{S.R} ").strip()
+                answer = config.safe_text(input(f"  {S.MUTED}\u2570\u2500{S.R} {S.INFO}\u203a{S.R} ").strip())
                 if answer:
                     return answer
         except ValueError:

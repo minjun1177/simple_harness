@@ -190,6 +190,87 @@ def _visible_len(text: str) -> int:
     return len(re.sub(r'\033\[[^m]*m', '', text))
 
 
+_SURROGATE_PATTERN = re.compile(r'[\ud800-\udfff]')
+
+
+def _console_encodings() -> list[str]:
+    """What the console might actually be handing over, most likely first.
+
+    UTF-8 is tried first on purpose: a legacy code page will happily decode
+    almost any byte into mojibake, so guessing it before UTF-8 would quietly
+    corrupt text that was fine.
+    """
+    candidates = ["utf-8"]
+    if CURRENT_OS == "Windows":
+        try:
+            import ctypes
+            for code_page in (ctypes.windll.kernel32.GetConsoleCP(),
+                              ctypes.windll.kernel32.GetACP()):
+                if code_page:
+                    candidates.append(f"cp{code_page}")
+        except Exception:
+            pass
+    try:
+        import locale
+        preferred = locale.getpreferredencoding(False)
+        if preferred:
+            candidates.append(preferred)
+    except Exception:
+        pass
+
+    seen, ordered = set(), []
+    for encoding in candidates:
+        key = encoding.lower().replace("-", "")
+        if key not in seen:
+            seen.add(key)
+            ordered.append(encoding)
+    return ordered
+
+
+def safe_text(text):
+    """Repair console input that arrived as surrogate escapes.
+
+    In Python's UTF-8 mode `sys.stdin` is read as UTF-8 with the
+    `surrogateescape` error handler. On a Windows console that hands over cp949
+    (or any other legacy code page) bytes, Korean input therefore comes back as
+    lone surrogates. Those cannot be encoded again, so the moment such a string
+    enters the conversation both `json.dump` and the request to Ollama raise
+    `UnicodeEncodeError` - and every later turn fails too, because the bad
+    string is still sitting in the history.
+
+    The escaped bytes are not lost: encoding them back recovers the original
+    bytes, which then decode properly.
+    """
+    if not isinstance(text, str) or not _SURROGATE_PATTERN.search(text):
+        return text
+    try:
+        raw = text.encode("utf-8", "surrogateescape")
+    except UnicodeEncodeError:
+        return _SURROGATE_PATTERN.sub("�", text)
+
+    for encoding in _console_encodings():
+        try:
+            return raw.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return _SURROGATE_PATTERN.sub("�", text)
+
+
+def repair_messages(messages: list[dict]) -> list[dict]:
+    """Repair the conversation in place so it can always be encoded.
+
+    Repairing rather than copying is deliberate: a broken string left in the
+    history would fail on every later turn as well, and the conversation would
+    stay stuck until it was cleared.
+    """
+    for message in messages:
+        content = message.get("content", "")
+        repaired = safe_text(content)
+        if repaired is not content:
+            message["content"] = repaired
+    return messages
+
+
 def _hr(char: str = "─", width: int = 0, style: str = S.MUTED) -> str:
     w = width or max(1, tw() - 6)
     return f"{style}{char * w}{S.R}"

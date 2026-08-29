@@ -301,15 +301,80 @@ async def call_ollama(client: ollama.AsyncClient, messages: list[dict]) -> str:
     return full_text
 
 
-def _decode_tool_call(blob: str, quiet: bool) -> tuple[str, dict] | None:
+_CLOSERS = {"{": "}", "[": "]"}
+
+
+def _json_tail_state(blob: str) -> tuple[list[str], bool]:
+    """Walk a JSON fragment and report (unclosed brackets, still inside a string)."""
+    depth: list[str] = []
+    in_string = False
+    escaped = False
+    for char in blob:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in _CLOSERS:
+            depth.append(char)
+        elif char in ("}", "]"):
+            if depth:
+                depth.pop()
+    return depth, in_string
+
+
+def _decode_repaired(blob: str, quiet: bool, complete: bool):
+    """Recover a tool call whose brackets the model failed to close.
+
+    Small models are good at escaping a long payload and then miscounting the
+    braces around it - one missing `}` at the very end throws away a whole
+    generation. That is safe to repair only when the model actually finished:
+    it closed its last string *and* wrote `</tool_call>`. Without both, the
+    reply was cut off, and closing the brackets would invent a call with
+    whatever arguments happened to arrive - an empty `content`, say, which
+    `write_file` would happily write over a real file.
+    """
+    depth, in_string = _json_tail_state(blob)
+    if in_string or not complete:
+        if not quiet:
+            print(f"  {S.ERR}✗ The tool call was cut off before it finished; "
+                  f"nothing was run.{S.R}")
+            print(f"  {S.MUTED}  The reply probably hit num_predict "
+                  f"({config.NUM_PREDICT}). Raise it in config.py.{S.R}")
+        return None
+
+    if depth:
+        closers = "".join(_CLOSERS[bracket] for bracket in reversed(depth))
+        try:
+            repaired, _ = json.JSONDecoder().raw_decode(blob + closers)
+        except json.JSONDecodeError:
+            pass
+        else:
+            if not quiet:
+                print(f"  {S.WARN}⚠ The model left {len(closers)} bracket(s) unclosed "
+                      f"('{closers}'); repaired and continuing.{S.R}")
+            return repaired
+
+    if not quiet:
+        print(f"  {S.ERR}✗ AI generated invalid JSON for the tool call.{S.R}")
+    return None
+
+
+def _decode_tool_call(blob: str, quiet: bool, complete: bool = True) -> tuple[str, dict] | None:
+    blob = blob.strip()
     try:
         # raw_decode stops at the end of the first JSON value, so a missing or
         # duplicated closing tag does not matter.
-        tool_data, _ = json.JSONDecoder().raw_decode(blob.strip())
+        tool_data, _ = json.JSONDecoder().raw_decode(blob)
     except json.JSONDecodeError:
-        if not quiet:
-            print(f"  {S.ERR}✗ AI generated invalid JSON for the tool call.{S.R}")
-        return None
+        tool_data = _decode_repaired(blob, quiet, complete)
+        if tool_data is None:
+            return None            # _decode_repaired has already said why
 
     if not isinstance(tool_data, dict) or not tool_data.get("name"):
         if not quiet:
@@ -326,11 +391,15 @@ def parse_tool_calls(response_text: str, quiet: bool = False) -> list[tuple[str,
     the model is running on your own GPU.
     """
     calls = []
+    closed_block = False
     for match in re.finditer(r"<tool_call>(.*?)</tool_call>", response_text, re.DOTALL):
+        closed_block = True
         call = _decode_tool_call(match.group(1), quiet)
         if call:
             calls.append(call)
-    if calls:
+    if calls or closed_block:
+        # A properly closed block was already judged on its own merits; retrying
+        # it as an unterminated one would only report the same failure twice.
         return calls
 
     start = response_text.find(TOOL_CALL_TAG)
@@ -339,13 +408,16 @@ def parse_tool_calls(response_text: str, quiet: bool = False) -> list[tuple[str,
     # The model opened a tool call and never closed it. The tag is hidden from
     # the user either way, so read the JSON that follows rather than letting the
     # turn die silently.
-    call = _decode_tool_call(response_text[start + len(TOOL_CALL_TAG):], quiet)
+    call = _decode_tool_call(response_text[start + len(TOOL_CALL_TAG):], quiet, complete=False)
     return [call] if call else []
 
 
 async def chat_turn(client: ollama.AsyncClient, messages: list[dict]) -> str:
     call_count = 0
     while True:
+        # Text a console mangled cannot be encoded, so one bad character would
+        # fail this request and every later one. Repair it before it is sent.
+        config.repair_messages(messages)
         if call_count > 0 and call_count % config.MAX_TOOL_CALLS == 0:
             print(f"\n  {S.WARN}⚠  Tool call limit ({config.MAX_TOOL_CALLS}) reached.{S.R}")
             try:

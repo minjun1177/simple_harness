@@ -100,6 +100,9 @@ async def main() -> None:
                 user_input = user_input.strip()
             else:
                 user_input = input(f"  {S.USER_CLR}{S.BOLD}❯{S.R} ").strip()
+            # A console that hands back surrogate escapes would otherwise poison
+            # the history: every later save and request would raise.
+            user_input = config.safe_text(user_input)
         except (EOFError, KeyboardInterrupt):
             mcp_client.shutdown()
             print(f"\n\n  {S.GRAY}Goodbye!{S.R}\n")
@@ -507,6 +510,7 @@ async def main() -> None:
             user_input += plan_prompt
 
         messages.append({"role": "user", "content": user_input})
+        config.repair_messages(messages)
         current_session_id = save_session(messages, current_session_id)
 
         try:

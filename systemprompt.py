@@ -161,7 +161,7 @@ Your goal is to be maximally helpful by leveraging your tools when needed.
     "name": "get_user_input",
     "description": "Ask the user one or more questions and get their answers. Each question is asked separately, with its own list of options; the user picks a number or types their own answer. Use this when a choice is genuinely the user's to make.",
     "parameters": {
-      "questions": "A list of questions. Each item is an object: {\"question\": \"the question text\", \"options\": [\"choice 1\", \"choice 2\", \"choice 3\"]}. Give 2-4 options per question, or an empty list to ask for free text. Ask every question you need in ONE call - do not call this tool repeatedly."
+      "questions": "A list of questions. Each item is an object: {\\"question\\": \\"the question text\\", \\"options\\": [\\"choice 1\\", \\"choice 2\\", \\"choice 3\\"]}. Give 2-4 options per question, or an empty list to ask for free text. Do NOT add a 'custom', 'other', 'Custom Input' or '직접 입력' option yourself - a Custom Input choice is always appended automatically, so adding one duplicates it. List only the real alternatives. Ask every question you need in ONE call - do not call this tool repeatedly."
     }
   },
   {
@@ -183,7 +183,7 @@ Your goal is to be maximally helpful by leveraging your tools when needed.
     "parameters": {
       "url": "The full URL of the API endpoint.",
       "method": "HTTP method: GET, POST, PUT, PATCH, or DELETE.",
-      "headers": "(Optional) JSON string of HTTP headers. e.g., {\"Authorization\": \"Bearer token\", \"Content-Type\": \"application/json\"}",
+      "headers": "(Optional) JSON string of HTTP headers. e.g., {\\"Authorization\\": \\"Bearer token\\", \\"Content-Type\\": \\"application/json\\"}",
       "payload": "(Optional) JSON string of the request body for POST/PUT/PATCH requests."
     }
   },

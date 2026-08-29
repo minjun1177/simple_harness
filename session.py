@@ -143,7 +143,7 @@ def save_session(messages: list[dict], session_id: str) -> str:
         "model": config.MODEL,
         "persona": config.CUSTOM_PERSONA,
         "token_history": config.token_history,
-        "messages": messages,
+        "messages": config.repair_messages(messages),
         "updated_at": datetime.datetime.now().isoformat()
     }
 
