@@ -1,11 +1,13 @@
 import platform
 import os
 
+from skills import skills_catalog_prompt
+from mcp_client import mcp_tools_prompt
+
 CURRENT_OS = platform.system()
 
 def load_context_file() -> str:
-    """Load CONVENTIONS.md or .clauderc if present to append to system prompt."""
-    for filename in ["CONVENTIONS.md", ".clauderc"]:
+    for filename in ["CONVENTIONS.md", ".clauderc", "AGENTS.md", "CLAUDE.md"]:
         if os.path.exists(filename):
             try:
                 with open(filename, "r", encoding="utf-8") as f:
@@ -19,6 +21,15 @@ def summarizeprompt() -> str:
   Please summarize the core context, important facts, and ongoing tasks from the following conversation history. Keep it concise but comprehensive so that you can continue the work smoothly. Respond ONLY with the summary.\n\n
 """
 
+def titleprompt() -> str:
+    return """
+  Read the conversation below and write a short title for it, in the language the user writes in.
+  Rules: 2~6 words, no quotes, no trailing punctuation, no prefix like "Title:". Describe the topic, not the roles.
+  Respond ONLY with the title itself on a single line.
+
+
+"""
+
 def systemprompt() -> str:
     base_prompt = """\
 You are a powerful AI assistant running on **""" + CURRENT_OS + """**.
@@ -29,9 +40,9 @@ Your goal is to be maximally helpful by leveraging your tools when needed.
 [
   {
     "name": "search_web",
-    "description": "Search the web for up-to-date information.",
+    "description": "Search the web for up-to-date information. Results are passages of real page text gathered from several sources and ranked locally for relevance, NOT search-engine snippets. If the result says 'No relevant results', that is a real outcome: the specific term you asked about was not found on any page that came back. In that case retry with different wording or use get_url on official documentation - never answer from pages the result told you are off-topic.",
     "parameters": {
-      "query": "The search query string"
+      "query": "The search query string. Keep the distinctive terms (exact identifiers, error strings, product names) and drop conversational filler."
     }
   },
   {
@@ -116,7 +127,7 @@ Your goal is to be maximally helpful by leveraging your tools when needed.
     "description": "Save important information to persistent memory for future recall.",
     "parameters": {
       "id": "Memory ID (a descriptive label). e.g., 'User name', 'User preferences', 'Project goal'",
-      "content": "Memory content. e.g., '홍길동', 'Prefers dark mode', 'Build a chat app'"
+      "content": "Memory content. e.g., 'Jhon', 'Prefers dark mode', 'Build a chat app'"
     }
   },
   {
@@ -192,6 +203,22 @@ Your goal is to be maximally helpful by leveraging your tools when needed.
       "pattern": "A Tree-sitter S-expression query pattern. Use @capture_name to capture nodes.",
       "language": "(Optional) Language name (python, javascript, typescript, java, c, cpp, go, rust, csharp). Auto-detected from file extension if omitted."
     }
+  },
+  {
+    "name": "submit_plan_for_approval",
+    "description": "Submit a task plan and diff blueprint to the user for approval. You MUST use this before execution when PLAN MODE is active and the task involves modifying files or complex logic.",
+    "parameters": {
+      "context_discovered": "Summary of what files and context you analyzed to form this plan.",
+      "diff_blueprint": "Detailed outline of exactly which files and functions will change and how.",
+      "verification_steps": "How you will verify the changes after execution."
+    }
+  },
+  {
+    "name": "use_skill",
+    "description": "Load the full instructions of a skill listed under AVAILABLE SKILLS. Call this BEFORE starting a task whenever the request matches a skill's description. Returns the skill's instructions plus the absolute paths of any files bundled with it.",
+    "parameters": {
+      "skill_name": "The exact skill name from the AVAILABLE SKILLS list."
+    }
   }
 ]
 
@@ -225,6 +252,8 @@ Your goal is to be maximally helpful by leveraging your tools when needed.
 12. IMPORTANT: If you intend to use the tools 'read_memory', 'delete_memory', or 'edit_memory', please first use the tool 'get_memory_list' to read the memory IDs.
 13. When receiving Tool Result data, never print template strings like '[user_provided_input]' exactly as they are.
 14. Reply by naturally substituting the actual data from the tool result into the sentence.
+15. Skills: if a request matches an entry in AVAILABLE SKILLS, call `use_skill` with {"skill_name": "<the exact name>"} BEFORE doing the work, then follow the returned instructions. Load a skill once per conversation - never reload one you already have. Never invent a skill name that is not on the list.
+16. MCP tools: any tool named `mcp__<server>__<tool>` comes from an attached MCP server and is used exactly like a built-in tool. Copy the name character for character, and pass the parameters that tool lists - never guess a server or tool name that is not in the MCP TOOLS section.
 
 #### HASHLINE FORMAT
 When you use `read_file`, each line is returned in **hashline format**: `LINE_NUM:HASH|content`.
@@ -236,7 +265,7 @@ When you use `read_file`, each line is returned in **hashline format**: `LINE_NU
 
 Finally, You must reply with **Korean**.
 """
-    return base_prompt + load_context_file()
+    return base_prompt + mcp_tools_prompt() + skills_catalog_prompt() + load_context_file()
 
 if __name__ == "__main__":
     print("This file can not run directly.")

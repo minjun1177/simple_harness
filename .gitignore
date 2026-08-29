@@ -5,3 +5,5 @@ sessions/
 __pycache__/
 .chat_history
 .clauderc
+2*.txt
+clauderc

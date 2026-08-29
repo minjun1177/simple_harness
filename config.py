@@ -1,0 +1,191 @@
+import asyncio
+import sys
+import itertools
+import ollama
+import platform
+import re
+import json
+import shlex
+import subprocess
+import os
+import datetime
+import shutil
+import unicodedata
+import time
+from duckduckgo_search import DDGS
+import requests
+from bs4 import BeautifulSoup
+import random
+import psutil
+import hashlib
+
+try:
+    from tree_sitter import Language, Parser, Query, QueryCursor
+    import tree_sitter_python as _ts_python
+    import tree_sitter_javascript as _ts_javascript
+    import tree_sitter_typescript as _ts_typescript
+    import tree_sitter_java as _ts_java
+    import tree_sitter_c as _ts_c
+    import tree_sitter_cpp as _ts_cpp
+    import tree_sitter_go as _ts_go
+    import tree_sitter_rust as _ts_rust
+    import tree_sitter_c_sharp as _ts_csharp
+    TREE_SITTER_AVAILABLE = True
+
+    _TS_LANGUAGES = {
+        "python":     Language(_ts_python.language()),
+        "javascript": Language(_ts_javascript.language()),
+        "typescript":  Language(_ts_typescript.language_typescript()),
+        "tsx":         Language(_ts_typescript.language_tsx()),
+        "java":       Language(_ts_java.language()),
+        "c":          Language(_ts_c.language()),
+        "cpp":        Language(_ts_cpp.language()),
+        "go":         Language(_ts_go.language()),
+        "rust":       Language(_ts_rust.language()),
+        "csharp":     Language(_ts_csharp.language()),
+    }
+
+    _EXT_TO_LANG = {
+        ".py": "python", ".pyw": "python",
+        ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+        ".ts": "typescript", ".tsx": "tsx",
+        ".java": "java",
+        ".c": "c", ".h": "c",
+        ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".hxx": "cpp",
+        ".go": "go",
+        ".rs": "rust",
+        ".cs": "csharp",
+    }
+except ImportError:
+    TREE_SITTER_AVAILABLE = False
+    _TS_LANGUAGES = {}
+    _EXT_TO_LANG = {}
+
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.formatted_text import ANSI
+    PROMPT_TOOLKIT_AVAILABLE = True
+
+    class SlashCommandCompleter(Completer):
+        def __init__(self, commands):
+            self.commands = commands
+
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor
+            if text.startswith('/') and ' ' not in text:
+                for cmd in self.commands:
+                    if cmd.startswith(text):
+                        yield Completion(cmd, start_position=-len(text))
+except ImportError:
+    PROMPT_TOOLKIT_AVAILABLE = False
+
+from systemprompt import systemprompt as syp
+from systemprompt import summarizeprompt as smrp
+from systemprompt import titleprompt as ttlp
+
+
+MODEL = "gemma4:e4b"
+
+CURRENT_OS = platform.system()
+
+ALLOWED_COMMANDS = {
+    "cmd": ["cmd"],
+    "dir": ["dir"],
+    "ls": ["ls", "-l"],
+    "pwd": ["pwd"],
+    "whoami": ["whoami"],
+    "echo": ["echo"],
+}
+
+SYSTEM_PROMPT = syp()
+
+FILE_MAX_DISPLAY_LENGTH = 1000
+
+MEMORY_FILE = "memory.json"
+SESSION_DIR = "sessions"
+
+# Sessions are filed under a human title instead of a timestamp. AUTO_TITLE lets
+# the model name a new session after its first exchange; /title overrides it.
+AUTO_TITLE = True
+SESSION_TITLE = ""
+SESSION_TITLE_MAX_LEN = 60
+SESSION_SLUG_MAX_LEN = 48
+
+SEARCH_MAX_RESULTS = 5
+
+# Point this at a self-hosted SearXNG (e.g. "http://localhost:8080") to make
+# candidate generation fully local. Empty = use the keyless public sources only.
+SEARXNG_URL = ""
+
+SEARCH_CANDIDATES = 10          # results requested per source
+SEARCH_FETCH_PAGES = 8          # pages actually downloaded and read
+SEARCH_PAGE_CHARS = 60000       # per-page text kept for ranking
+SEARCH_PASSAGE_CHARS = 900      # passage size, and the snippet size returned
+SEARCH_RESULT_CHARS = 6000      # ceiling on the whole tool result
+SEARCH_SOURCE_TIMEOUT = 12
+SEARCH_FETCH_TIMEOUT = 10
+SEARCH_TOTAL_TIMEOUT = 25
+
+NUM_CTX = 32768*2
+NUM_PREDICT = 2048
+
+AUTO_ALLOW = False
+RETURN_ALL_FILE_CONTENT = True
+SAVE_CHAT_HISTORY = True
+CUSTOM_PERSONA = ""
+
+MAX_TOOL_CALLS = 10
+
+PLANMODE = False
+
+LOADED_SKILLS = []
+
+# --- MCP (Model Context Protocol) -------------------------------------------
+# Servers are declared in ./.mcp.json (project) or ~/.localchat/mcp.json (user).
+MCP_ENABLED = True
+MCP_STARTUP_TIMEOUT = 30        # seconds to wait for a server's initialize
+MCP_CALL_TIMEOUT = 120          # seconds to wait for a tools/call result
+MCP_HTTP_TIMEOUT = 60           # per-request timeout for http/sse transports
+MCP_RESULT_CHARS = 8000         # ceiling on a single MCP result handed to the model
+MCP_MAX_TOOLS_PER_SERVER = 40   # keeps one chatty server from flooding the prompt
+MCP_TRUSTED_SERVERS = []        # server names whose calls skip the approval prompt
+MCP_AUTO_APPROVE_READONLY = False  # trust a tool's own readOnlyHint annotation
+
+token_history = []
+
+
+class S:
+    R     = "\033[0m"
+    BOLD  = "\033[1m"
+    DIM   = "\033[2m"
+    ITAL  = "\033[3m"
+
+    ACCENT    = "\033[38;2;217;119;87m"
+    USER_CLR  = "\033[38;2;184;187;38m"
+    OK        = "\033[38;2;142;192;124m"
+    WARN      = "\033[38;2;250;189;47m"
+    ERR       = "\033[38;2;251;73;52m"
+    INFO      = "\033[38;2;131;165;152m"
+    GRAY      = "\033[38;2;146;131;116m"
+    WHITE     = "\033[38;2;235;219;178m"
+    MUTED     = "\033[38;2;102;92;84m"
+    PURPLE    = "\033[38;2;211;134;155m"
+    CYAN      = "\033[38;2;131;165;152m"
+
+
+def tw() -> int:
+    try:
+        return shutil.get_terminal_size().columns
+    except Exception:
+        return 80
+
+
+def _visible_len(text: str) -> int:
+    return len(re.sub(r'\033\[[^m]*m', '', text))
+
+
+def _hr(char: str = "─", width: int = 0, style: str = S.MUTED) -> str:
+    w = width or max(1, tw() - 6)
+    return f"{style}{char * w}{S.R}"
