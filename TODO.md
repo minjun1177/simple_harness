@@ -21,3 +21,4 @@
 * [x] run_cmd: no stdin + timeout, so an interactive program can no longer freeze the app
 * [x] Live shell sessions: run_cmd hands the prompt to the model, send_input answers it
 * [x] Waiting-for-input detection per platform (/proc on Linux, CPU elsewhere) + tests/test_platform.py
+* [x] Decode command output by what it actually is (UTF-8, else the console code page)

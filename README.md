@@ -341,6 +341,14 @@ leaving Linux. It exits non-zero if anything fails.
 A command that never stops printing is killed at `CMD_TIMEOUT` along with
 everything it started, and at most `CMD_MAX_SESSIONS` live commands are kept.
 
+**Text that is not ASCII.** A command's output is decoded as UTF-8 first,
+because UTF-8 is the only candidate that can report that it is wrong - almost
+any byte is legal cp949, so guessing a code page first would silently turn good
+text into mojibake. If the bytes turn out not to be UTF-8, which is what a
+Python older than 3.15 printing to a pipe on Korean Windows produces, the
+console code page takes over for the rest of that command - both for what it
+prints and for what `send_input` sends back to it.
+
 ---
 
 ## 9. Tool Permissions

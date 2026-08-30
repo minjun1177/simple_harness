@@ -16,7 +16,6 @@ Stdlib only, so this stays importable from anywhere in the harness.
 """
 
 import atexit
-import codecs
 import itertools
 import os
 import queue
@@ -36,6 +35,44 @@ _sessions: "dict[str, Session]" = {}
 def _cfg(name, default):
     import config
     return getattr(config, name, default)
+
+
+def _fallback_encodings() -> list:
+    """What the console might be speaking when it is not UTF-8, best first."""
+    try:
+        import config
+        return [enc for enc in config._console_encodings()
+                if enc.lower().replace("-", "") != "utf8"]
+    except Exception:
+        try:
+            import locale
+            preferred = locale.getpreferredencoding(False)
+            return [preferred] if preferred else []
+        except Exception:
+            return []
+
+
+def _default_child_encoding() -> str:
+    """What to encode input as before the child's output has told us better."""
+    if os.name == "nt":
+        candidates = _fallback_encodings()
+        if candidates:
+            return candidates[0]
+    return "utf-8"
+
+
+def _decode_ready(buffer: bytes, encoding: str) -> tuple:
+    """Decode the complete part of `buffer`. Returns (text, leftover, decoded).
+
+    A multi-byte character split across two reads is kept back rather than
+    mangled; anything else that will not decode means the encoding is wrong.
+    """
+    try:
+        return buffer.decode(encoding), b"", True
+    except UnicodeDecodeError as error:
+        if error.reason == "unexpected end of data" and error.end == len(buffer):
+            return buffer[:error.start].decode(encoding, "replace"), buffer[error.start:], True
+        return "", buffer, False
 
 
 def kill_process_tree(process) -> None:
@@ -61,6 +98,8 @@ class Session:
         self.command = command
         self.process = process
         self.started = time.time()
+        self.encoding = _default_child_encoding()
+        self._encoding_settled = False
         self._queue: queue.Queue = queue.Queue()
         self._open_pipes = 0
 
@@ -77,22 +116,54 @@ class Session:
 
         A prompt like `guess: ` has no newline, so anything that waits for one
         would never see the question the program is asking.
+
+        UTF-8 is tried first because it is the only one of the candidates that
+        can say it is wrong: almost any byte is legal cp949, so guessing that
+        first would silently turn good text into mojibake. If the bytes turn out
+        not to be UTF-8 - a Python older than 3.15 printing to a pipe on Korean
+        Windows, say - the code page takes over from there, for what this
+        program sends *and* for what we send back to it.
         """
-        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         fd = stream.fileno()
+        buffer = b""
+        encoding = "utf-8"
+        downgraded = False
+
         try:
             while True:
                 data = os.read(fd, 65536)
                 if not data:
                     break
-                self._queue.put(decoder.decode(data))
+                buffer += data
+
+                text, buffer, decoded = _decode_ready(buffer, encoding)
+                if not decoded and not downgraded:
+                    encoding = self._choose_encoding()
+                    downgraded = True
+                    text, buffer, _ = _decode_ready(buffer, encoding)
+                elif not decoded:
+                    text, buffer = buffer.decode(encoding, "replace"), b""
+
+                if text:
+                    if not downgraded and not self._encoding_settled and not text.isascii():
+                        # It really is UTF-8, so answer it in UTF-8 too.
+                        self.encoding = "utf-8"
+                        self._encoding_settled = True
+                    self._queue.put(text)
         except Exception:
             pass
         finally:
-            tail = decoder.decode(b"", True)
-            if tail:
-                self._queue.put(tail)
+            if buffer:
+                self._queue.put(buffer.decode(encoding, "replace"))
             self._queue.put(None)
+
+    def _choose_encoding(self) -> str:
+        """The child is not speaking UTF-8; fall back to the console's code page."""
+        candidates = _fallback_encodings()
+        chosen = candidates[0] if candidates else "utf-8"
+        self.encoding = chosen
+        self._encoding_settled = True
+        return chosen
 
     def cpu_seconds(self) -> float | None:
         """CPU burned by the whole tree so far, or None if it cannot be read.
@@ -242,7 +313,11 @@ class Session:
         if not text.endswith("\n"):
             text += "\n"        # a program blocks on a line without its newline
         try:
-            self.process.stdin.write(text.encode("utf-8"))
+            payload = text.encode(self.encoding, "replace")
+        except LookupError:
+            payload = text.encode("utf-8", "replace")
+        try:
+            self.process.stdin.write(payload)
             self.process.stdin.flush()
             return True
         except Exception:
