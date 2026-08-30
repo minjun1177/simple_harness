@@ -1,7 +1,6 @@
 import asyncio
 import sys
 import itertools
-import ollama
 import platform
 import re
 import json

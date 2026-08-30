@@ -4,6 +4,7 @@ import asyncio
 import itertools
 import ollama
 import config
+import providers
 from config import S, smrp
 
 
@@ -19,6 +20,10 @@ def _get_ctx_budget() -> int:
 
 
 def _get_summary_predict_tokens() -> int:
+    # Sized off the local model's weights, which only Ollama reports; a hosted
+    # model gets the middle setting.
+    if providers.current().name != "ollama":
+        return 400
     try:
         model_list = ollama.list()
         m_list = model_list.get("models", []) if isinstance(model_list, dict) else getattr(model_list, 'models', [])
@@ -63,7 +68,7 @@ def _get_conv_pairs(messages: list[dict]) -> list[list[dict]]:
     return pairs
 
 
-async def _compress_context(client: ollama.AsyncClient, messages: list[dict]) -> bool:
+async def _compress_context(messages: list[dict]) -> bool:
     conv_msgs = [m for m in messages if m["role"] != "system"]
     if not conv_msgs:
         return False
@@ -102,11 +107,7 @@ async def _compress_context(client: ollama.AsyncClient, messages: list[dict]) ->
 
     spin_task = asyncio.create_task(spinner())
     try:
-        response = await client.chat(
-            model=config.MODEL, messages=summary_msg, stream=False,
-            options={"num_predict": predict_tokens, "num_ctx": config.NUM_CTX}
-        )
-        summary = response['message']['content'].strip()
+        summary = await providers.complete(summary_msg, max_tokens=predict_tokens)
     except Exception as e:
         summary = ""
     finally:
@@ -137,12 +138,12 @@ def _sync_loaded_skills(messages: list[dict]) -> None:
     config.LOADED_SKILLS[:] = [n for n in config.LOADED_SKILLS if f"[Skill: {n}]\nSource:" in blob]
 
 
-async def manage_context(client: ollama.AsyncClient, messages: list[dict]) -> None:
-    await _manage_context(client, messages)
+async def manage_context(messages: list[dict]) -> None:
+    await _manage_context(messages)
     _sync_loaded_skills(messages)
 
 
-async def _manage_context(client: ollama.AsyncClient, messages: list[dict]) -> None:
+async def _manage_context(messages: list[dict]) -> None:
     budget = _get_ctx_budget()
 
     trimmed = _trim_tool_results(messages)
@@ -159,7 +160,7 @@ async def _manage_context(client: ollama.AsyncClient, messages: list[dict]) -> N
     if n_pairs <= 2:
         if _estimate_tokens(messages) > budget:
             print(f"\n  {S.WARN}⚠ Context limit approaching. Compressing…{S.R}")
-            ok = await _compress_context(client, messages)
+            ok = await _compress_context(messages)
             if ok:
                 latest = pairs[-1] if pairs else []
                 messages[:] = [messages[0]] + latest
@@ -167,7 +168,7 @@ async def _manage_context(client: ollama.AsyncClient, messages: list[dict]) -> N
         return
 
     print(f"\n  {S.WARN}⚠ Context limit approaching. Compressing…{S.R}")
-    ok = await _compress_context(client, messages)
+    ok = await _compress_context(messages)
     if ok:
         keep = pairs[-2:]
         keep_msgs = [msg for pair in keep for msg in pair]

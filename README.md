@@ -8,6 +8,7 @@ This application is a feature-rich, terminal-based AI assistant client built in 
 
 ## 2. Features
 
+- **Any Provider**: `/connect` points the harness at Ollama, Anthropic, OpenAI (or anything OpenAI-compatible), or Google Gemini. Tool calls travel as text, so switching provider changes nothing else about how the harness works.
 - **ANSI Terminal User Interface**: Provides an ANSI-colored TUI with streaming text responses, live token-per-second (TPS) calculation, custom spinner animations, markdown rendering, syntax code blocks, and ASCII tables.
 - **Interactive Action Approval**: Security layer that prompts the user for confirmation prior to running shell commands, editing/writing files, or sending network API requests.
 - **Dynamic Context Compression**: Monitors active token counts and conversation length to automatically condense conversation history when nearing model limits, tailored to model size.
@@ -129,7 +130,49 @@ Present only when an MCP server is attached (see MCP Servers below).
 
 ---
 
-## 5. Web Search
+## 5. Providers
+
+The harness starts on Ollama and stays there until told otherwise. `/connect`
+moves it:
+
+```
+/connect                     pick a provider, then a model from its own list
+/connect anthropic           pick a model from Anthropic
+/connect openai gpt-4o       connect straight to a model
+/connect status              every provider, and what each one still needs
+```
+
+| Provider | Endpoint | Key from |
+| :--- | :--- | :--- |
+| `ollama` | local, `OLLAMA_HOST` or a `base_url` | none needed |
+| `anthropic` | `api.anthropic.com` | `ANTHROPIC_API_KEY` |
+| `openai` | `api.openai.com/v1`, or any compatible `base_url` | `OPENAI_API_KEY` |
+| `gemini` | `generativelanguage.googleapis.com` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
+
+Because `base_url` is settable, the `openai` entry also reaches anything that
+speaks the same protocol - a local vLLM or llama.cpp server, OpenRouter, Groq,
+Together.
+
+Keys are read from the environment first. A key typed at the `/connect` prompt
+is written to `~/.localchat/providers.json` with owner-only permissions -
+never into the project directory, which is a place people commit from.
+
+**Why this is small.** The harness asks for tool calls as `<tool_call>` text
+rather than through each vendor's function-calling API, so a provider only has
+to turn messages into a stream of text. That is a few dozen lines each and no
+SDK: `providers.py` normalises the three wire formats into one event shape, and
+everything downstream - streaming, `<think>` filtering, tool parsing, titles,
+context compression - is untouched by which provider is answering.
+
+The shapes that do differ are handled in one place: Anthropic and Gemini take
+the system prompt as its own field rather than a message, Gemini calls the
+assistant role `model`, and both want consecutive same-role messages merged -
+which the harness produces constantly, since every tool result is its own user
+message.
+
+---
+
+## 6. Web Search
 
 A single general search engine answers the *entity* in a query and drops the
 term that matters. Asked for `ollama num_ctx meaning` it returns ollama.com, the
@@ -163,7 +206,7 @@ Tuning knobs live in `config.py`: `SEARCH_CANDIDATES`, `SEARCH_FETCH_PAGES`,
 
 ---
 
-## 6. Skills
+## 7. Skills
 
 A skill is an instruction pack stored on disk that the model pulls in only when
 it is relevant. This keeps the system prompt small no matter how many skills
@@ -204,7 +247,7 @@ Two skills ship with the repo: `git-commit` and `code-review`. See
 
 ---
 
-## 7. MCP Servers
+## 8. MCP Servers
 
 [MCP](https://modelcontextprotocol.io) is the standard way to hand an assistant
 tools it did not ship with - a filesystem browser, a database, an issue tracker.
@@ -277,7 +320,7 @@ The protocol client is a self-contained JSON-RPC implementation in
 
 ---
 
-## 8. Running Commands
+## 9. Running Commands
 
 `run_cmd` captures the command's output, which means the command can never show
 anything to the user while it runs - including a prompt. So it is given no
@@ -351,7 +394,7 @@ prints and for what `send_input` sends back to it.
 
 ---
 
-## 9. Tool Permissions
+## 10. Tool Permissions
 
 Until now the only gate was the approval prompt, and `/automode on` turned it
 off for everything at once - including `run_cmd` and `delete_file`. Rules give
@@ -385,7 +428,7 @@ by hand, and `/perms reload` re-reads the files.
 
 ---
 
-## 10. Reasoning Models
+## 11. Reasoning Models
 
 Reasoning models (qwen3, deepseek-r1, gpt-oss) emit their scratch work before
 the answer - either wrapped in `<think>` tags in the content stream, or in
@@ -404,7 +447,7 @@ itself and *then* calls a tool shows only the explanation.
 
 ---
 
-## 11. Slash Commands
+## 12. Slash Commands
 
 The interactive terminal supports special slash commands to control options and inspect state:
 
@@ -412,8 +455,8 @@ The interactive terminal supports special slash commands to control options and 
 | :--- | :--- |
 | `/help` | Display the list of available commands |
 | `/usage` | Render an ASCII chart of historical token consumption |
-| `/model` | View active model details or open an interactive model selection menu |
-| `/models` | List all locally pulled Ollama models and their disk footprints |
+| `/model` | Show the connected provider and pick another of its models |
+| `/models` | List the models the connected provider offers |
 | `/clear` | Clear the terminal display and reset conversation history |
 | `/sessions` | List saved conversation sessions, newest first, with their titles |
 | `/load <id or title>` | Load and render a past conversation session, found by id or title |
@@ -436,6 +479,8 @@ The interactive terminal supports special slash commands to control options and 
 | `/mcp connect <name>` | Reconnect a single server |
 | `/mcp prompt <server> <name> [k=v]` | Run a prompt template the server offers |
 | `/mcp <on/off>` | Attach or detach every MCP server for this session |
+| `/connect [provider] [model]` | Connect a provider, or pick one interactively |
+| `/connect status` | Show every provider and whether it is usable |
 | `/perms` | Show the active tool permission rules |
 | `/perms reload` | Re-read the permission rule files |
 | `/perms allow <rule>` | Add an allow rule, e.g. `/perms allow run_cmd(git *)` |
@@ -445,14 +490,17 @@ The interactive terminal supports special slash commands to control options and 
 
 ---
 
-## 12. Architecture
+## 13. Architecture
 
 The codebase is organized cleanly around the following components:
 
 - **`app.py`**: Event loop, slash command router, and system prompt composition.
-- **`ollama_client.py`**: Streaming chat turns, tool-call parsing, and the agent loop.
+- **`llm_client.py`**: The conversation loop - streaming a reply, parsing the tool calls out of it, running them. Knows nothing about which provider answered.
 - **`tools.py`**: Tool implementations and the dispatch table.
 - **`skills.py`**: Skill discovery, frontmatter parsing, and on-demand loading.
+- **`providers.py`**: The provider abstraction - Ollama, Anthropic, OpenAI, Gemini - and the saved connection.
+- **`connect.py`**: The `/connect` flow.
+- **`sse.py`**: Reading server-sent events without waiting for data that has not been sent. Shared by the providers and the MCP client.
 - **`permissions.py`**: Permission rule loading, matching, and the allow/deny/ask decision.
 - **`shell_session.py`**: Live commands - output draining, waiting-for-input detection, and the session registry.
 - **`tests/test_platform.py`**: Checks the waiting-for-input detection on the machine it is run on. Worth running on any new machine, and especially on Windows - see below.

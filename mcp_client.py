@@ -46,6 +46,8 @@ import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
+from sse import iter_sse
+
 
 PROTOCOL_VERSION = "2025-06-18"
 CLIENT_INFO = {"name": "localchat", "version": "1.0.0"}
@@ -92,60 +94,6 @@ def _expand(value):
 # ---------------------------------------------------------------------------
 # server-side event stream
 # ---------------------------------------------------------------------------
-
-def _sse_chunks(response):
-    """Yield bytes from a streaming response *as they arrive*.
-
-    `iter_lines()` cannot be used here: it reads in fixed 512-byte blocks, and
-    urllib3 1.x blocks until that many bytes exist. A server-sent event is far
-    smaller than that, so an SSE stream would stall until enough later traffic
-    happened to fill the block. `read1` (urllib3 2.x) returns whatever is
-    already there; falling back to one byte at a time is slower but never waits
-    for data that has not been sent.
-    """
-    read1 = getattr(getattr(response, "raw", None), "read1", None)
-    if callable(read1):
-        while True:
-            chunk = read1(65536)
-            if not chunk:
-                return
-            yield chunk
-    else:
-        for chunk in response.iter_content(chunk_size=1):
-            if chunk:
-                yield chunk
-
-
-def _iter_sse(response):
-    """Yield (event, data) pairs from a text/event-stream response body."""
-    import codecs
-
-    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-    event = "message"
-    data: list[str] = []
-    buffer = ""
-
-    for chunk in _sse_chunks(response):
-        buffer += decoder.decode(chunk)
-        while "\n" in buffer:
-            line, _, buffer = buffer.partition("\n")
-            line = line.rstrip("\r")
-            if not line:
-                if data:
-                    yield event, "\n".join(data)
-                event, data = "message", []
-                continue
-            if line.startswith(":"):
-                continue
-            field, _, value = line.partition(":")
-            value = value[1:] if value.startswith(" ") else value
-            if field == "event":
-                event = value
-            elif field == "data":
-                data.append(value)
-    if data:
-        yield event, "\n".join(data)
-
 
 # ---------------------------------------------------------------------------
 # transports
@@ -349,7 +297,7 @@ class HTTPTransport:
 
         content_type = (response.headers.get("Content-Type") or "").lower()
         if "text/event-stream" in content_type:
-            for _event, data in _iter_sse(response):
+            for _event, data in iter_sse(response):
                 if not data.strip():
                     continue
                 try:
@@ -431,7 +379,7 @@ class SSETransport:
     def _read_stream(self) -> None:
         from urllib.parse import urljoin
         try:
-            for event, data in _iter_sse(self._response):
+            for event, data in iter_sse(self._response):
                 if event == "endpoint":
                     self.post_url = urljoin(self.url, data.strip())
                     self._endpoint_ready.set()

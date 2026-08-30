@@ -2,8 +2,8 @@ import os
 import re
 import json
 import datetime
-import ollama
 import config
+import providers
 from config import S, ttlp
 
 
@@ -182,7 +182,7 @@ def rename_session(session_id: str, new_title: str) -> str:
         return session_id
 
 
-async def generate_session_title(client: ollama.AsyncClient, messages: list[dict]) -> str:
+async def generate_session_title(messages: list[dict]) -> str:
     """Ask the model to name the conversation. Returns "" if it cannot."""
     convo = []
     for m in messages:
@@ -200,13 +200,9 @@ async def generate_session_title(client: ollama.AsyncClient, messages: list[dict
 
     prompt = ttlp() + "\n\n".join(convo)
     try:
-        response = await client.chat(
-            model=config.MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            stream=False,
-            options={"num_predict": 40, "num_ctx": config.NUM_CTX},
-        )
-        return clean_title(response["message"]["content"])
+        text = await providers.complete(
+            [{"role": "user", "content": prompt}], max_tokens=40)
+        return clean_title(text)
     except Exception:
         return ""
 

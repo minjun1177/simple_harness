@@ -3,11 +3,12 @@ import sys
 import os
 import re
 import datetime
-import ollama
 import config
 import skills
 import mcp_client
 import permissions
+import providers
+import connect
 from config import S
 from systemprompt import systemprompt as _build_system_prompt
 from tui import _welcome, _show_help, _show_skills, _show_mcp, _show_perms, _fmt_tool_call, _fmt_tool_result, display_usage_graph, _hr
@@ -15,7 +16,7 @@ from renderer import _render_full
 from session import (save_session, load_session, list_sessions, find_sessions,
                      rename_session, generate_session_title, clean_title)
 from context import manage_context
-from ollama_client import chat_turn, parse_tool_calls, strip_thinking
+from llm_client import chat_turn, parse_tool_calls, strip_thinking
 
 
 def _compose_system_prompt(summary: str = "") -> str:
@@ -70,12 +71,12 @@ def _report_mcp_problems(failed: list) -> None:
 
 
 async def main() -> None:
-    client = ollama.AsyncClient()
 
     if config.CURRENT_OS == "Windows":
         os.system("")
 
     print("\033[2J\033[H", end="")
+    providers.apply_startup()
     failed_mcp = _connect_mcp_servers()
     config.SYSTEM_PROMPT = _build_system_prompt()
     messages: list[dict] = [{"role": "system", "content": _compose_system_prompt()}]
@@ -87,7 +88,7 @@ async def main() -> None:
 
     if config.PROMPT_TOOLKIT_AVAILABLE:
         from config import SlashCommandCompleter, PromptSession, FileHistory, ANSI
-        completer = SlashCommandCompleter(['/help', '/clear', '/usage', '/model', '/models', '/exit', '/quit', '/sessions', '/load', '/title', '/autotitle', '/automode', '/fullcontent', '/record', '/export', '/system', '/planmode', '/skills', '/skill', '/mcp', '/perms', '/think'])
+        completer = SlashCommandCompleter(['/help', '/clear', '/usage', '/model', '/models', '/exit', '/quit', '/sessions', '/load', '/title', '/autotitle', '/automode', '/fullcontent', '/record', '/export', '/system', '/planmode', '/skills', '/skill', '/mcp', '/perms', '/think', '/connect'])
         session_pt = PromptSession(
             history=FileHistory('.chat_history'),
             completer=completer,
@@ -134,65 +135,30 @@ async def main() -> None:
             print(f"  {S.OK}✓ Conversation and usage cleared.{S.R}\n")
             continue
         if cmd == "/models":
-            print(f"\n  {S.BOLD}{S.ACCENT}Available Ollama Models{S.R}")
+            provider = providers.current()
+            print(f"\n  {S.BOLD}{S.ACCENT}{provider.label} Models{S.R}")
             print(f"  {_hr(width=50)}")
             try:
-                model_list = ollama.list()
-                models_available = model_list.get("models", []) if isinstance(model_list, dict) else (model_list.models if hasattr(model_list, 'models') else [])
-                if not models_available:
-                    print(f"  {S.WARN}⚠ No models found. Pull a model with: ollama pull <model>{S.R}")
-                else:
-                    for i, m in enumerate(models_available, 1):
-                        name = m.get("model", m.get("name", "unknown")) if isinstance(m, dict) else (m.model if hasattr(m, 'model') else str(m))
-                        size_bytes = m.get("size", 0) if isinstance(m, dict) else (m.size if hasattr(m, 'size') else 0)
-                        size_gb = size_bytes / (1024**3)
-                        marker = f" {S.OK}◀ current{S.R}" if name == config.MODEL else ""
-                        if size_gb >= 1:
-                            print(f"  {S.ACCENT}{i:3}.{S.R} {S.WHITE}{name}{S.R}  {S.GRAY}({size_gb:.1f}GB){S.R}{marker}")
-                        else:
-                            size_mb = size_bytes / (1024**2)
-                            print(f"  {S.ACCENT}{i:3}.{S.R} {S.WHITE}{name}{S.R}  {S.GRAY}({size_mb:.0f}MB){S.R}{marker}")
+                available = provider.list_models()
+                if not available:
+                    print(f"  {S.WARN}\u26a0 None found.{S.R}")
+                for i, entry in enumerate(available, 1):
+                    marker = f" {S.OK}\u25c0 current{S.R}" if entry["name"] == config.MODEL else ""
+                    detail = f"  {S.GRAY}({entry['detail']}){S.R}" if entry.get("detail") else ""
+                    print(f"  {S.ACCENT}{i:3}.{S.R} {S.WHITE}{entry['name']}{S.R}{detail}{marker}")
             except Exception as e:
-                print(f"  {S.ERR}✗ Failed to list models: {e}{S.R}")
+                print(f"  {S.ERR}\u2717 Failed to list models: {e}{S.R}")
             print()
             continue
         if cmd == "/model":
-            print(f"\n  {S.GRAY}model{S.R}  {S.WHITE}{config.MODEL}{S.R}\n")
-            try:
-                model_list = ollama.list()
-                models_available = model_list.get("models", []) if isinstance(model_list, dict) else (model_list.models if hasattr(model_list, 'models') else [])
-                if not models_available:
-                    print(f"  {S.WARN}⚠ No models found.{S.R}\n")
-                    continue
-                model_names = []
-                for m in models_available:
-                    name = m.get("model", m.get("name", "unknown")) if isinstance(m, dict) else (m.model if hasattr(m, 'model') else str(m))
-                    model_names.append(name)
-                print(f"  {S.BOLD}{S.ACCENT}Select a model:{S.R}")
-                for i, name in enumerate(model_names, 1):
-                    marker = f" {S.OK}◀ current{S.R}" if name == config.MODEL else ""
-                    print(f"  {S.ACCENT}{i:3}.{S.R} {S.WHITE}{name}{S.R}{marker}")
-                print(f"  {S.MUTED}  0.{S.R} {S.GRAY}Cancel{S.R}")
-                print()
-                try:
-                    choice = input(f"  {S.INFO}Select{S.R} {S.MUTED}(0~{len(model_names)}){S.R} {S.INFO}›{S.R} ").strip()
-                    if not choice or choice == "0":
-                        print(f"  {S.GRAY}Cancelled.{S.R}\n")
-                        continue
-                    idx = int(choice) - 1
-                    if 0 <= idx < len(model_names):
-                        old_model = config.MODEL
-                        config.MODEL = model_names[idx]
-                        if old_model == config.MODEL:
-                            print(f"  {S.GRAY}Already using {config.MODEL}.{S.R}\n")
-                        else:
-                            print(f"  {S.OK}✓ Model changed: {old_model} → {config.MODEL}{S.R}\n")
-                    else:
-                        print(f"  {S.ERR}✗ Invalid selection.{S.R}\n")
-                except (ValueError, EOFError, KeyboardInterrupt):
-                    print(f"\n  {S.GRAY}Cancelled.{S.R}\n")
-            except Exception as e:
-                print(f"  {S.ERR}✗ Failed to list models: {e}{S.R}\n")
+            provider = providers.current()
+            print(f"\n  {S.GRAY}provider{S.R}  {S.WHITE}{provider.label}{S.R}")
+            print(f"  {S.GRAY}model{S.R}     {S.WHITE}{config.MODEL}{S.R}\n")
+            connect.run(provider.name)
+            continue
+        if cmd == "/connect" or cmd.startswith("/connect "):
+            connect.run(user_input.split(" ", 1)[1].strip() if " " in user_input else "")
+            _refresh_system_prompt(messages)
             continue
         if cmd == "/sessions":
             sessions = list_sessions()
@@ -514,9 +480,9 @@ async def main() -> None:
         current_session_id = save_session(messages, current_session_id)
 
         try:
-            await manage_context(client, messages)
+            await manage_context(messages)
 
-            result = await chat_turn(client, messages)
+            result = await chat_turn(messages)
 
             current_session_id = save_session(messages, current_session_id)
 
@@ -524,7 +490,7 @@ async def main() -> None:
             if config.AUTO_TITLE and not config.SESSION_TITLE and current_session_id:
                 sys.stdout.write(f"  {S.MUTED}✎ naming session…{S.R}")
                 sys.stdout.flush()
-                title = await generate_session_title(client, messages)
+                title = await generate_session_title(messages)
                 sys.stdout.write("\r\033[K")
                 sys.stdout.flush()
                 if title:

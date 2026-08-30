@@ -8,6 +8,7 @@ from session import load_memory, list_sessions
 from context import _estimate_tokens, _get_ctx_budget, _get_conv_pairs
 from skills import list_skills, skill_dirs
 import mcp_client
+import providers
 
 
 def _get_git_info() -> str:
@@ -66,7 +67,7 @@ def _welcome():
     ╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝     ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   
 {S.R}"""
     print(logo)
-    print(f"  {S.GRAY}model{S.R}      {S.WHITE}{config.MODEL}{S.R}")
+    print(f"  {S.GRAY}model{S.R}      {S.WHITE}{providers.status_line()}{S.R}")
     print(f"  {S.GRAY}os{S.R}         {S.WHITE}{config.CURRENT_OS}{S.R}")
     print(f"  {S.GRAY}python{S.R}     {S.WHITE}{python_info}{S.R}")
     print(f"  {S.GRAY}workspace{S.R}  {S.WHITE}{workspace}{S.R}")
@@ -90,8 +91,10 @@ def _show_help():
         ("/help",  "Show this help message"),
         ("/usage", "Show token usage history graph"),
         ("/clear", "Clear conversation history"),
-        ("/model", "Show model info / select model"),
-        ("/models", "List available Ollama models"),
+        ("/connect", "Connect a provider (Ollama, Anthropic, OpenAI, Gemini)"),
+        ("/connect status", "Show every provider and whether it is usable"),
+        ("/model", "Show the current provider and pick a model"),
+        ("/models", "List models from the connected provider"),
         ("/sessions", "List saved sessions"),
         ("/load <id|title>", "Load a past session by ID or title"),
         ("/title [name]", "Show or set the current session's title"),

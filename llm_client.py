@@ -1,3 +1,9 @@
+"""The conversation loop: stream a reply, read the tool calls out of it, run them.
+
+Nothing here knows which provider is answering - `providers.py` hands over the
+same events whether they came from a local Ollama model or a hosted one.
+"""
+
 import sys
 import re
 import json
@@ -5,12 +11,12 @@ import asyncio
 import itertools
 import time
 import random
-import ollama
 import config
 from config import S
 from tui import _fmt_tool_call, _fmt_tool_result, _fmt_tokens
 from renderer import _render_line, _format_table, _render_full
 from tools import dispatch_tool
+import providers
 
 
 TOOL_CALL_TAG = "<tool_call>"
@@ -104,7 +110,7 @@ def strip_thinking(text: str) -> str:
     return cleaned.strip()
 
 
-async def call_ollama(client: ollama.AsyncClient, messages: list[dict]) -> str:
+async def stream_reply(messages: list[dict]) -> str:
 
     async def spinner():
         """· ✢ ✳ ✶ ✻ ✽"""
@@ -206,29 +212,28 @@ async def call_ollama(client: ollama.AsyncClient, messages: list[dict]) -> str:
     chunk_count = 0
 
     try:
-        response_stream = await client.chat(model=config.MODEL, messages=messages, stream=True, options={"num_ctx": config.NUM_CTX, "num_predict": config.NUM_PREDICT})
+        reply = providers.current().stream(messages)
 
-        async for chunk in response_stream:
+        async for chunk in reply:
             if start_time is None:
                 start_time = time.time()
 
             chunk_count += 1
 
-            message = chunk.get('message') or {}
-            content = message.get('content', '') or ''
+            content = chunk.get('text', '') or ''
             full_text += content
 
             if chunk.get('done'):
-                prompt_tokens = chunk.get("prompt_eval_count", 0)
-                completion_tokens = chunk.get("eval_count", 0)
-                total_duration = chunk.get("total_duration", 0) / 1e9
-                eval_duration = chunk.get("eval_duration", 0) / 1e9
+                prompt_tokens = chunk.get("prompt_tokens", 0)
+                completion_tokens = chunk.get("completion_tokens", 0)
+                total_duration = chunk.get("total_seconds", 0.0)
+                eval_duration = chunk.get("eval_seconds", 0.0)
 
-            # Newer Ollama builds hand reasoning back in its own field instead
-            # of wrapping it in tags. It never enters `full_text`, so it stays
-            # out of the conversation history for free.
+            # Providers that report reasoning separately hand it over in its own
+            # field. It never enters `full_text`, so it stays out of the
+            # conversation history for free.
             events = []
-            native_thinking = message.get('thinking', '') or ''
+            native_thinking = chunk.get('thinking', '') or ''
             if native_thinking:
                 events.append(("think", native_thinking))
             events.extend(stream.feed(content))
@@ -578,7 +583,7 @@ def parse_tool_calls(response_text: str, quiet: bool = False) -> list[tuple[str,
 MAX_PARSE_RETRIES = 2
 
 
-async def chat_turn(client: ollama.AsyncClient, messages: list[dict]) -> str:
+async def chat_turn(messages: list[dict]) -> str:
     call_count = 0
     parse_failures = 0
     while True:
@@ -594,7 +599,7 @@ async def chat_turn(client: ollama.AsyncClient, messages: list[dict]) -> str:
             if user_choice != 'y':
                 return messages[-2]["content"] if len(messages) >= 2 else "Tool usage stopped."
                 
-        response_text = await call_ollama(client, messages)
+        response_text = await stream_reply(messages)
         stored = response_text if config.STORE_THINKING else strip_thinking(response_text)
         messages.append({"role": "assistant", "content": stored})
 
