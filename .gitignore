@@ -7,3 +7,12 @@ __pycache__/
 .clauderc
 2*.txt
 clauderc
+.*/
+!.github/
+node_modules/
+package-lock.json
+package.json
+tests/
+.mcp.json
+.permissions.json
+mcp.log

@@ -2,6 +2,7 @@ import os
 import re
 import json
 import subprocess
+import time
 import shutil
 import hashlib
 import requests
@@ -12,6 +13,7 @@ from tui import _fmt_tool_call, _approval_prompt
 from skills import handle_use_skill
 import mcp_client
 import permissions
+import shell_session
 from websearch import search_web as search_pipeline, strip_html
 
 if TREE_SITTER_AVAILABLE:
@@ -22,35 +24,131 @@ def handle_search_web(query: str) -> str:
     return search_pipeline(query)
 
 
-def safe_run_cmd(command_string: str) -> str:
-    """Run a shell command. The approval prompt and permission rules are the gate.
+def _trim_output(text: str) -> str:
+    limit = config.CMD_OUTPUT_CHARS
+    text = text.rstrip()
+    if len(text) <= limit:
+        return text
+    return ("...[earlier output trimmed]\n" + text[-limit:])
+
+
+def _session_result(session, output: str, ended: bool, timed_out: bool) -> str:
+    """Turn one read from a live command into the text the model sees."""
+    output = _trim_output(output)
+
+    if timed_out:
+        session.close()
+        return (f"[Error] '{session.command}' produced output for {config.CMD_TIMEOUT}s "
+                "without stopping, so it was killed. Do not run it again unless you "
+                "narrow it down."
+                + (f"\n\n{output}" if output else ""))
+
+    if ended:
+        code = session.close()
+        if code:
+            return f"[Error] Command failed (exit code {code}).\n{output}" if output \
+                else f"[Error] Command failed (exit code {code})."
+        return output or "(the command produced no output)"
+
+    # Still running and gone quiet: from out here that is what a program sitting
+    # at a prompt looks like.
+    shell_session.register(session)
+    return (f"{output}\n\n"
+            f"[Waiting] '{session.command}' is still running and has printed nothing for "
+            f"{config.CMD_IDLE_TIMEOUT:g}s, so it is most likely waiting for input. "
+            f"Read the output above and answer it with send_input:\n"
+            f'    {{"name": "send_input", "arguments": {{"session": "{session.id}"}}}}\n'
+            "    <stdin>\n    <your answer>\n    </stdin>\n"
+            "Send an empty <stdin> block to just wait for more output, or call "
+            f'end_process with session "{session.id}" to stop it.').strip()
+
+
+def safe_run_cmd(command_string: str, stdin_text: str = "") -> str:
+    """Run a shell command, and stay connected to it while it runs.
 
     The command is handed to the shell as written. It used to be split with
     `shlex` and then passed to `shell=True`, which mangled Windows paths (shlex
     eats backslashes) and left the shell to re-quote a list it had never been
     given - so `run_cmd` and what actually ran could differ.
+
+    The process is not waited on to completion. Its output is drained as it
+    appears, and when it goes quiet the output so far is returned along with the
+    session id, so the model can read the prompt and answer it with `send_input`.
+    That is the only way an interactive program can work here: its prompts are
+    captured, so the user never sees them, and letting it hold the terminal just
+    froze the app with nothing on screen.
     """
     command = (command_string or "").strip()
     if not command:
         return "[Error] Empty command."
 
-    approved = _approval_prompt("Run Command", [("command", command)],
-                                rule=f"run_cmd({command})")
-    if not approved:
+    stdin_text = stdin_text if isinstance(stdin_text, str) else ""
+
+    details = [("command", command)]
+    if stdin_text.strip():
+        preview = stdin_text if len(stdin_text) <= 200 else stdin_text[:200] + "...[truncated]"
+        details.append(("input", preview.replace("\n", " ⏎ ").strip()))
+    if not _approval_prompt("Run Command", details, rule=f"run_cmd({command})"):
         return "[System] User denied command execution."
 
     try:
-        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
-                                errors="replace", check=False, shell=True)
+        session = shell_session.start(command)
     except Exception as e:
         return f"[Error] Failed to execute command: {e}"
 
-    parts = [stream.strip() for stream in (result.stdout, result.stderr) if stream and stream.strip()]
-    output = "\n".join(parts)
-    if result.returncode != 0:
-        header = f"[Error] Command failed (exit code {result.returncode})."
-        return f"{header}\n{output}" if output else header
-    return output or "(the command produced no output)"
+    if stdin_text.strip():
+        session.send(stdin_text)
+
+    try:
+        output, ended, timed_out = session.read_until_idle(
+            config.CMD_IDLE_TIMEOUT, time.time() + config.CMD_TIMEOUT)
+    except KeyboardInterrupt:
+        session.close()
+        return "[System] The command was cancelled by the user."
+
+    return _session_result(session, output, ended, timed_out)
+
+
+def handle_send_input(session_id: str, text: str) -> str:
+    """Answer a running command's prompt and read what it says next."""
+    shell_session.prune()
+    session = shell_session.get(session_id)
+    if session is None:
+        running = shell_session.active()
+        if not running:
+            return ("[Error] No command is waiting for input. Start one with run_cmd "
+                    "first - a command that has already finished cannot be resumed.")
+        listing = ", ".join(f"'{s.id}' ({s.command})" for s in running)
+        return f"[Error] No session '{session_id}'. Currently waiting: {listing}"
+
+    text = text if isinstance(text, str) else str(text or "")
+    details = [("session", f"{session.id}  ({session.command})"),
+               ("input", text.strip().replace("\n", " ⏎ ") or "(nothing - just wait)")]
+    if not _approval_prompt("Send Input", details, rule=f"send_input({session.command})"):
+        return "[System] User denied sending input."
+
+    if text.strip() and not session.send(text):
+        code = session.close()
+        return (f"[Error] '{session.command}' had already exited (code {code}), "
+                "so the input went nowhere.")
+
+    try:
+        output, ended, timed_out = session.read_until_idle(
+            config.CMD_IDLE_TIMEOUT, time.time() + config.CMD_TIMEOUT)
+    except KeyboardInterrupt:
+        session.close()
+        return "[System] The command was cancelled by the user."
+
+    return _session_result(session, output, ended, timed_out)
+
+
+def handle_end_process(session_id: str) -> str:
+    session = shell_session.get(session_id)
+    if session is None:
+        return f"[Error] No running session '{session_id}'."
+    command, sid = session.command, session.id
+    session.close()
+    return f"[Success] Stopped '{command}' (session {sid})."
 
 
 _HASHLINE_PATTERN = re.compile(r'^\d+:[0-9a-f]{2}\|')
@@ -102,7 +200,22 @@ def handle_read_file(filepath: str) -> str:
         return f"[Error] Cannot read file: {e}"
 
 def handle_write_file(filepath: str, content: str) -> str:
+    if not filepath:
+        return ("[Error] No 'filepath' was given. Send it inside \"arguments\" in the "
+                "tool call JSON.")
+
     content = _strip_hashlines(content)
+
+    # A write with no body is a malformed call, not a request for an empty file -
+    # the body went missing between the model and here. Saying so lets the model
+    # resend it; writing it out would quietly destroy an existing file.
+    if not content.strip():
+        existing = os.path.isfile(filepath) and os.path.getsize(filepath) > 0
+        return ("[Error] The call carried no content, so nothing was written"
+                f"{' (the existing ' + filepath + ' was left untouched)' if existing else ''}. "
+                "Send write_file again with the file body in a <content> block right "
+                "after the JSON object.")
+
     preview = content if len(content) <= 200 else content[:200] + "...[truncated]"
     approved = _approval_prompt("Write File", [("path", filepath), ("preview", preview)],
                                 rule=f"write_file({filepath})")
@@ -857,7 +970,9 @@ def _run_tool(function_name: str, arguments: dict) -> str | None:
     from session import (handle_write_memory, handle_get_memory_list,
                          handle_read_memory, handle_delete_memory, handle_edit_memory)
     if function_name == "search_web": return handle_search_web(arguments.get("query", ""))
-    if function_name == "run_cmd": return safe_run_cmd(arguments.get("command", ""))
+    if function_name == "run_cmd": return safe_run_cmd(arguments.get("command", ""), arguments.get("stdin", "") or arguments.get("input", ""))
+    if function_name == "send_input": return handle_send_input(arguments.get("session", ""), arguments.get("stdin", "") or arguments.get("input", "") or arguments.get("text", ""))
+    if function_name == "end_process": return handle_end_process(arguments.get("session", ""))
     if function_name == "read_file": return handle_read_file(arguments.get("filepath", ""))
     if function_name == "get_url": return handle_get_url(arguments.get("url", ""))
     if function_name == "write_file": return handle_write_file(arguments.get("filepath", ""), arguments.get("content", ""))

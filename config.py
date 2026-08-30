@@ -120,12 +120,27 @@ SEARCH_FETCH_TIMEOUT = 10
 SEARCH_TOTAL_TIMEOUT = 25
 
 NUM_CTX = 32768*2
-NUM_PREDICT = 2048
+NUM_PREDICT = 4096*1.5      # 2048 truncated file writes mid-way
 
 AUTO_ALLOW = False
 RETURN_ALL_FILE_CONTENT = True
 SAVE_CHAT_HISTORY = True
 CUSTOM_PERSONA = ""
+
+# run_cmd stays connected to the command instead of waiting for it to finish.
+# When the output goes quiet for CMD_IDLE_TIMEOUT the process is most likely
+# sitting at a prompt, so what it printed is handed to the model, which answers
+# with send_input. It never gets the user's terminal: its prompts are captured,
+# so holding the terminal only froze the app with nothing on screen.
+CMD_IDLE_TIMEOUT = 0.6      # silence this long is worth looking at
+CMD_WAIT_TIMEOUT = 8        # ...but silence only counts as a prompt after this,
+                            # unless the output looks like one or /proc confirms it
+CMD_IDLE_GRACE = 2.5        # Windows/macOS, where /proc cannot be asked: how long
+                            # silence with no CPU burned has to last instead
+CMD_TIMEOUT = 120           # ceiling on any single read from a command
+CMD_OUTPUT_CHARS = 6000     # per-read output ceiling; the newest is kept
+CMD_MAX_SESSIONS = 3        # live commands kept at once; the oldest is dropped
+CMD_SESSION_LIFETIME = 900  # seconds a live command may sit idle before it is killed
 
 MAX_TOOL_CALLS = 10
 
@@ -246,14 +261,14 @@ def safe_text(text):
     try:
         raw = text.encode("utf-8", "surrogateescape")
     except UnicodeEncodeError:
-        return _SURROGATE_PATTERN.sub("�", text)
+        return _SURROGATE_PATTERN.sub(" ", text)
 
     for encoding in _console_encodings():
         try:
             return raw.decode(encoding)
         except (UnicodeDecodeError, LookupError):
             continue
-    return _SURROGATE_PATTERN.sub("�", text)
+    return _SURROGATE_PATTERN.sub(" ", text)
 
 
 def repair_messages(messages: list[dict]) -> list[dict]:

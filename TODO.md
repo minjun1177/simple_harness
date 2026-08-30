@@ -1,5 +1,5 @@
 # TODO
-> For ai harnes
+> For ai harness
 
 ## list
 * [x] Upgrade system prompt
@@ -15,3 +15,9 @@
 * [x] Tool permissions (.permissions.json allow/deny, 'a' at the prompt)
 * [x] Several tool calls in one turn
 * [x] Repair console input that arrives as surrogate escapes (Korean input on a cp949 console)
+* [x] Raw <content> blocks so a file body never has to be escaped into JSON
+* [x] Repair malformed tool JSON (unclosed brackets, flattened arguments, broken payload)
+* [x] Ask the model to resend a tool call we could not parse, instead of ending the turn
+* [x] run_cmd: no stdin + timeout, so an interactive program can no longer freeze the app
+* [x] Live shell sessions: run_cmd hands the prompt to the model, send_input answers it
+* [x] Waiting-for-input detection per platform (/proc on Linux, CPU elsewhere) + tests/test_platform.py

@@ -328,19 +328,169 @@ def _json_tail_state(blob: str) -> tuple[list[str], bool]:
     return depth, in_string
 
 
-def _decode_repaired(blob: str, quiet: bool, complete: bool):
+def _close_brackets(blob: str) -> dict | None:
     """Recover a tool call whose brackets the model failed to close.
 
     Small models are good at escaping a long payload and then miscounting the
     braces around it - one missing `}` at the very end throws away a whole
-    generation. That is safe to repair only when the model actually finished:
-    it closed its last string *and* wrote `</tool_call>`. Without both, the
-    reply was cut off, and closing the brackets would invent a call with
-    whatever arguments happened to arrive - an empty `content`, say, which
-    `write_file` would happily write over a real file.
+    generation.
     """
-    depth, in_string = _json_tail_state(blob)
-    if in_string or not complete:
+    depth, _ = _json_tail_state(blob)
+    if not depth:
+        return None
+    closers = "".join(_CLOSERS[bracket] for bracket in reversed(depth))
+    try:
+        repaired, _ = json.JSONDecoder().raw_decode(blob + closers)
+    except json.JSONDecodeError:
+        return None
+    return repaired if isinstance(repaired, dict) else None
+
+
+# Parameters that carry a whole file or document, where the model has to escape
+# hundreds of quotes and backslashes correctly - and often does not.
+_LONG_TEXT_KEYS = ("content", "new_content", "old_content", "text", "body",
+                   "payload", "stdin")
+
+_JSON_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b",
+                 "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+
+_FIELD_PATTERN = re.compile(r'"([A-Za-z_][A-Za-z0-9_]*)"\s*:\s*"')
+_SCALAR_PATTERN = re.compile(r'"([A-Za-z_][A-Za-z0-9_]*)"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+
+def _lenient_unescape(raw: str) -> str:
+    """Undo JSON escaping, keeping anything that is not a JSON escape verbatim."""
+    out = []
+    i = 0
+    while i < len(raw):
+        char = raw[i]
+        if char != "\\" or i + 1 >= len(raw):
+            out.append(char)
+            i += 1
+            continue
+        nxt = raw[i + 1]
+        if nxt in _JSON_ESCAPES:
+            out.append(_JSON_ESCAPES[nxt])
+            i += 2
+        elif nxt == "u" and i + 6 <= len(raw):
+            try:
+                out.append(chr(int(raw[i + 2:i + 6], 16)))
+                i += 6
+            except ValueError:
+                out.append(char)
+                i += 1
+        else:
+            # `\}` and friends are not JSON escapes; the model meant both
+            # characters literally, so keep them.
+            out.append(char)
+            out.append(nxt)
+            i += 2
+    return "".join(out)
+
+
+def _lenient_tool_call(blob: str) -> dict | None:
+    """Rebuild a call whose long text payload broke the JSON around it.
+
+    Models leave a bare `"` inside the file they are writing, or write an
+    invalid escape, and the value ends early. The structure is still readable:
+    the short parameters sit before the payload, and the payload runs to the
+    last quote.
+
+    Only attempted when exactly one long-text parameter is present and it is the
+    final field - with two of them (`edit_file`) there is no way to tell where
+    the first was meant to end, and guessing could corrupt a file.
+    """
+    name_match = re.search(r'"name"\s*:\s*"([A-Za-z0-9_]+)"', blob)
+    if not name_match:
+        return None
+
+    long_fields = [(m.group(1), m.end()) for m in _FIELD_PATTERN.finditer(blob)
+                   if m.group(1) in _LONG_TEXT_KEYS]
+    if len(long_fields) != 1:
+        return None
+    key, value_start = long_fields[0]
+
+    close_quote = blob.rfind('"')
+    if close_quote <= value_start:
+        return None
+    if blob[close_quote + 1:].strip(" \t\r\n}]),"):
+        return None          # something other than brackets follows: not the last field
+
+    arguments = {}
+    for match in _SCALAR_PATTERN.finditer(blob[:value_start]):
+        if match.group(1) != "name":
+            arguments[match.group(1)] = _lenient_unescape(match.group(2))
+    arguments[key] = _lenient_unescape(blob[value_start:close_quote])
+
+    return {"name": name_match.group(1), "arguments": arguments}
+
+
+def _normalise_arguments(tool_data: dict) -> dict:
+    """Take the parameters from wherever the model actually put them.
+
+    The prompt asks for them nested under `arguments`, but models routinely
+    flatten them to the top level next to `name`. Reading only `arguments` then
+    hands the tool an empty dict - which is why `write_file` was failing with
+    "No such file or directory: ''".
+    """
+    arguments = tool_data.get("arguments")
+    if isinstance(arguments, dict) and arguments:
+        return arguments
+    flattened = {key: value for key, value in tool_data.items()
+                 if key not in ("name", "arguments")}
+    if flattened:
+        return flattened
+    return arguments if isinstance(arguments, dict) else {}
+
+
+# A long text parameter may be sent as a raw block after the JSON instead of
+# inside it. Escaping a whole source file into a JSON string is the single thing
+# small models get wrong most often - a bare quote, a lost backslash before a
+# line continuation, one uncounted brace - and this removes the need entirely.
+_RAW_BLOCK_PATTERN = re.compile(
+    r"<(content|new_content|old_content|text|body|stdin)>\r?\n?(.*?)\r?\n?</\1>",
+    re.DOTALL)
+
+
+_RAW_OPEN_PATTERN = re.compile(r"<(content|new_content|old_content|text|body|stdin)>\r?\n?")
+
+
+def _take_raw_blocks(blob: str, complete: bool) -> tuple[str, dict, bool]:
+    """Pull `<content>…</content>` style blocks out of a tool call.
+
+    Returns the remaining JSON, the blocks, and whether a block was left open by
+    a reply that stopped early - in which case the call must be thrown away. The
+    JSON around it parses perfectly well on its own, and running it would write
+    a file with no content at all.
+    """
+    blocks = {}
+
+    def _collect(match):
+        # An empty block is nothing to go on; keep whatever the JSON had.
+        if match.group(2).strip():
+            blocks[match.group(1)] = match.group(2)
+        return ""
+
+    stripped = _RAW_BLOCK_PATTERN.sub(_collect, blob)
+
+    opened = _RAW_OPEN_PATTERN.search(stripped)
+    if opened:
+        if not complete:
+            return stripped, blocks, True
+        # The model closed `</tool_call>` but forgot `</content>`: the text is
+        # all there, so take it to the end.
+        blocks[opened.group(1)] = stripped[opened.end():].rstrip()
+        stripped = stripped[:opened.start()]
+
+    return stripped, blocks, False
+
+
+def _decode_tool_call(blob: str, quiet: bool, complete: bool = True) -> tuple[str, dict] | None:
+    blob, raw_blocks, cut_block = _take_raw_blocks(blob.strip(), complete)
+    blob = blob.strip()
+    note = ""
+
+    if cut_block:
         if not quiet:
             print(f"  {S.ERR}✗ The tool call was cut off before it finished; "
                   f"nothing was run.{S.R}")
@@ -348,39 +498,52 @@ def _decode_repaired(blob: str, quiet: bool, complete: bool):
                   f"({config.NUM_PREDICT}). Raise it in config.py.{S.R}")
         return None
 
-    if depth:
-        closers = "".join(_CLOSERS[bracket] for bracket in reversed(depth))
-        try:
-            repaired, _ = json.JSONDecoder().raw_decode(blob + closers)
-        except json.JSONDecodeError:
-            pass
-        else:
-            if not quiet:
-                print(f"  {S.WARN}⚠ The model left {len(closers)} bracket(s) unclosed "
-                      f"('{closers}'); repaired and continuing.{S.R}")
-            return repaired
-
-    if not quiet:
-        print(f"  {S.ERR}✗ AI generated invalid JSON for the tool call.{S.R}")
-    return None
-
-
-def _decode_tool_call(blob: str, quiet: bool, complete: bool = True) -> tuple[str, dict] | None:
-    blob = blob.strip()
     try:
         # raw_decode stops at the end of the first JSON value, so a missing or
         # duplicated closing tag does not matter.
         tool_data, _ = json.JSONDecoder().raw_decode(blob)
+        if not isinstance(tool_data, dict):
+            tool_data = None
     except json.JSONDecodeError:
-        tool_data = _decode_repaired(blob, quiet, complete)
-        if tool_data is None:
-            return None            # _decode_repaired has already said why
+        tool_data = None
 
-    if not isinstance(tool_data, dict) or not tool_data.get("name"):
+    depth, in_string = _json_tail_state(blob)
+    if tool_data is None and not in_string and complete:
+        # Repair only what the model finished writing. If it stopped mid-string,
+        # or never closed the tag, the payload is genuinely incomplete and
+        # closing the brackets would invent arguments that were never sent.
+        tool_data = _close_brackets(blob)
+        if tool_data is not None:
+            note = f"{len(depth)} bracket(s) were left unclosed"
+        else:
+            tool_data = _lenient_tool_call(blob)
+            if tool_data is not None:
+                note = "the payload broke the JSON around it and was read by position"
+
+    if tool_data is None:
+        if not quiet:
+            if in_string or not complete:
+                print(f"  {S.ERR}✗ The tool call was cut off before it finished; "
+                      f"nothing was run.{S.R}")
+                print(f"  {S.MUTED}  The reply probably hit num_predict "
+                      f"({config.NUM_PREDICT}). Raise it in config.py.{S.R}")
+            else:
+                print(f"  {S.ERR}✗ AI generated invalid JSON for the tool call.{S.R}")
+        return None
+
+    if not tool_data.get("name"):
         if not quiet:
             print(f"  {S.ERR}✗ The tool call is missing a tool name.{S.R}")
         return None
-    return tool_data["name"], tool_data.get("arguments", {})
+
+    arguments = _normalise_arguments(tool_data)
+    if not isinstance(tool_data.get("arguments"), dict) or (
+            not tool_data.get("arguments") and arguments):
+        note = (note + "; " if note else "") + "the parameters were not nested under 'arguments'"
+    arguments.update(raw_blocks)          # a raw block always wins over the JSON
+    if note and not quiet:
+        print(f"  {S.WARN}⚠ Malformed tool call: {note}. Repaired and continuing.{S.R}")
+    return tool_data["name"], arguments
 
 
 def parse_tool_calls(response_text: str, quiet: bool = False) -> list[tuple[str, dict]]:
@@ -412,8 +575,12 @@ def parse_tool_calls(response_text: str, quiet: bool = False) -> list[tuple[str,
     return [call] if call else []
 
 
+MAX_PARSE_RETRIES = 2
+
+
 async def chat_turn(client: ollama.AsyncClient, messages: list[dict]) -> str:
     call_count = 0
+    parse_failures = 0
     while True:
         # Text a console mangled cannot be encoded, so one bad character would
         # fail this request and every later one. Repair it before it is sent.
@@ -433,7 +600,22 @@ async def chat_turn(client: ollama.AsyncClient, messages: list[dict]) -> str:
 
         parsed = parse_tool_calls(response_text)
         if not parsed:
+            if TOOL_CALL_TAG in response_text and parse_failures < MAX_PARSE_RETRIES:
+                # The model meant to call a tool and produced something we could
+                # not read. Say so instead of ending the turn in silence - the
+                # model can correct itself, and usually does.
+                parse_failures += 1
+                messages.append({"role": "user", "content": (
+                    "[Tool Error]: Your last <tool_call> could not be parsed. Send it "
+                    "again as ONE JSON object of exactly this shape:\n"
+                    '{"name": "<tool name>", "arguments": {"<param>": "<value>"}}\n'
+                    "Every parameter goes inside \"arguments\". Inside a string value, "
+                    "write \\\" for a quote, \\\\ for a backslash and \\n for a line break, "
+                    "and close every brace you opened.")})
+                continue
             return stored
+
+        parse_failures = 0
 
         for function_name, arguments in parsed:
             tool_result = dispatch_tool(function_name, arguments)
