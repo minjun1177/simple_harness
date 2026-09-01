@@ -6,6 +6,7 @@ import re
 import datetime
 from simple_harness import __version__
 from simple_harness import config
+from simple_harness import paths
 from simple_harness import deepthink
 from simple_harness import git_ops
 from simple_harness import skills
@@ -74,6 +75,23 @@ def _report_mcp_problems(failed: list) -> None:
         print(f"  {S.MUTED}  Run {S.ACCENT}/mcp{S.MUTED} for details, {S.ACCENT}/mcp reload{S.MUTED} to retry.{S.R}\n")
 
 
+def _report_strays() -> None:
+    """Point out state an older version wrote into this directory.
+
+    Named, never touched. `sessions` and `memory.json` are ordinary enough
+    names that moving one on sight would eventually take somebody's real work
+    with it - so this says what it found and what to type, and stops there.
+    """
+    strays = paths.strays_in_cwd()
+    if not strays:
+        return
+    print(f"  {S.MUTED}\u25c6 {', '.join(strays)} here look like state from an "
+          f"older version.{S.R}")
+    print(f"  {S.MUTED}  It now lives in {paths.home()}. Nothing has been moved; "
+          f"to move it:{S.R}")
+    print(f"  {S.GRAY}    mv {' '.join(strays)} {paths.home()}/{S.R}\n")
+
+
 async def main() -> None:
 
     if config.CURRENT_OS == "Windows":
@@ -87,14 +105,16 @@ async def main() -> None:
 
     _welcome()
     _report_mcp_problems(failed_mcp)
+    _report_strays()
 
     current_session_id = None
 
     if config.PROMPT_TOOLKIT_AVAILABLE:
+        paths.ensure_home()          # FileHistory opens its file straight away
         from simple_harness.config import SlashCommandCompleter, PromptSession, FileHistory, ANSI
         completer = SlashCommandCompleter(['/help', '/clear', '/usage', '/model', '/models', '/exit', '/quit', '/sessions', '/load', '/title', '/autotitle', '/automode', '/fullcontent', '/record', '/export', '/system', '/planmode', '/skills', '/skill', '/mcp', '/perms', '/think', '/connect', '/undo', '/autocommit', '/deepthink'])
         session_pt = PromptSession(
-            history=FileHistory('.chat_history'),
+            history=FileHistory(config.HISTORY_FILE),
             completer=completer,
         )
 

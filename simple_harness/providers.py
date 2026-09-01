@@ -24,11 +24,13 @@ import os
 import threading
 import time
 
+from simple_harness import paths
+
 from simple_harness import atomic
 from simple_harness.sse import iter_sse
 
 
-CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".localchat")
+CONFIG_DIR = paths.home()
 CONFIG_PATH = os.path.join(CONFIG_DIR, "providers.json")
 
 HTTP_TIMEOUT = (10, 600)          # (connect, read): a long reply is not a hang

@@ -22,9 +22,11 @@ needs runtime state imports `config` inside the function.
 import os
 import re
 
+from simple_harness import paths
+
 
 SKILL_FILENAME = "SKILL.md"
-USER_SKILL_DIR = os.path.join(os.path.expanduser("~"), ".localchat", "skills")
+USER_SKILL_DIR = paths.state("skills")
 
 DESC_MAX_LENGTH = 400
 BODY_MAX_LENGTH = 20000

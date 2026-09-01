@@ -46,6 +46,7 @@ import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
+from simple_harness import paths
 from simple_harness.sse import iter_sse
 
 
@@ -54,7 +55,7 @@ CLIENT_INFO = {"name": "localchat", "version": "1.0.0"}
 
 TOOL_PREFIX = "mcp__"
 PROJECT_CONFIG_FILES = (".mcp.json", "mcp.json")
-USER_CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".localchat", "mcp.json")
+USER_CONFIG_FILE = paths.state("mcp.json")
 
 STDERR_KEEP_LINES = 60
 LIST_PAGE_LIMIT = 20            # pagination safety valve for tools/resources/prompts

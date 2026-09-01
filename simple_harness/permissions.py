@@ -28,10 +28,11 @@ import os
 from fnmatch import fnmatch
 
 from simple_harness import atomic
+from simple_harness import paths
 
 
 PROJECT_CONFIG_FILES = (".permissions.json", "permissions.json")
-USER_CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".localchat", "permissions.json")
+USER_CONFIG_FILE = paths.state("permissions.json")
 
 VERDICTS = ("deny", "allow")
 

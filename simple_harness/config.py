@@ -8,6 +8,8 @@ import platform
 import re
 import shutil
 
+from simple_harness import paths
+
 # `Parser`, `Query` and `QueryCursor` look unused here and are not: `tools.py`
 # reaches them as `config.Parser` and friends, so that the optional-dependency
 # guard lives in exactly one place. Do not delete them.
@@ -90,8 +92,11 @@ SYSTEM_PROMPT = syp()
 
 FILE_MAX_DISPLAY_LENGTH = 1000
 
-MEMORY_FILE = "memory.json"
-SESSION_DIR = "sessions"
+# Under ~/.localchat, not the working directory - see paths.py for why. Both
+# stay plain settings, so a caller that wants them somewhere else still can.
+MEMORY_FILE = paths.state("memory.json")
+SESSION_DIR = paths.state("sessions")
+HISTORY_FILE = paths.state("history")
 
 # Sessions are filed under a human title instead of a timestamp. AUTO_TITLE lets
 # the model name a new session after its first exchange; /title overrides it.
