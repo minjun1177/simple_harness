@@ -157,6 +157,31 @@ never second-guessed; and unless the fence says `tool_call` or `tool_code`
 outright, what it holds has to decode to a tool that actually exists. An
 ordinary ```json block in an answer stays an answer.
 
+### When a tool fails
+
+A failure used to arrive as the failure and nothing else - `[Error] Command
+failed (exit code 1).` and a traceback. Which command? Which file? The model had
+to recall what it asked for, and a small one often recalls wrong and fixes the
+file it was thinking about instead of the one that broke. So the call comes with
+the error:
+
+```
+[Error] run_cmd(command='python3 boom.py'): Command failed (exit code 1).
+Traceback (most recent call last):
+  File "boom.py", line 2, in f
+    raise RuntimeError("kaboom")
+RuntimeError: kaboom
+```
+
+Arguments are shortened so a file body cannot push the error off the top, and
+the error's own text is kept whole - it is usually the only thing that says what
+to do next. `FileNotFoundError: 'confg.py'` is a typo you can see; "a file error
+occurred" is a turn spent running the command again to find out.
+
+When the conversation has to be shortened, a long result is trimmed **from the
+middle**. The answer in a traceback is its last line, and keeping only the front
+used to delete exactly that.
+
 ### Web & Network Tools
 - `search_web`: Multi-source search with local relevance ranking (see Web Search below).
 - `get_url`: Fetch web page contents and strip raw HTML down to readable text.

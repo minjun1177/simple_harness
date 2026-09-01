@@ -1000,6 +1000,45 @@ def _commit_if_changed(function_name: str, arguments: dict, result) -> None:
         print(f"  {S.MUTED}⎇ committed {sha}{S.R}  {S.GRAY}/undo to take it back{S.R}")
 
 
+# An error used to arrive as the error and nothing else: "[Error] Command failed
+# (exit code 1)." followed by a traceback. Which command? Which file? The model
+# had to work that out from its own memory of what it asked for, and a small one
+# often gets it wrong - it fixes the file it was thinking about rather than the
+# one that broke. Naming the call costs one line and removes the guess.
+_ERROR_PREFIX = "[Error]"
+_ARG_VALUE_CHARS = 60          # a file body must not push the error off the top
+_ARG_LINE_CHARS = 200
+
+
+def _describe_call(function_name: str, arguments: dict) -> str:
+    """`run_cmd(command='python3 boom.py')` - the call, short enough to read."""
+    parts = []
+    for key, value in (arguments or {}).items():
+        text = value if isinstance(value, str) else json.dumps(
+            value, ensure_ascii=False, default=str)
+        text = " ".join(str(text).split())       # a whole file on one line
+        if len(text) > _ARG_VALUE_CHARS:
+            text = text[:_ARG_VALUE_CHARS] + "..."
+        parts.append(f"{key}={text!r}")
+    joined = ", ".join(parts)
+    if len(joined) > _ARG_LINE_CHARS:
+        joined = joined[:_ARG_LINE_CHARS] + "..."
+    return f"{function_name}({joined})"
+
+
+def _name_the_failure(function_name: str, arguments: dict, result):
+    """Put the call that failed in front of what it said about failing.
+
+    Only `[Error]`. A `[System]` result is a refusal that already says which
+    tool it refused, and `llm_client` counts those to stop a model knocking on
+    a closed door - rewriting that prefix would break the counter.
+    """
+    if not isinstance(result, str) or not result.startswith(_ERROR_PREFIX):
+        return result
+    said = result[len(_ERROR_PREFIX):].lstrip()
+    return f"{_ERROR_PREFIX} {_describe_call(function_name, arguments)}: {said}"
+
+
 def dispatch_tool(function_name: str, arguments: dict) -> str | None:
     # Small models sometimes emit "arguments" as a JSON string rather than an
     # object. Normalise once here so no handler has to defend against it.
@@ -1036,7 +1075,7 @@ def dispatch_tool(function_name: str, arguments: dict) -> str | None:
     finally:
         config.POLICY_AUTO_ALLOW = False
     _commit_if_changed(function_name, arguments, result)
-    return result
+    return _name_the_failure(function_name, arguments, result)
 
 
 def _handlers() -> dict:

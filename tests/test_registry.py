@@ -20,6 +20,7 @@ config.NATIVE_TOOLS = False
 from simple_harness import systemprompt
 from simple_harness import toolspec
 from simple_harness import tools
+from simple_harness import permissions
 
 failures = []
 
@@ -106,6 +107,41 @@ check("required parameters are marked",
 check("optional ones are not",
       "is_regex" not in dict((s["name"], s["input_schema"]["required"])
                              for s in native)["search_in_file"])
+
+# ---------------------------------------------------------------------------
+print("\n--- a failure says which call failed ---")
+# "[Error] Command failed (exit code 1)." names no command and no file. The
+# model had to recall what it asked for, and a small one fixes the file it was
+# thinking about rather than the one that broke.
+import tempfile                                                    # noqa: E402
+config.AUTO_ALLOW = True
+config.GIT_AUTO_COMMIT = False
+config.PERMISSIONS_ENABLED = False
+os.chdir(tempfile.mkdtemp(prefix="registry-"))
+
+missing = tools.dispatch_tool("read_file", {"filepath": "confg.py"})
+check("the tool is named", missing.startswith("[Error] read_file("), missing[:60])
+check("so is the argument", "confg.py" in missing)
+check("and the original message is still there",
+      "No such file or directory" in missing, missing[-60:])
+
+big = tools.dispatch_tool("write_file", {"filepath": "/nonexistent-xyz/a.py",
+                                         "content": "print('x')\n" * 400})
+check("a huge argument cannot push the error off the top", len(big) < 400, str(len(big)))
+check("the error itself survives it", "No such file or directory" in big)
+
+ok = tools.dispatch_tool("write_file", {"filepath": "fine.py", "content": "x = 1\n"})
+check("a result that did not fail is left alone", ok.startswith("[Success"), ok[:40])
+
+# `llm_client` counts consecutive [System] results to stop a model knocking on a
+# closed door. Rewriting that prefix would break the counter.
+config.PERMISSIONS_ENABLED = True
+with open(".permissions.json", "w", encoding="utf-8") as fh:
+    json.dump({"deny": ["delete_file"]}, fh)
+permissions.load_rules(force=True)
+refused = tools.dispatch_tool("delete_file", {"filepath": "fine.py"})
+check("a refusal keeps its [System] prefix", refused.startswith("[System]"), refused[:40])
+check("and is not given an error header", "[Error]" not in refused)
 
 print()
 if failures:

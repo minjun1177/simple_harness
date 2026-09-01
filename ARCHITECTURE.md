@@ -133,10 +133,16 @@ to *all* tools belongs here and nowhere else.
    handled after that lookup fails.
 6. **Auto-commit** — `_commit_if_changed` commits a file the tool changed, if
    the tool reported `[Success`.
+7. **Name the failure** — `_name_the_failure` puts the call in front of an
+   `[Error]` result: `[Error] run_cmd(command='python3 boom.py'): Command
+   failed (exit code 1).` Arguments are truncated so a file body cannot push
+   the error off the top. `[System]` is left alone - see below.
 
 A refusal from step 3 or 4 returns a string starting with `[System]`. That
 prefix is a contract: `chat_turn` counts consecutive `[System]` results and ends
 the turn after three, so a model cannot spend its whole budget on a closed door.
+Step 7 rewrites `[Error]` and never `[System]`, because rewriting the prefix
+would break that counter.
 
 ---
 
@@ -201,6 +207,14 @@ before it writes; being killed in between empties the file. Use
 does not. POSIX only: Windows has no mode bits, so `private` buys nothing there
 and `test_durability.py` says so instead of asserting a "600" that cannot
 exist.
+
+**5.6b A tool result is trimmed from the middle.** The answer in a traceback is
+its *last* line. `context._trim_tool_results` used to keep only the front, which
+kept "Traceback (most recent call last):" and deleted "RuntimeError: kaboom" -
+permanently, because `manage_context` writes the trimmed list back. On a local
+model, whose budget is small enough that this runs constantly, the harness was
+removing the reason every failure failed. Both ends are kept now; the front
+still matters for the results that are not errors.
 
 **5.7a State that is about the person goes in `paths.home()`; state that is
 about a project stays with the project.** Sessions, memory, input history and

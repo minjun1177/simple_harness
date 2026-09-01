@@ -97,12 +97,33 @@ def _get_summary_predict_tokens() -> int:
     return 300
 
 
+# A tool result is trimmed from the middle, not from the end.
+#
+# Keeping only the front used to throw away the one line that mattered. The
+# answer in a traceback is its **last** line - `RuntimeError: kaboom` - and the
+# front is boilerplate: "Traceback (most recent call last):" and frames from
+# inside the library. Head-only trimming kept the boilerplate and deleted the
+# conclusion, and it did it permanently, because `manage_context` writes the
+# trimmed list back over `messages`. On a local model, whose budget is small
+# enough that this runs constantly, the harness was quietly removing the reason
+# every failure failed and then wondering why the model could not fix it.
+#
+# The front still matters for the results that are not errors - the top of a
+# file, the first search hits - so both ends are kept.
+_TAIL_SHARE = 0.35
+
+
 def _trim_tool_results(messages: list[dict], max_chars: int = 3000) -> list[dict]:
     result = []
     for m in messages:
         content = m.get("content", "")
         if m["role"] == "user" and content.startswith("[Tool Result") and len(content) > max_chars:
-            trimmed = content[:max_chars] + f"\n...[Tool result truncated – {len(content) - max_chars} chars omitted]"
+            tail_chars = int(max_chars * _TAIL_SHARE)
+            head_chars = max_chars - tail_chars
+            omitted = len(content) - max_chars
+            trimmed = (content[:head_chars]
+                       + f"\n...[{omitted} chars omitted from the middle]...\n"
+                       + content[-tail_chars:])
             result.append({**m, "content": trimmed})
         else:
             result.append(m)

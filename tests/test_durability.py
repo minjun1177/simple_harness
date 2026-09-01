@@ -133,6 +133,34 @@ check("too short a sample is ignored", context._correction == settled)
 context.observe_usage(korean, 0)
 check("a provider that reports nothing is ignored", context._correction == settled)
 
+# ---------------------------------------------------------------------------
+print("\n--- a trimmed tool result keeps the line that mattered ---")
+# The answer in a traceback is its last line. Keeping only the front kept
+# "Traceback (most recent call last):" and deleted "RuntimeError: kaboom", and
+# `manage_context` writes the trimmed list back, so it was gone for good.
+FAILED = ("[Tool Result for 'run_cmd']:\n"
+          "[Error] run_cmd(command='python3 boom.py'): Command failed (exit code 1).\n"
+          "Traceback (most recent call last):\n"
+          + '  File "lib.py", line 1, in inner\n' * 200
+          + "RuntimeError: kaboom")
+
+trimmed = context._trim_tool_results(
+    [{"role": "user", "content": FAILED}], max_chars=400)[0]["content"]
+
+check("it is actually shorter", len(trimmed) < len(FAILED) and len(trimmed) < 600,
+      f"{len(FAILED)} -> {len(trimmed)}")
+check("the exception survives", "RuntimeError: kaboom" in trimmed)
+check("so does the call that failed", "python3 boom.py" in trimmed)
+check("and it says what it dropped", "omitted from the middle" in trimmed)
+
+short = "[Tool Result for 'read_file']:\nline one\nline two"
+check("a result under the ceiling is untouched",
+      context._trim_tool_results([{"role": "user", "content": short}],
+                                 max_chars=400)[0]["content"] == short)
+check("a message that is not a tool result is untouched",
+      context._trim_tool_results([{"role": "user", "content": "x" * 900}],
+                                 max_chars=400)[0]["content"] == "x" * 900)
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S): {failures}")
