@@ -49,7 +49,7 @@ jobs:
         # time, so a module-level `import config` anywhere below it stops the
         # whole program from importing. That failure has to be caught here.
         run: |
-          python -c "from simple_harness import app, llm_client, tools, toolspec, providers, context, session, permissions, skills, websearch, mcp_client, renderer, tui, deepthink, git_ops, subagent, atomic, sse, shell_session, connect, systemprompt, config"
+          python -c "from simple_harness import app, llm_client, tools, toolspec, providers, context, session, permissions, skills, websearch, mcp_client, renderer, tui, deepthink, git_ops, subagent, atomic, sse, shell_session, connect, systemprompt, config, paths"
           python -c "import simple_harness.__main__"
 
       - name: Tests
