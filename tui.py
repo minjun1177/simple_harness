@@ -45,6 +45,35 @@ def _get_mcp_info() -> str:
     return mcp_client.status_summary()
 
 
+# "SIMPLE HARNESS" does not fit on one line in this face - it comes to about
+# 109 columns - so the two words are stacked. On a terminal too narrow even for
+# that, a three-row face carries the same name rather than wrapping into
+# nonsense.
+_LOGO_WIDE = """\
+    ███████╗██╗███╗   ███╗██████╗ ██╗     ███████╗
+    ██╔════╝██║████╗ ████║██╔══██╗██║     ██╔════╝
+    ███████╗██║██╔████╔██║██████╔╝██║     █████╗  
+    ╚════██║██║██║╚██╔╝██║██╔═══╝ ██║     ██╔══╝  
+    ███████║██║██║ ╚═╝ ██║██║     ███████╗███████╗
+    ╚══════╝╚═╝╚═╝     ╚═╝╚═╝     ╚══════╝╚══════╝
+    ██╗  ██╗ █████╗ ██████╗ ███╗   ██╗███████╗███████╗███████╗
+    ██║  ██║██╔══██╗██╔══██╗████╗  ██║██╔════╝██╔════╝██╔════╝
+    ███████║███████║██████╔╝██╔██╗ ██║█████╗  ███████╗███████╗
+    ██╔══██║██╔══██║██╔══██╗██║╚██╗██║██╔══╝  ╚════██║╚════██║
+    ██║  ██║██║  ██║██║  ██║██║ ╚████║███████╗███████║███████║
+    ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝╚══════╝╚══════╝"""
+
+_LOGO_NARROW = """\
+    ╔═╗╦╔╦╗╔═╗╦  ╔═╗  ╦ ╦╔═╗╦═╗╔╗╔╔═╗╔═╗╔═╗
+    ╚═╗║║║║╠═╝║  ║╣   ╠═╣╠═╣╠╦╝║║║║╣ ╚═╗╚═╗
+    ╚═╝╩╩ ╩╩  ╩═╝╚═╝  ╩ ╩╩ ╩╩╚═╝╚╝╚═╝╚═╝╚═╝"""
+
+
+def _logo() -> str:
+    art = _LOGO_WIDE if config.tw() >= 66 else _LOGO_NARROW
+    return f"{S.ACCENT}{S.BOLD}\n{art}\n{S.R}"
+
+
 def _welcome():
     memory_count = len(load_memory())
     session_count = len(list_sessions())
@@ -57,16 +86,7 @@ def _welcome():
     # RULES example or in a tool's own parameter list
     tools_count = config.SYSTEM_PROMPT.count('\n    "name": "')
 
-    logo = f"""\
-{S.ACCENT}{S.BOLD}
-    ██╗      ██████╗  ██████╗ █████╗ ██╗          ██████╗██╗  ██╗ █████╗ ████████╗
-    ██║     ██╔═══██╗██╔════╝██╔══██╗██║         ██╔════╝██║  ██║██╔══██╗╚══██╔══╝
-    ██║     ██║   ██║██║     ███████║██║         ██║     ███████║███████║   ██║   
-    ██║     ██║   ██║██║     ██╔══██║██║         ██║     ██╔══██║██╔══██║   ██║   
-    ███████╗╚██████╔╝╚██████╗██║  ██║███████╗    ╚██████╗██║  ██║██║  ██║   ██║   
-    ╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝     ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   
-{S.R}"""
-    print(logo)
+    print(_logo())
     print(f"  {S.GRAY}model{S.R}      {S.WHITE}{providers.status_line()}{S.R}")
     print(f"  {S.GRAY}os{S.R}         {S.WHITE}{config.CURRENT_OS}{S.R}")
     print(f"  {S.GRAY}python{S.R}     {S.WHITE}{python_info}{S.R}")
@@ -119,12 +139,17 @@ def _show_help():
         ("/perms reload", "Re-read the permission rule files"),
         ("/perms allow|deny <rule>", "Add a rule, e.g. /perms allow run_cmd(git *)"),
         ("/think <on/off>", "Show or hide a reasoning model's thinking"),
+        ("/deepthink", "Show the plan-check-build-review-verify chain and whether it is on"),
+        ("/deepthink <on/off>", "Turn that chain on or off"),
+        ("/undo", "Take back the last file change the AI committed"),
+        ("/autocommit", "Whether each AI edit gets its own git commit, and the recent ones"),
+        ("/autocommit <on/off>", "Turn that on or off"),
     ]
     print()
     print(f"  {S.BOLD}{S.ACCENT}Commands{S.R}")
     print(f"  {_hr(width=44)}")
     for cmd, desc in commands:
-        print(f"  {S.ACCENT}{cmd:12}{S.R} {S.GRAY}{desc}{S.R}")
+        print(f"  {S.ACCENT}{cmd:22}{S.R} {S.GRAY}{desc}{S.R}")
     print()
 
 

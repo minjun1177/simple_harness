@@ -2,6 +2,8 @@ import os
 import re
 import json
 import datetime
+
+import atomic
 import config
 import providers
 from config import S, ttlp
@@ -17,8 +19,7 @@ def load_memory() -> dict:
     return {}
 
 def save_memory(memory: dict) -> None:
-    with open(config.MEMORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(memory, f, ensure_ascii=False, indent=2)
+    atomic.write_json(config.MEMORY_FILE, memory)
 
 def handle_write_memory(memory_id: str, content: str) -> str:
     if not memory_id:
@@ -148,8 +149,7 @@ def save_session(messages: list[dict], session_id: str) -> str:
     }
 
     try:
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        atomic.write_json(filepath, data)
     except Exception as e:
         print(f"  {S.ERR}✗ Failed to save session: {e}{S.R}")
     return session_id
@@ -172,8 +172,7 @@ def rename_session(session_id: str, new_title: str) -> str:
             data = json.load(f)
         if isinstance(data, dict):
             data["title"] = new_title
-            with open(old_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            atomic.write_json(old_path, data)
         if new_id != session_id:
             os.replace(old_path, os.path.join(config.SESSION_DIR, f"{new_id}.json"))
         return new_id

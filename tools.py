@@ -5,6 +5,7 @@ import subprocess
 import time
 import shutil
 import hashlib
+import inspect
 import requests
 import psutil
 import config
@@ -12,8 +13,10 @@ from config import S, TREE_SITTER_AVAILABLE, _TS_LANGUAGES, _EXT_TO_LANG
 from tui import _fmt_tool_call, _approval_prompt
 from skills import handle_use_skill
 import mcp_client
+import git_ops
 import permissions
 import shell_session
+import toolspec
 from websearch import search_web as search_pipeline, strip_html
 
 if TREE_SITTER_AVAILABLE:
@@ -940,6 +943,63 @@ def handle_read_mcp_resource(uri: str, server_name: str = "") -> str:
     return mcp_client.read_resource_text(uri, server_name)
 
 
+def handle_spawn_agent(task: str, context: str = "", model: str = "") -> str:
+    """Delegate a self-contained job to a fresh agent. See subagent.py.
+
+    Approval is asked for here rather than left to the sub-agent's own tool
+    calls. Those are checked too, but a sub-agent costs a stretch of time and,
+    on a hosted model, real money before it reaches its first tool - so the
+    decision to hire one is the user's, the same as running a command is.
+    """
+    import subagent
+    first_line = (task or "").strip().splitlines()[0] if (task or "").strip() else ""
+    details = [("task", first_line), ("model", model or "same as this one")]
+    if not _approval_prompt("Hire Sub-agent", details, rule="spawn_agent"):
+        return ("[System] The user declined to start a sub-agent. Do this part of "
+                "the work yourself.")
+    return subagent.run(task, context, model)
+
+
+# Which argument of which tool names a file that ends up changed. `create_dir`
+# is absent on purpose: git does not track an empty directory, so there would
+# be nothing to commit.
+_WRITES_FILES = {
+    "write_file": ("filepath",),
+    "edit_file": ("filepath",),
+    "delete_file": ("filepath",),
+    "copy_file": ("dst",),
+}
+
+
+# Anything that changes the world rather than reporting on it. `run_cmd` and
+# `send_input` are here because a command can write as easily as it can read,
+# and a stage that is meant to be read-only cannot check which.
+_CHANGES_THINGS = frozenset(_WRITES_FILES) | {
+    "create_dir", "run_cmd", "send_input", "end_process",
+    "write_memory", "edit_memory", "delete_memory", "call_api",
+}
+
+
+def _commit_if_changed(function_name: str, arguments: dict, result) -> None:
+    """Commit what a tool just wrote, so it can be taken back later.
+
+    Only runs for a tool that reports success: a write the user declined at the
+    approval prompt, or one that failed, has changed nothing to commit.
+    """
+    keys = _WRITES_FILES.get(function_name)
+    if not keys or not git_ops.enabled():
+        return
+    if not isinstance(result, str) or not result.startswith("[Success"):
+        return
+    paths = [arguments[key] for key in keys
+             if isinstance(arguments.get(key), str) and arguments[key]]
+    if not paths:
+        return
+    sha = git_ops.auto_commit(paths, function_name)
+    if sha:
+        print(f"  {S.MUTED}⎇ committed {sha}{S.R}  {S.GRAY}/undo to take it back{S.R}")
+
+
 def dispatch_tool(function_name: str, arguments: dict) -> str | None:
     # Small models sometimes emit "arguments" as a JSON string rather than an
     # object. Normalise once here so no handler has to defend against it.
@@ -953,6 +1013,17 @@ def dispatch_tool(function_name: str, arguments: dict) -> str | None:
 
     _fmt_tool_call(function_name, arguments)
 
+    if config.DEEPTHINK_READONLY and function_name in _CHANGES_THINGS:
+        # Telling a model not to edit yet is not enough - it edits anyway, and
+        # then the stages that were meant to review a plan are reviewing work
+        # nobody planned. So the planning stages are read-only for real.
+        print(f"  {S.MUTED}✗ not yet: this stage is for working it out, "
+              f"not changing it{S.R}")
+        return (f"[System] '{function_name}' is not available during this stage. "
+                "You are working out what to do, not doing it - say what you would "
+                "change and why. You will be asked to make the change in a later "
+                "stage, and everything you write now carries over to it.")
+
     verdict, rule = permissions.decide(function_name, arguments)
     if verdict == "deny":
         print(f"  {S.ERR}✗ Blocked by permission rule: {rule}{S.R}")
@@ -961,44 +1032,111 @@ def dispatch_tool(function_name: str, arguments: dict) -> str | None:
 
     config.POLICY_AUTO_ALLOW = verdict == "allow"
     try:
-        return _run_tool(function_name, arguments)
+        result = _run_tool(function_name, arguments)
     finally:
         config.POLICY_AUTO_ALLOW = False
+    _commit_if_changed(function_name, arguments, result)
+    return result
+
+
+def _handlers() -> dict:
+    """Tool name to the function that runs it.
+
+    `session` is imported here rather than at the top only because it keeps the
+    memory handlers next to the rest of the table; there is no cycle either way.
+    """
+    global _HANDLERS
+    if _HANDLERS is None:
+        from session import (handle_write_memory, handle_get_memory_list,
+                             handle_read_memory, handle_delete_memory,
+                             handle_edit_memory)
+        _HANDLERS = {
+            "search_web": handle_search_web,
+            "get_url": handle_get_url,
+            "run_cmd": safe_run_cmd,
+            "send_input": handle_send_input,
+            "end_process": handle_end_process,
+            "list_dir": handle_list_dir,
+            "read_file": handle_read_file,
+            "write_file": handle_write_file,
+            "edit_file": handle_edit_file,
+            "delete_file": handle_delete_file,
+            "copy_file": handle_copy_file,
+            "create_dir": handle_create_dir,
+            "git_status": handle_git_status,
+            "git_diff": handle_git_diff,
+            "write_memory": handle_write_memory,
+            "get_memory_list": handle_get_memory_list,
+            "read_memory": handle_read_memory,
+            "delete_memory": handle_delete_memory,
+            "edit_memory": handle_edit_memory,
+            "get_user_input": handle_get_input,
+            "get_system_info": handle_get_system_info,
+            "search_in_file": handle_search_in_file,
+            "call_api": handle_call_api,
+            "get_code_skeleton": handle_get_code_skeleton,
+            "query_ast_node": handle_query_ast_node,
+            "submit_plan_for_approval": handle_submit_plan_for_approval,
+            "use_skill": handle_use_skill,
+            "spawn_agent": handle_spawn_agent,
+        }
+        _check_registry(_HANDLERS)
+    return _HANDLERS
+
+
+_HANDLERS = None
+
+
+def _check_registry(handlers: dict) -> None:
+    """Refuse to run with a table and a prompt that disagree.
+
+    This is the whole point of the registry: a tool the model is told about but
+    that nothing can run, or a handler the model is never told exists, is a
+    silent failure at the worst possible moment. Here it is a startup error.
+    """
+    described = set(toolspec.names())
+    implemented = set(handlers)
+    unrunnable = described - implemented
+    unadvertised = implemented - described
+    problems = []
+    if unrunnable:
+        problems.append(f"described to the model but not implemented: "
+                        f"{', '.join(sorted(unrunnable))}")
+    if unadvertised:
+        problems.append(f"implemented but not described to the model: "
+                        f"{', '.join(sorted(unadvertised))}")
+    for tool in toolspec.TOOLS:
+        handler = handlers.get(tool.name)
+        if handler is None:
+            continue
+        try:
+            wanted = len(inspect.signature(handler).parameters)
+        except (TypeError, ValueError):
+            continue
+        if wanted != len(tool.params):
+            problems.append(f"{tool.name}: the spec lists {len(tool.params)} "
+                            f"parameter(s), {handler.__name__} takes {wanted}")
+    if problems:
+        raise RuntimeError("tool registry is inconsistent - "
+                           + "; ".join(problems))
 
 
 def _run_tool(function_name: str, arguments: dict) -> str | None:
-    from session import (handle_write_memory, handle_get_memory_list,
-                         handle_read_memory, handle_delete_memory, handle_edit_memory)
-    if function_name == "search_web": return handle_search_web(arguments.get("query", ""))
-    if function_name == "run_cmd": return safe_run_cmd(arguments.get("command", ""), arguments.get("stdin", "") or arguments.get("input", ""))
-    if function_name == "send_input": return handle_send_input(arguments.get("session", ""), arguments.get("stdin", "") or arguments.get("input", "") or arguments.get("text", ""))
-    if function_name == "end_process": return handle_end_process(arguments.get("session", ""))
-    if function_name == "read_file": return handle_read_file(arguments.get("filepath", ""))
-    if function_name == "get_url": return handle_get_url(arguments.get("url", ""))
-    if function_name == "write_file": return handle_write_file(arguments.get("filepath", ""), arguments.get("content", ""))
-    if function_name == "edit_file": return handle_edit_file(arguments.get("filepath", ""), arguments.get("old_content", ""), arguments.get("new_content", ""))
-    if function_name == "delete_file": return handle_delete_file(arguments.get("filepath", ""))
-    if function_name == "copy_file": return handle_copy_file(arguments.get("src", ""), arguments.get("dst", ""))
-    if function_name == "list_dir": return handle_list_dir(arguments.get("dirpath", ""))
-    if function_name == "create_dir": return handle_create_dir(arguments.get("dirpath", ""))
-    if function_name == "git_status": return handle_git_status()
-    if function_name == "git_diff": return handle_git_diff()
-    if function_name == "write_memory": return handle_write_memory(arguments.get("id", ""), arguments.get("content", ""))
-    if function_name == "get_memory_list": return handle_get_memory_list()
-    if function_name == "read_memory": return handle_read_memory(arguments.get("id", ""))
-    if function_name == "delete_memory": return handle_delete_memory(arguments.get("id", ""))
-    if function_name == "edit_memory": return handle_edit_memory(arguments.get("id", ""), arguments.get("new_content", ""))
-    if function_name == "get_user_input": return handle_get_input(arguments.get("what_do", ""), arguments.get("prompt", []), arguments.get("questions"))
-    if function_name == "search_in_file": return handle_search_in_file(arguments.get("query", ""), arguments.get("is_regex", False))
-    if function_name == "get_system_info": return handle_get_system_info()
-    if function_name == "call_api": return handle_call_api(arguments.get("url", ""), arguments.get("method", ""), arguments.get("headers",""), arguments.get("payload",""))
-    if function_name == "get_code_skeleton": return handle_get_code_skeleton(arguments.get("file_path", ""))
-    if function_name == "query_ast_node": return handle_query_ast_node(arguments.get("file_path", ""), arguments.get("pattern", ""), arguments.get("language", ""))
-    if function_name == "submit_plan_for_approval": return handle_submit_plan_for_approval(arguments.get("context_discovered", ""), arguments.get("diff_blueprint", ""), arguments.get("verification_steps", ""))
-    if function_name in ("use_skill", "skill"): return handle_use_skill(arguments.get("skill_name", "") or arguments.get("name", "") or arguments.get("skill", ""))
-    if function_name == "list_mcp_resources": return handle_list_mcp_resources(arguments.get("server", "") or arguments.get("server_name", ""))
-    if function_name == "read_mcp_resource": return handle_read_mcp_resource(arguments.get("uri", ""), arguments.get("server", "") or arguments.get("server_name", ""))
-    if mcp_client.is_mcp_tool(function_name): return handle_mcp_tool_call(function_name, arguments)
+    tool = toolspec.get(function_name)
+    if tool is not None:
+        handler = _handlers().get(tool.name)
+        if handler is not None:
+            return handler(*tool.bind(arguments))
+
+    if mcp_client.is_mcp_tool(function_name):
+        return handle_mcp_tool_call(function_name, arguments)
+    if function_name == "list_mcp_resources":
+        return handle_list_mcp_resources(arguments.get("server", "")
+                                         or arguments.get("server_name", ""))
+    if function_name == "read_mcp_resource":
+        return handle_read_mcp_resource(arguments.get("uri", ""),
+                                        arguments.get("server", "")
+                                        or arguments.get("server_name", ""))
 
     print(f"  {S.WARN}\u26a0 Unknown tool: {function_name}{S.R}")
     return None

@@ -1,6 +1,8 @@
 import platform
 import os
 
+import toolspec
+
 from skills import skills_catalog_prompt
 from mcp_client import mcp_tools_prompt
 
@@ -30,213 +32,10 @@ def titleprompt() -> str:
 
 """
 
-def systemprompt() -> str:
-    base_prompt = """\
-You are a powerful AI assistant running on **""" + CURRENT_OS + """**.
-You have access to file, web, system, and memory tools to help the user.
-Your goal is to be maximally helpful by leveraging your tools when needed.
-
-### AVAILABLE TOOLS:
-[
-  {
-    "name": "search_web",
-    "description": "Search the web for up-to-date information. Results are passages of real page text gathered from several sources and ranked locally for relevance, NOT search-engine snippets. If the result says 'No relevant results', that is a real outcome: the specific term you asked about was not found on any page that came back. In that case retry with different wording or use get_url on official documentation - never answer from pages the result told you are off-topic.",
-    "parameters": {
-      "query": "The search query string. Keep the distinctive terms (exact identifiers, error strings, product names) and drop conversational filler."
-    }
-  },
-  {
-    "name": "get_url",
-    "description": "Fetch the content of a URL. HTML pages are automatically converted to clean text.",
-    "parameters": {
-      "url": "The URL to fetch"
-    }
-  },
-  {
-    "name": "run_cmd",
-    "description": "Run a shell command on the user's system. The command stays connected while it runs: if it stops printing and is still alive it is waiting for input, and the result tells you so along with a session id - read its output and reply with send_input. This is how you test an interactive program you just wrote. You may also send the first answers up front in a <stdin> raw block, one per line.",
-    "parameters": {
-      "command": "Shell command. On Windows, use 'cmd /c <command>' for built-in commands like echo, dir, etc. On Linux/macOS, use commands directly. The command cannot reach the user's keyboard - you answer its prompts yourself."
-    }
-  },
-  {
-    "name": "send_input",
-    "description": "Answer a command that run_cmd reported as waiting, and read what it prints next. Put the answer in a <stdin> raw block after the JSON, exactly as it should be typed. An empty block sends nothing and just listens for more output. Use this to play through an interactive program one prompt at a time.",
-    "parameters": {
-      "session": "The session id from the [Waiting] result, e.g. 's1'. Omit it when only one command is running."
-    }
-  },
-  {
-    "name": "end_process",
-    "description": "Stop a command that run_cmd left running, when you are done with it or it will not exit on its own.",
-    "parameters": {
-      "session": "The session id from the [Waiting] result, e.g. 's1'."
-    }
-  },
-  {
-    "name": "list_dir",
-    "description": "List the contents of a directory.",
-    "parameters": {
-      "dirpath": "The absolute path to the directory."
-    }
-  },
-  {
-    "name": "read_file",
-    "description": "Read the contents of a file. Output uses hashline format: each line is prefixed with 'LINE_NUM:HASH|'. Example: '1:3d|import random'. The 2-char hex hash uniquely identifies each line's content.",
-    "parameters": {
-      "filepath": "The absolute path to the file."
-    }
-  },
-  {
-    "name": "write_file",
-    "description": "Write a file. Use this when creating a new file or completely replacing one. The file body is NOT a JSON parameter: put it in a <content> block directly after the JSON object, inside the same <tool_call> (see DO rule 3). Write it there exactly as it should appear on disk, with no escaping.",
-    "parameters": {
-      "filepath": "The absolute path to the file. This one DOES go in the JSON."
-    }
-  },
-  {
-    "name": "edit_file",
-    "description": "Edit part of an existing file by replacing old content with new. Use this instead of write_file when you only need to change part of a file. The two snippets are NOT JSON parameters: put them in <old_content> and <new_content> blocks after the JSON object, inside the same <tool_call> (see DO rule 3). Hashline prefixes are stripped automatically.",
-    "parameters": {
-      "filepath": "The absolute path to the file. This one DOES go in the JSON."
-    }
-  },
-  {
-    "name": "delete_file",
-    "description": "Delete a specific file.",
-    "parameters": {
-      "filepath": "The absolute path to the file to delete."
-    }
-  },
-  {
-    "name": "copy_file",
-    "description": "Copy a file from one path to another.",
-    "parameters": {
-      "src": "The absolute path to the source file.",
-      "dst": "The absolute path to the destination file."
-    }
-  },
-  {
-    "name": "create_dir",
-    "description": "Create a new directory.",
-    "parameters": {
-      "dirpath": "The absolute path to the new directory."
-    }
-  },
-  {
-    "name": "git_status",
-    "description": "Get the current git status.",
-    "parameters": {}
-  },
-  {
-    "name": "git_diff",
-    "description": "Get the current git diff.",
-    "parameters": {}
-  },
-  {
-    "name": "write_memory",
-    "description": "Save important information to persistent memory for future recall.",
-    "parameters": {
-      "id": "Memory ID (a descriptive label). e.g., 'User name', 'User preferences', 'Project goal'",
-      "content": "Memory content. e.g., 'Jhon', 'Prefers dark mode', 'Build a chat app'"
-    }
-  },
-  {
-    "name": "get_memory_list",
-    "description": "Get the list of all stored memory IDs with previews.",
-    "parameters": {}
-  },
-  {
-    "name": "read_memory",
-    "description": "Read the full content of a specific memory by its ID.",
-    "parameters": {
-      "id": "The memory ID to read."
-    }
-  },
-  {
-    "name": "delete_memory",
-    "description": "Delete a specific memory by its ID.",
-    "parameters": {
-      "id": "The memory ID to delete."
-    }
-  },
-  {
-    "name": "edit_memory",
-    "description": "Edit the content of a specific memory by its ID.",
-    "parameters": {
-      "id": "The memory ID to edit.",
-      "new_content": "The new content for the memory."
-    }
-  },
-  {
-    "name": "get_user_input",
-    "description": "Ask the user one or more questions and get their answers. Each question is asked separately, with its own list of options; the user picks a number or types their own answer. Use this when a choice is genuinely the user's to make.",
-    "parameters": {
-      "questions": "A list of questions. Each item is an object: {\\"question\\": \\"the question text\\", \\"options\\": [\\"choice 1\\", \\"choice 2\\", \\"choice 3\\"]}. Give 2-4 options per question, or an empty list to ask for free text. Do NOT add a 'custom', 'other', 'Custom Input' or '직접 입력' option yourself - a Custom Input choice is always appended automatically, so adding one duplicates it. List only the real alternatives. Ask every question you need in ONE call - do not call this tool repeatedly."
-    }
-  },
-  {
-    "name": "get_system_info",
-    "description": "Show system usage.",
-    "parameters": {}
-  },
-  {
-    "name": "search_in_file",
-    "description": "Search for a text pattern or regex across all files in the current workspace directory (like grep). Returns matching lines with file paths and line numbers.",
-    "parameters": {
-      "query": "The text or regex pattern to search for.",
-      "is_regex": "If true, treat query as a regular expression. Default is false."
-    }
-  },
-  {
-    "name": "call_api",
-    "description": "Send an HTTP request to an external API endpoint. Supports GET, POST, PUT, PATCH, DELETE methods.",
-    "parameters": {
-      "url": "The full URL of the API endpoint.",
-      "method": "HTTP method: GET, POST, PUT, PATCH, or DELETE.",
-      "headers": "(Optional) JSON string of HTTP headers. e.g., {\\"Authorization\\": \\"Bearer token\\", \\"Content-Type\\": \\"application/json\\"}",
-      "payload": "(Optional) JSON string of the request body for POST/PUT/PATCH requests."
-    }
-  },
-  {
-    "name": "get_code_skeleton",
-    "description": "Parse a source code file using AST and return a JSON tree of its structure (functions, classes, parameters, return types, decorators). Useful for understanding architecture without reading the entire file. Supports: Python, JavaScript, TypeScript, Java, C, C++, Go, Rust, C#.",
-    "parameters": {
-      "file_path": "The absolute path to the source code file to analyze."
-    }
-  },
-  {
-    "name": "query_ast_node",
-    "description": "Search for specific AST patterns in a source file using Tree-sitter S-expression query syntax. Returns matching node locations and code snippets. Useful for finding security vulnerabilities, unsafe patterns, or specific code constructs. Example patterns: '(call function: (attribute) @fn)' to find method calls, '(binary_operator operator: \\\"+\\\" right: (identifier) @val)' to find string concatenation with variables.",
-    "parameters": {
-      "file_path": "The absolute path to the source code file to search.",
-      "pattern": "A Tree-sitter S-expression query pattern. Use @capture_name to capture nodes.",
-      "language": "(Optional) Language name (python, javascript, typescript, java, c, cpp, go, rust, csharp). Auto-detected from file extension if omitted."
-    }
-  },
-  {
-    "name": "submit_plan_for_approval",
-    "description": "Submit a task plan and diff blueprint to the user for approval. You MUST use this before execution when PLAN MODE is active and the task involves modifying files or complex logic.",
-    "parameters": {
-      "context_discovered": "Summary of what files and context you analyzed to form this plan.",
-      "diff_blueprint": "Detailed outline of exactly which files and functions will change and how.",
-      "verification_steps": "How you will verify the changes after execution."
-    }
-  },
-  {
-    "name": "use_skill",
-    "description": "Load the full instructions of a skill listed under AVAILABLE SKILLS. Call this BEFORE starting a task whenever the request matches a skill's description. Returns the skill's instructions plus the absolute paths of any files bundled with it.",
-    "parameters": {
-      "skill_name": "The exact skill name from the AVAILABLE SKILLS list."
-    }
-  }
-]
-
-### RULES:
-
-#### DO
-1. If you can answer the user's question without any tools, just answer normally.
-2. If you need to use a tool to get more information, you MUST use the following exact format:
+# The four rules that describe *how* a tool is called, rather than how to
+# behave. Everything else in the rules applies to both protocols, so it is
+# written once and shared - see `tool_rules`.
+_TEXT_PROTOCOL = """2. If you need to use a tool to get more information, you MUST use the following exact format:
    <tool_call>
    {"name": "tool_name", "arguments": {"parameter_name": "value"}}
    </tool_call>
@@ -262,16 +61,67 @@ Your goal is to be maximally helpful by leveraging your tools when needed.
    50
    </stdin>
    </tool_call>
-   Answer what the program actually asked, based on the output you just read. Keep going until it exits, then call end_process if it is still running.
+   Answer what the program actually asked, based on the output you just read. Keep going until it exits, then call end_process if it is still running."""
+
+_NATIVE_PROTOCOL = """2. When you need a tool, call it through the tool interface supplied with this request. Do not describe a call in your reply text, and never use a tool that was not supplied.
+3. Long values - a whole file body, a block of code, several lines of input - go straight into the tool's own parameter, written exactly as they should appear. Nothing needs escaping by hand; the interface carries the text as it is.
+   To try out a program you just wrote, run it and answer its prompts one at a time. run_cmd returns what the program printed plus a session id, you read the prompt, and send_input answers it. Answer what the program actually asked, based on the output you just read. Keep going until it exits, then call end_process if it is still running."""
+
+_TEXT_DONT_FIRST = """1. Do NOT add any conversational text before or after the <tool_call> tag if you are calling a tool. Just output the tag and the JSON inside it."""
+
+_NATIVE_DONT_FIRST = """1. Do NOT write a tool call out as text. Text that looks like a call is not one - use the tool interface."""
+
+_TEXT_IMPORTANT_FIRST = """1.  IMPORTANT: When outputting Windows file paths in JSON, you MUST escape backslashes like this: "C:\\\\folder\\\\file.txt"."""
+
+_NATIVE_IMPORTANT_FIRST = """1.  IMPORTANT: Write Windows file paths as they really are, e.g. C:\\folder\\file.txt. Nothing needs doubling by hand."""
+
+_TEXT_IMPORTANT_LAST = """17. Tool call JSON must be ONE object: {"name": "<tool>", "arguments": {...}}. Put EVERY parameter inside "arguments" - never beside "name". Keep that object short: file contents, code and any other long text belong in a raw block after it, as DO rule 3 shows, never escaped into a JSON string. Before you finish, count the closing braces: the object ends with }}."""
+
+_NATIVE_IMPORTANT_LAST = """17. Pass every argument in the tool call itself, and only the parameters that tool actually lists. Your reply text is for the user, not for the arguments."""
+
+
+def native_tools_active() -> bool:
+    """Whether this turn's provider takes tool schemas over its own API.
+
+    Imported late: `providers` reads `config`, which builds a prompt at import
+    time, and asking at module level would close that circle.
+    """
+    import config
+    if not getattr(config, "NATIVE_TOOLS", True):
+        return False
+    try:
+        import providers
+        return bool(providers.current().supports_native_tools)
+    except Exception:
+        return False
+
+
+def tool_rules(native: bool | None = None) -> str:
+    """The half of the prompt that describes the protocol, not the assistant.
+
+    A sub-agent needs every word of this - it speaks whichever dialect the
+    assistant speaks - and a second copy of it would drift from this one
+    within a week.
+
+    Only four rules differ between the text protocol and native tool calling.
+    The rest is behaviour, and is the same either way.
+    """
+    if native is None:
+        native = native_tools_active()
+    return ("""### RULES:
+
+#### DO
+1. If you can answer the user's question without any tools, just answer normally.
+@@PROTOCOL@@
 
 #### DO NOT
-1. Do NOT add any conversational text before or after the <tool_call> tag if you are calling a tool. Just output the tag and the JSON inside it.
+@@DONT_FIRST@@
 2. Do NOT use `get_url` to read local files. If you need to read a local file (e.g., C:\\...), always use `read_file`.
 3. Do NOT hallucinate or guess file paths. Use exact, absolute paths.
 4. Do NOT use delete_memory, edit_memory tool when a user makes a request to read memory.
 
 #### IMPORTANT
-1.  IMPORTANT: When outputting Windows file paths in JSON, you MUST escape backslashes like this: "C:\\\\folder\\\\file.txt".
+@@IMPORTANT_FIRST@@
 2.  Don't judge the URL given by the user with your prior knowledge, but unconditionally rely on the tool result to generate an answer.
 3.  When editing files: first use `read_file` to see the current contents. Use `edit_file` for partial modifications, or `write_file` only when creating a new file or fully replacing content.
 4.  If you need to use multiple tools in sequence, call them one at a time and wait for each result before calling the next tool.
@@ -287,7 +137,7 @@ Your goal is to be maximally helpful by leveraging your tools when needed.
 14. Reply by naturally substituting the actual data from the tool result into the sentence.
 15. Skills: if a request matches an entry in AVAILABLE SKILLS, call `use_skill` with {"skill_name": "<the exact name>"} BEFORE doing the work, then follow the returned instructions. Load a skill once per conversation - never reload one you already have. Never invent a skill name that is not on the list.
 16. MCP tools: any tool named `mcp__<server>__<tool>` comes from an attached MCP server and is used exactly like a built-in tool. Copy the name character for character, and pass the parameters that tool lists - never guess a server or tool name that is not in the MCP TOOLS section.
-17. Tool call JSON must be ONE object: {"name": "<tool>", "arguments": {...}}. Put EVERY parameter inside "arguments" - never beside "name". When a parameter carries file contents, escape it as JSON: a quote is \\", a backslash is \\\\, and a line break is \\n (never a real newline). Before you finish, count the closing braces: the object ends with }}.
+@@IMPORTANT_LAST@@
 
 #### HASHLINE FORMAT
 When you use `read_file`, each line is returned in **hashline format**: `LINE_NUM:HASH|content`.
@@ -297,9 +147,34 @@ When you use `read_file`, each line is returned in **hashline format**: `LINE_NU
 - When using `write_file`, you may include hashline prefixes — they will be auto-stripped before writing.
 - Do NOT include hashline prefixes in your final response to the user. They are only for internal tool use.
 
+"""
+            .replace("@@PROTOCOL@@", _NATIVE_PROTOCOL if native else _TEXT_PROTOCOL)
+            .replace("@@DONT_FIRST@@", _NATIVE_DONT_FIRST if native else _TEXT_DONT_FIRST)
+            .replace("@@IMPORTANT_FIRST@@",
+                     _NATIVE_IMPORTANT_FIRST if native else _TEXT_IMPORTANT_FIRST)
+            .replace("@@IMPORTANT_LAST@@",
+                     _NATIVE_IMPORTANT_LAST if native else _TEXT_IMPORTANT_LAST))
+
+
+def systemprompt() -> str:
+    native = native_tools_active()
+    # Over a native interface the tools arrive with the request, so listing them
+    # again here would cost about 4.5KB of prompt on every single turn and give
+    # the model two descriptions of the same tool to reconcile.
+    catalogue = ("The tools you can use are supplied with this request. Use the "
+                 "names and parameters exactly as they are given there."
+                 if native else "### AVAILABLE TOOLS:\n" + toolspec.prompt_schema())
+    base_prompt = """\
+You are a powerful AI assistant running on **""" + CURRENT_OS + """**.
+You have access to file, web, system, and memory tools to help the user.
+Your goal is to be maximally helpful by leveraging your tools when needed.
+
+""" + catalogue + "\n\n" + tool_rules(native) + """
 Finally, You must reply with **Korean**.
 """
-    return base_prompt + mcp_tools_prompt() + skills_catalog_prompt() + load_context_file()
+    return (base_prompt + mcp_tools_prompt(tools_json=not native)
+            + skills_catalog_prompt() + load_context_file())
+
 
 if __name__ == "__main__":
     print("This file can not run directly.")

@@ -23,3 +23,21 @@
 * [x] Waiting-for-input detection per platform (/proc on Linux, CPU elsewhere) + tests/test_platform.py
 * [x] Decode command output by what it actually is (UTF-8, else the console code page)
 * [x] /connect: Anthropic, OpenAI (+compatible), Gemini alongside Ollama
+* [x] Pin dependencies to the versions that were actually tested (+ requirements-lock.txt)
+* [x] Atomic file writes, so a crash cannot empty a session, the memory or the saved API keys
+* [x] Token estimate that knows Korean from English, and calibrates against what providers report
+* [x] One tool table (toolspec.py): the prompt is rendered from it, dispatch binds through it, drift is a startup error
+* [x] Sub-agents: spawn_agent hires a second model for one job and returns only its report
+* [x] Answer instead of a blank turn when a reasoning model thinks and says nothing
+* [x] Native function calling for Anthropic, OpenAI and Gemini - same tool table, 12KB less prompt
+* [x] Native tool calling on Ollama too, decided per model from what the model says it supports
+* [x] A git commit per AI edit and /undo to take it back, toggled with /autocommit
+* [x] Deepthink: plan -> check -> build -> review the real diff -> verify, driven by the harness
+* [x] Stop a model that keeps calling a tool it has just been refused
+
+## next
+> See roadmap.md for the reasoning and the order.
+
+* [ ] Auto-verify loop: run the project's tests after an edit and feed failures back
+* [ ] Whole-project Tree-sitter index (symbol table) instead of plain text search
+* [ ] Split the reusable parts out to PyPI (JSON repair, MCP client, shell sessions)

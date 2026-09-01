@@ -53,6 +53,10 @@ def show_status() -> None:
         print(f"  {S.ACCENT}{provider.label}{S.R} {S.MUTED}({name}){S.R}  {state}{marker}")
         if provider.model:
             print(f"  {S.MUTED}│{S.R}  {S.GRAY}model{S.R}  {provider.model}")
+        how = ("native tool calling" if provider.supports_native_tools
+               and getattr(config, "NATIVE_TOOLS", True)
+               else "text <tool_call> protocol")
+        print(f"  {S.MUTED}│{S.R}  {S.GRAY}tools{S.R}  {S.MUTED}{how}{S.R}")
         if provider.key_env:
             source = provider.key_source or f"{S.MUTED}not set{S.R}"
             print(f"  {S.MUTED}│{S.R}  {S.GRAY}key{S.R}    {source}"
