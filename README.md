@@ -261,8 +261,11 @@ speaks the same protocol - a local vLLM or llama.cpp server, OpenRouter, Groq,
 Together.
 
 Keys are read from the environment first. A key typed at the `/connect` prompt
-is written to `~/.localchat/providers.json` with owner-only permissions -
-never into the project directory, which is a place people commit from.
+is written to `~/.localchat/providers.json` - never into the project directory,
+which is a place people commit from. On Linux and macOS the file is owner-only
+(0600) from the moment it is created. Windows has no POSIX mode bits, so there
+the file takes whatever ACL its directory gives it; `%USERPROFILE%` is
+per-user, but if that matters to you, keep the key in the environment instead.
 
 ### How tools are asked for
 

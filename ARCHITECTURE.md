@@ -198,7 +198,9 @@ Sessions, memory, permission rules, saved API keys. `open(path, "w")` truncates
 before it writes; being killed in between empties the file. Use
 `atomic.write_json(path, data, private=True)` for anything holding a secret -
 `private` keeps it owner-only for the whole write, which `open()` then `chmod`
-does not.
+does not. POSIX only: Windows has no mode bits, so `private` buys nothing there
+and `test_durability.py` says so instead of asserting a "600" that cannot
+exist.
 
 **5.8 Auto-commit takes only the paths the tool named.** `git commit` is given
 those paths explicitly. Never let it sweep up the index - the user's staged work
