@@ -54,6 +54,12 @@ jobs:
 
       - name: Tests
         shell: bash
+        env:
+          # The tests are scripts, not the harness, and they print the same box
+          # characters it does. `app.cli()` reconfigures the real program's
+          # output; nothing reconfigures theirs, and a pipe on Windows defaults
+          # to the locale code page.
+          PYTHONIOENCODING: utf-8
         run: |
           git config --global user.email "ci@example.com"
           git config --global user.name "ci"
