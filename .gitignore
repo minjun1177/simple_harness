@@ -12,7 +12,12 @@ clauderc
 node_modules/
 package-lock.json
 package.json
-tests/
 .mcp.json
 .permissions.json
 mcp.log
+
+# packaging artefacts
+build/
+dist/
+*.egg-info/
+*.egg-info
