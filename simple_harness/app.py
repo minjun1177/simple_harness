@@ -1,8 +1,10 @@
+import argparse
 import asyncio
 import sys
 import os
 import re
 import datetime
+from simple_harness import __version__
 from simple_harness import config
 from simple_harness import deepthink
 from simple_harness import git_ops
@@ -581,6 +583,24 @@ def _use_utf8_output() -> None:
             pass          # not a real stream, or an encoding it will not take
 
 
+def _parse_args(argv: list) -> None:
+    """Answer `--help` and `--version`, and refuse anything else.
+
+    There are no options: the harness is driven by slash commands once it is
+    running. But it is installed as a command now, and the first thing anyone
+    types at an unfamiliar command is `--help`. Ignoring it and opening an
+    interactive session instead is the wrong answer to a reasonable question.
+    """
+    parser = argparse.ArgumentParser(
+        prog="simple-harness",
+        description="A terminal AI assistant built for small local models.",
+        epilog="Run with no arguments to start a session. Everything else is a "
+               "slash command inside it - type /help there for the list.")
+    parser.add_argument("-V", "--version", action="version",
+                        version=f"simple-harness {__version__}")
+    parser.parse_args(argv)
+
+
 def cli() -> None:
     """The `simple-harness` command, and what `python -m simple_harness` runs.
 
@@ -590,6 +610,7 @@ def cli() -> None:
     would never reach them.
     """
     _use_utf8_output()
+    _parse_args(sys.argv[1:])
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
