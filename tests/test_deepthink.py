@@ -86,10 +86,10 @@ def stage_prompts(scripted):
 
 
 print("--- the shape of the chain ---")
-check("five stages", len(deepthink.STAGES) == 5, str(len(deepthink.STAGES)))
+check("six stages", len(deepthink.STAGES) == 6, str(len(deepthink.STAGES)))
 check("in the order the user asked for",
       [s.key for s in deepthink.STAGES]
-      == ["plan", "check", "build", "review", "verify"],
+      == ["plan", "check", "build", "review", "revise", "verify"],
       str([s.key for s in deepthink.STAGES]))
 check("the first two are forbidden from editing",
       not any(s.edits for s in deepthink.STAGES[:2]))
@@ -98,7 +98,7 @@ check("the plan stage says so in words",
 check("the check stage is told to look for failure, not reassurance",
       "not to feel better" in deepthink.STAGES[1].instruction)
 check("the verify stage is told to run it, not describe it",
-      "Do not describe it working" in deepthink.STAGES[4].instruction)
+      "Do not describe it working" in deepthink.STAGES[5].instruction)
 check("it is off by default", deepthink.enabled() is False)
 
 print("\n--- a full run outside a repository ---")
@@ -108,18 +108,19 @@ git_ops._repo_root_cache.clear()
 
 answer, scripted, messages, printed = drive(
     ["계획: parser.py를 고친다.", "검토 결과 계획은 유효하다.",
-     "구현했다.", "변경을 검토했다.", "테스트를 돌렸고 통과했다."])
+     "구현했다.", "변경을 검토했다. 1. 문제 없음.", "고칠 것이 없었다.",
+     "테스트를 돌렸고 통과했다."])
 prompts = stage_prompts(scripted)
-check("every stage ran", len(prompts) == 5, f"{len(prompts)} stages")
+check("every stage ran", len(prompts) == 6, f"{len(prompts)} stages")
 check("each turn was told which stage it is",
-      all(f"[Deepthink {i}/5" in p for i, p in enumerate(prompts, 1)),
+      all(f"[Deepthink {i}/6" in p for i, p in enumerate(prompts, 1)),
       str([p[:16] for p in prompts]))
 check("the answer is the last stage's", answer.strip() == "테스트를 돌렸고 통과했다.",
       repr(answer))
-check("all five are one conversation",
-      sum(1 for m in messages if m["role"] == "assistant") == 5)
+check("all six are one conversation",
+      sum(1 for m in messages if m["role"] == "assistant") == 6)
 check("each stage is labelled on screen",
-      all(f"deepthink {i}/5" in printed for i in range(1, 6)))
+      all(f"deepthink {i}/6" in printed for i in range(1, 7)))
 check("without git the review stage is told to re-read the files",
       "Reviewing from memory finds nothing" in prompts[3])
 
@@ -153,9 +154,9 @@ build = ('<tool_call>\n{"name": "edit_file", "arguments": {"filepath": "parser.p
          "<new_content>\n    return text.strip()\n</new_content>\n</tool_call>")
 answer, scripted, messages, printed = drive(
     ["계획을 세웠다.", "검토했다.", build, "구현 완료.",
-     "diff를 검토했다.", "테스트 통과."])
+     "diff를 검토했다.", "고칠 것이 없었다.", "테스트 통과."])
 prompts = stage_prompts(scripted)
-check("all five stages ran", len(prompts) == 5, str(len(prompts)))
+check("all six stages ran", len(prompts) == 6, str(len(prompts)))
 check("the tool actually ran during the build stage",
       open(os.path.join(root, "parser.py")).read().strip().endswith("text.strip()"),
       repr(open(os.path.join(root, "parser.py")).read()))
@@ -181,9 +182,9 @@ check("and the chain stops there rather than verifying nothing",
 print("\n--- with auto-commit off it still runs, just without a diff ---")
 config.GIT_AUTO_COMMIT = False
 answer, scripted, messages, printed = drive(
-    ["계획.", "검토.", "구현.", "검토했다.", "확인했다."])
+    ["계획.", "검토.", "구현.", "검토했다.", "고칠 것 없음.", "확인했다."])
 prompts = stage_prompts(scripted)
-check("all five stages still run", len(prompts) == 5, str(len(prompts)))
+check("all six stages still run", len(prompts) == 6, str(len(prompts)))
 check("the review stage falls back to re-reading",
       "Reviewing from memory finds nothing" in prompts[3])
 config.GIT_AUTO_COMMIT = True
@@ -214,11 +215,12 @@ finally:
 printed = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", quiet.getvalue())
 check("the plan is read back when the marker is missing",
       any("Answer with one word" in p for p in scripted.prompts))
-check("and the chain stops on it", len(re.findall(r"◆ deepthink \d/5", printed)) == 1,
-      str(re.findall(r"◆ deepthink \d/5", printed)))
+check("and the chain stops on it", len(re.findall(r"◆ deepthink \d/6", printed)) == 1,
+      str(re.findall(r"◆ deepthink \d/6", printed)))
 check("the answer is still the plan stage's", "평균을 냅니다" in answer, repr(answer[:40]))
 
-providers._active = Scripted(["parser.py를 고치겠다.", "검토했다.", "구현.", "검토.", "확인."])
+providers._active = Scripted(["parser.py를 고치겠다.", "검토했다.", "구현.", "검토.",
+                              "고칠 것 없음.", "확인."])
 messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "고쳐줘"}]
 quiet, real = io.StringIO(), sys.stdout
 sys.stdout = quiet
@@ -228,8 +230,8 @@ finally:
     sys.stdout = real
     providers._active = saved
 printed = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", quiet.getvalue())
-check("a plan with work in it carries on", len(re.findall(r"◆ deepthink \d/5", printed)) == 5,
-      str(re.findall(r"◆ deepthink \d/5", printed)))
+check("a plan with work in it carries on", len(re.findall(r"◆ deepthink \d/6", printed)) == 6,
+      str(re.findall(r"◆ deepthink \d/6", printed)))
 
 async def _gate(text):
     return await deepthink._needs_building(text)
@@ -253,7 +255,7 @@ FAILING = ('<tool_call>\n{"name": "run_cmd", "arguments": {"command": "exit 1"}}
 
 # A model that runs a command, is told it failed, and then says it all works.
 answer, scripted, messages, printed = drive(
-    ["계획.", "검토.", "구현.", "검토했다.",
+    ["계획.", "검토.", "구현.", "검토했다.", "고칠 것 없음.",
      FAILING, "테스트를 돌렸고 전부 통과했습니다. 완벽합니다."])
 check("a failed check is called out regardless of the prose",
       "every command the final check ran failed" in printed, printed[-300:])
@@ -262,28 +264,44 @@ check("the model's own claim is left standing, not edited",
 
 # A model that never ran anything at all.
 answer, scripted, messages, printed = drive(
-    ["계획.", "검토.", "구현.", "검토했다.", "확인해보니 잘 동작합니다."])
+    ["계획.", "검토.", "구현.", "검토했다.", "고칠 것 없음.", "확인해보니 잘 동작합니다."])
 check("a check that ran nothing is called out",
       "ran no command" in printed, printed[-200:])
 
 # And a check that actually passed says nothing extra.
 PASSING = ('<tool_call>\n{"name": "run_cmd", "arguments": {"command": "true"}}\n</tool_call>')
 answer, scripted, messages, printed = drive(
-    ["계획.", "검토.", "구현.", "검토했다.", PASSING, "통과했습니다."])
+    ["계획.", "검토.", "구현.", "검토했다.", "고칠 것 없음.", PASSING, "통과했습니다."])
 check("a check that passed is not second-guessed",
       "final check ran" not in printed and "ran no command" not in printed,
       printed[-200:])
 config.GIT_AUTO_COMMIT = True
 
 check("the verify stage is told to check the request, not just the old tests",
-      "were written before your change" in deepthink.STAGES[4].instruction)
+      "were written before your change" in deepthink.STAGES[5].instruction)
 check("the verify stage is told a broken command is not a result",
-      "are not results" in deepthink.STAGES[4].instruction)
+      "are not results" in deepthink.STAGES[5].instruction)
 check("and not to claim success it did not earn",
       "do not follow that with a summary saying it works"
-      in deepthink.STAGES[4].instruction)
+      in deepthink.STAGES[5].instruction)
+check("the verify stage is told to check it against the plan",
+      "back to the plan" in deepthink.STAGES[5].instruction)
 check("the review stage is told to look for callers",
       "search_in_file" in deepthink.STAGES[3].instruction)
+
+# Finding and fixing are separate stages: a stage allowed to fix stops looking
+# as soon as it has something to fix, which is why review used to miss the rest
+# of its own list.
+check("the review stage is forbidden from fixing",
+      "Do not fix anything here" in deepthink.STAGES[3].instruction)
+check("and is asked for a list the next stage can work through",
+      "numbered list" in deepthink.STAGES[3].instruction)
+check("the revise stage works through that list",
+      "list from the review" in deepthink.STAGES[4].instruction)
+check("and is told not to widen it",
+      "not a second review" in deepthink.STAGES[4].instruction)
+check("an empty list means changing nothing",
+      "change nothing" in deepthink.STAGES[4].instruction)
 
 print("\n--- the planning stages cannot edit, whatever the model tries ---")
 os.chdir(plain)
@@ -308,10 +326,13 @@ check("a command is refused too - a command can write",
 check("reading is still allowed", "not available during this stage" not in allowed)
 check("the refusal tells it what to do instead", "say what you would" in refused)
 
-# The build and review stages must not be crippled by the same flag.
+# The stages that act must not be crippled by the same flag - and review is
+# not one of them any more: it reports, revise fixes.
 edits_allowed = [s.key for s in deepthink.STAGES if s.edits]
-check("only the last three stages may edit",
-      edits_allowed == ["build", "review", "verify"], str(edits_allowed))
+check("only build, revise and verify may edit",
+      edits_allowed == ["build", "revise", "verify"], str(edits_allowed))
+check("review cannot edit, so it cannot fix instead of finding",
+      deepthink.STAGES[3].edits is False)
 
 print("\n--- a model that keeps knocking is stopped ---")
 from simple_harness import llm_client

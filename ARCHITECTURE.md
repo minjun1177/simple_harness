@@ -283,32 +283,43 @@ app.py            the loop, slash commands, session lifecycle
 
 ## 7. Deepthink
 
-`deepthink.run(messages)` replaces one `chat_turn` with five, each preceded by a
-stage instruction appended as a user message. All five share the one
+`deepthink.run(messages)` replaces one `chat_turn` with six, each preceded by a
+stage instruction appended as a user message. All six share the one
 conversation.
 
 ```
-1 plan     read, decide, change nothing      edits = False
-2 check    argue against the plan             edits = False
-3 build    carry it out                       edits = True
-4 review   read the real git diff             edits = True
-5 verify   run it, report what came back      edits = True
+1 plan     read, decide, change nothing        edits = False
+2 check    argue against the plan               edits = False
+3 build    carry it out                         edits = True
+4 review   read the real git diff, list faults  edits = False
+5 revise   fix what stage 4 listed              edits = True
+6 verify   run it, check it against the plan    edits = True
 ```
 
-Three mechanisms make it more than a prompt:
+**4 and 5 are separate on purpose.** Review used to fix what it found, and a
+stage that may fix stops looking once it has something to fix - the rest of its
+own list went unread. Review is read-only now and its output is a numbered list;
+revise works through that list and is told not to widen it. If the list is
+empty, revise changes nothing and says so.
 
-- **`config.DEEPTHINK_READONLY`** is set for stages 1-2, and `dispatch_tool`
-  refuses anything in `tools._CHANGES_THINGS`. Asking a model to hold off does
-  not hold it off - a 4B model tried to edit fifteen times before this existed.
+Four mechanisms make it more than a prompt:
+
+- **`config.DEEPTHINK_READONLY`** is set for every stage with `edits = False` -
+  1, 2 and 4 - and `dispatch_tool` refuses anything in `tools._CHANGES_THINGS`.
+  Asking a model to hold off does not hold it off; a 4B model tried to edit
+  fifteen times before this existed. Adding a stage does not need this rewired:
+  the flag is `not stage.edits`.
 - **Stage 4 is handed `git_ops.diff_since(sha)`**, the real patch, not a request
   to recall what it changed. Without git it is told to re-read the files.
-- **`_report_checks`** counts the commands stage 5 actually ran and prints the
+- **Stage 6 is pointed back at the plan**, item by item, not just at the
+  request. Code that runs and is not what was agreed is still not finished.
+- **`_report_checks`** counts the commands stage 6 actually ran and prints the
   truth after the model's summary (invariant 5.10).
 
 Two early exits: a plan with nothing to build ends the chain after stage 1
 (`_needs_building`, which believes the `NO_PLAN_NEEDED` marker for free and
 otherwise asks one short question about the plan text); a build that changed
-nothing ends it after stage 3 rather than reviewing work that never happened.
+nothing ends it at stage 4 rather than reviewing work that never happened.
 
 ---
 

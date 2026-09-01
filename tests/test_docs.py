@@ -135,7 +135,7 @@ check("and the number matches the code",
 check("the stage table matches deepthink.STAGES",
       all(stage.key in ARCH for stage in deepthink.STAGES))
 check("it describes the read-only stages correctly",
-      [s.edits for s in deepthink.STAGES] == [False, False, True, True, True])
+      [s.edits for s in deepthink.STAGES] == [False, False, True, False, True, True])
 check("toolspec really imports nothing local",
       not re.search(r"^(?:import|from) (?:simple_harness\b|"
                     r"(?:config|tools|providers|app|systemprompt)\b)",

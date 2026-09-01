@@ -520,7 +520,8 @@ async def main() -> None:
             if setting not in ("on", "off"):
                 state = "ON" if config.DEEPTHINK else "OFF"
                 print(f"  {S.INFO}Deepthink is {S.BOLD}{state}{S.R}"
-                      f"{S.MUTED} - one request becomes five turns:{S.R}")
+                      f"{S.MUTED} - one request becomes "
+                      f"{len(deepthink.STAGES)} turns:{S.R}")
                 for i, stage in enumerate(deepthink.STAGES, 1):
                     print(f"  {S.MUTED}│{S.R} {S.GRAY}{i}.{S.R} {stage.title}")
                 print(f"  {S.MUTED}╰─ a request that needs no changes stops "
@@ -559,7 +560,7 @@ async def main() -> None:
         try:
             if config.DEEPTHINK:
                 # deepthink drives its own turns, and manages context between
-                # them - it is five passes over one request, not one.
+                # them - it is several passes over one request, not one.
                 result = await deepthink.run(messages)
             else:
                 await manage_context(messages)

@@ -142,7 +142,7 @@ def _show_help():
         ("/perms reload", "Re-read the permission rule files"),
         ("/perms allow|deny <rule>", "Add a rule, e.g. /perms allow run_cmd(git *)"),
         ("/think <on/off>", "Show or hide a reasoning model's thinking"),
-        ("/deepthink", "Show the plan-check-build-review-verify chain and whether it is on"),
+        ("/deepthink", "Show the plan-check-build-review-revise-verify chain and whether it is on"),
         ("/deepthink <on/off>", "Turn that chain on or off"),
         ("/undo", "Take back the last file change the AI committed"),
         ("/autocommit", "Whether each AI edit gets its own git commit, and the recent ones"),

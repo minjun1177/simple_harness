@@ -1,29 +1,37 @@
-"""A mode that makes one request into a chain: plan, check, build, review, verify.
+"""A mode that makes one request into a chain: plan, check, build, review, fix, verify.
 
 Asked to implement something, a model goes straight at it. It writes code from
 what it remembers of a file rather than what the file says, and when it is done
 it reports success without ever running the thing. Both failures come from the
 same place: one pass, with no step that exists only to find fault.
 
-So the turn is broken into five, and the harness drives them rather than asking
+So the turn is broken into six, and the harness drives them rather than asking
 the model to remember to:
 
     1  plan     work out what it takes - read the files, change nothing
     2  check    argue against that plan and settle every assumption
     3  build    carry out the plan as it now stands
-    4  review   read the diff of what actually changed, and fix what is wrong
-    5  verify   run it, and report what really came back
+    4  review   read the diff of what actually changed, and list what is wrong
+    5  revise   fix what the review found, and nothing else
+    6  verify   run it, check it against the plan, report what really came back
 
 Each stage sees everything the ones before it did, so it is one conversation,
-not five. What changes is the instruction at the top of each turn.
+not six. What changes is the instruction at the top of each turn.
 
-Two of these are worth more than the rest. Stage 2 is the only one whose job is
-to find the plan wrong, and a plan nobody argued with is usually the one that
-fails. Stage 4 is handed the **real diff** from git rather than being asked what
-it changed - reviewing from memory finds nothing, because the memory is of the
-intention, not of the code.
+Finding and fixing are two stages, not one, for the same reason 1 and 2 are.
+A stage allowed to fix stops looking as soon as it has something to fix, so
+review is read-only and only writes the list; revise turns the tools back on and
+works through it. Review used to do both and the second half of its list went
+unread.
 
-The mode is off by default and toggled with `/deepthink`. It costs five turns
+Stage 2 is the only one whose job is to find the plan wrong, and a plan nobody
+argued with is usually the one that fails. Stage 4 is handed the **real diff**
+from git rather than being asked what it changed - reviewing from memory finds
+nothing, because the memory is of the intention, not of the code. Stage 6 goes
+back to the plan, because code that runs and is not what was agreed is still not
+finished.
+
+The mode is off by default and toggled with `/deepthink`. It costs six turns
 where one would do, which is worth it for a change to real code and a waste for
 a question - so stage 1 is allowed to end the chain when there is nothing to
 build.
@@ -58,7 +66,7 @@ until stage 3, so trying one only wastes a turn.
 
 If the request needs no changes at all - it is a question, or it is already
 done - then answer it properly and put NO_PLAN_NEEDED on the last line by
-itself. That ends the chain here instead of spending four more turns on
+itself. That ends the chain here instead of spending five more turns on
 nothing."""),
 
     Stage("check", "Check the plan", """\
@@ -90,7 +98,8 @@ write it down at the end and leave it alone.""", edits=True),
     Stage("review", "Review the changes", """\
 Read what you changed as if someone else wrote it and you have to approve it.
 
-- Does it do what the plan said it would?
+- Does it do what the plan said it would? Name any part of the plan that did
+  not get carried out, and any change that was not in the plan.
 - Anything you changed the behaviour of, removed, or renamed: who used it?
   `search_in_file` for the name before you decide it was safe. A function that
   now raises where it used to return will break its callers and its tests.
@@ -98,14 +107,41 @@ Read what you changed as if someone else wrote it and you have to approve it.
   longer describes what the thing does, an import you added and never used?
 - Any wrong variable, off-by-one, inverted condition, or missing case?
 
-Fix what is wrong, here, now. If it is right, say so plainly - do not invent a
-problem to look thorough.""", edits=True),
+Do not fix anything here. Your only job in this stage is to find what is wrong,
+and a stage that is allowed to fix stops looking as soon as it has something to
+fix. The tools that change things are switched off again; the next stage turns
+them back on and does the fixing.
+
+End with a numbered list of every problem you found, each naming the file and
+what is wrong with it. If you found none, say that plainly - do not invent a
+problem to look thorough."""),
+
+    Stage("revise", "Fix what the review found", """\
+Work through the list from the review, in order, and fix each one.
+
+Fix what the review actually found. This is not a second review and not an
+invitation to improve something it did not mention - a change nobody reviewed
+is a change nobody checked.
+
+If the review found nothing, change nothing and say so in one line. An empty
+list is a result; making an edit to look busy undoes work that was already
+right.
+
+For each problem: say which one you are fixing, make the change, and say what
+you changed. If one of them turns out not to be a problem after all, say why
+and leave it alone.""", edits=True),
 
     Stage("verify", "Final check", """\
 Prove it works. Do not describe it working.
 
 Run it with `run_cmd` - the test suite, the script, the command, whatever
 actually exercises what you changed - and report what came back.
+
+Then check it against the plan. Go back to the plan as it stood after stage 2,
+and go through it item by item: was each thing it said would change actually
+changed, and does it now do what the plan said it would? Name anything that was
+planned and is still not done, and anything that was done and was never
+planned. A change that works and is not what was agreed is still not finished.
 
 Go through the original request point by point and check each point directly.
 The tests that already existed were written before your change and know nothing
@@ -143,7 +179,7 @@ def enabled() -> bool:
 # ---------------------------------------------------------------------------
 
 async def run(messages: list) -> str:
-    """Drive the five stages over one request. Returns the last answer."""
+    """Drive the six stages over one request. Returns the last answer."""
     from simple_harness.context import manage_context
     from simple_harness.llm_client import chat_turn
 
