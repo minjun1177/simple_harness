@@ -1,8 +1,9 @@
 name: CI
 
 on:
+  # Every branch, not just main: a push is the first moment the suite can run
+  # somewhere that is not the author's own machine, which is the whole point.
   push:
-    branches: [main]
   pull_request:
     branches: [main]
 
