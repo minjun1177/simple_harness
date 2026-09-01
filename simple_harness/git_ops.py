@@ -48,11 +48,34 @@ def _git(*arguments, cwd: str = None) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(arguments, 1, "", str(error))
 
 
+def _resolved(path: str) -> str:
+    """A path that can be compared with another one.
+
+    `git rev-parse --show-toplevel` reports the working tree with its symlinks
+    already resolved; `os.path.abspath` resolves nothing. Comparing the two
+    said a file was outside its own repository whenever the project sat behind
+    a link - which on macOS is every path under /tmp or /var, both of which are
+    symlinks into /private. Auto-commit then returned "" and `/undo` had
+    nothing to take back, silently. `normcase` folds the separator and the
+    drive-letter case that Windows adds to the same problem.
+    """
+    return os.path.normcase(os.path.realpath(path))
+
+
+def _is_inside(path: str, root: str) -> bool:
+    """Whether `path` is within the working tree at `root`."""
+    try:
+        resolved, root = _resolved(path), _resolved(root)
+        return os.path.commonpath([resolved, root]) == root
+    except ValueError:
+        return False        # different drives on Windows - not the same tree
+
+
 def repo_root(path: str = ".") -> str:
     """The working tree `path` belongs to, or "" if it is not in one."""
     # Not `isfile`: `delete_file` asks about a path that has just stopped
     # existing, and treating that as a directory to run git in fails outright.
-    absolute = os.path.abspath(path)
+    absolute = os.path.realpath(path)
     directory = absolute if os.path.isdir(absolute) else os.path.dirname(absolute)
     if directory in _repo_root_cache:
         return _repo_root_cache[directory]
@@ -86,9 +109,9 @@ def auto_commit(paths: list, tool: str, summary: str = "") -> str:
 
     inside = []
     for path in paths:
-        absolute = os.path.abspath(path)
-        if os.path.commonpath([absolute, root]) == root:
-            inside.append(os.path.relpath(absolute, root))
+        absolute = os.path.realpath(path)
+        if _is_inside(absolute, root):
+            inside.append(os.path.relpath(absolute, os.path.realpath(root)))
     if not inside:
         return ""            # a file outside the repository is not ours to commit
 
