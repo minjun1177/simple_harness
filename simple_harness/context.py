@@ -3,16 +3,74 @@ import sys
 import asyncio
 import itertools
 import ollama
-import config
-import providers
-from config import S, smrp
+from simple_harness import config
+from simple_harness import providers
+from simple_harness.config import S, smrp
 
 
-_CHARS_PER_TOKEN = 3.5
+# How many characters go into one token, by script. Measured against the model
+# actually running here: Korean prose came out at 2.2 characters per token,
+# English prose at 4.7 and Python source at 3.2. One flat number cannot serve
+# all three - the old 3.5 under-counted Korean by 1.6x, and under-counting is
+# the dangerous direction, because it is how the context silently overflows.
+#
+# Latin sits below its prose measurement on purpose: a conversation full of
+# code and tool output is denser than prose, and guessing low costs a little
+# context while guessing high costs a truncated conversation.
+_WIDE_CHARS_PER_TOKEN = 2.0     # Hangul, Kana, Han - one token per 2 characters
+_LATIN_CHARS_PER_TOKEN = 4.0    # everything else, code included
+
+# Every provider reports how many prompt tokens it actually charged for. That is
+# ground truth for this model, this language and this kind of content, so it is
+# folded back in and beats any table of constants - including a bundled
+# tokenizer, which would be some *other* model's idea of a token.
+_correction = None               # observed tokens / estimated tokens
+_CORRECTION_WEIGHT = 0.3         # how fast it follows a change of subject
+
+
+def _wide_chars(text: str) -> int:
+    """Characters from a script that packs roughly two per token."""
+    return sum(1 for ch in text if
+               "\u1100" <= ch <= "\u11ff" or      # Hangul Jamo
+               "\u2e80" <= ch <= "\ua4cf" or      # CJK radicals, Kana, Han
+               "\uac00" <= ch <= "\ud7a3" or      # Hangul syllables
+               "\uf900" <= ch <= "\ufaff" or      # CJK compatibility
+               "\uff00" <= ch <= "\uff60")        # fullwidth forms
+
+
+def _raw_estimate(messages: list[dict]) -> float:
+    total = 0.0
+    for message in messages:
+        content = message.get("content", "") or ""
+        wide = _wide_chars(content)
+        total += wide / _WIDE_CHARS_PER_TOKEN
+        total += (len(content) - wide) / _LATIN_CHARS_PER_TOKEN
+    return total
+
 
 def _estimate_tokens(messages: list[dict]) -> int:
-    total_chars = sum(len(m.get("content", "")) for m in messages)
-    return int(total_chars / _CHARS_PER_TOKEN)
+    return int(_raw_estimate(messages) * (_correction or 1.0))
+
+
+def observe_usage(messages: list[dict], prompt_tokens: int) -> None:
+    """Learn from what the provider says it actually counted.
+
+    `messages` must be exactly what was sent, before the reply was appended.
+    Wildly off ratios are ignored: they mean the two do not describe the same
+    request - a cached prompt, or a provider that counts images.
+    """
+    global _correction
+    if prompt_tokens <= 0:
+        return
+    raw = _raw_estimate(messages)
+    if raw < 50:                        # too short to measure anything from
+        return
+    ratio = prompt_tokens / raw
+    if not 0.25 <= ratio <= 4.0:
+        return
+    _correction = (ratio if _correction is None
+                   else _correction * (1 - _CORRECTION_WEIGHT)
+                        + ratio * _CORRECTION_WEIGHT)
 
 
 def _get_ctx_budget() -> int:

@@ -2,13 +2,14 @@ import os
 import sys
 import subprocess
 import textwrap
-import config
-from config import S, tw, _hr, _visible_len
-from session import load_memory, list_sessions
-from context import _estimate_tokens, _get_ctx_budget, _get_conv_pairs
-from skills import list_skills, skill_dirs
-import mcp_client
-import providers
+from simple_harness import config
+from simple_harness.config import S, tw, _hr, _visible_len
+from simple_harness.session import load_memory, list_sessions
+from simple_harness.context import _estimate_tokens, _get_ctx_budget, _get_conv_pairs
+from simple_harness.skills import list_skills, skill_dirs
+from simple_harness import mcp_client
+from simple_harness import providers
+from simple_harness import toolspec
 
 
 def _get_git_info() -> str:
@@ -45,6 +46,35 @@ def _get_mcp_info() -> str:
     return mcp_client.status_summary()
 
 
+# "SIMPLE HARNESS" does not fit on one line in this face - it comes to about
+# 109 columns - so the two words are stacked. On a terminal too narrow even for
+# that, a three-row face carries the same name rather than wrapping into
+# nonsense.
+_LOGO_WIDE = """\
+    ███████╗██╗███╗   ███╗██████╗ ██╗     ███████╗
+    ██╔════╝██║████╗ ████║██╔══██╗██║     ██╔════╝
+    ███████╗██║██╔████╔██║██████╔╝██║     █████╗  
+    ╚════██║██║██║╚██╔╝██║██╔═══╝ ██║     ██╔══╝  
+    ███████║██║██║ ╚═╝ ██║██║     ███████╗███████╗
+    ╚══════╝╚═╝╚═╝     ╚═╝╚═╝     ╚══════╝╚══════╝
+    ██╗  ██╗ █████╗ ██████╗ ███╗   ██╗███████╗███████╗███████╗
+    ██║  ██║██╔══██╗██╔══██╗████╗  ██║██╔════╝██╔════╝██╔════╝
+    ███████║███████║██████╔╝██╔██╗ ██║█████╗  ███████╗███████╗
+    ██╔══██║██╔══██║██╔══██╗██║╚██╗██║██╔══╝  ╚════██║╚════██║
+    ██║  ██║██║  ██║██║  ██║██║ ╚████║███████╗███████║███████║
+    ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝╚══════╝╚══════╝"""
+
+_LOGO_NARROW = """\
+    ╔═╗╦╔╦╗╔═╗╦  ╔═╗  ╦ ╦╔═╗╦═╗╔╗╔╔═╗╔═╗╔═╗
+    ╚═╗║║║║╠═╝║  ║╣   ╠═╣╠═╣╠╦╝║║║║╣ ╚═╗╚═╗
+    ╚═╝╩╩ ╩╩  ╩═╝╚═╝  ╩ ╩╩ ╩╩╚═╝╚╝╚═╝╚═╝╚═╝"""
+
+
+def _logo() -> str:
+    art = _LOGO_WIDE if config.tw() >= 66 else _LOGO_NARROW
+    return f"{S.ACCENT}{S.BOLD}\n{art}\n{S.R}"
+
+
 def _welcome():
     memory_count = len(load_memory())
     session_count = len(list_sessions())
@@ -53,20 +83,13 @@ def _welcome():
     git_info = _get_git_info()
     rules_info = _get_rules_info()
     python_info = _get_python_info()
-    # count only top-level entries of the tool array, not the "name" key in the
-    # RULES example or in a tool's own parameter list
-    tools_count = config.SYSTEM_PROMPT.count('\n    "name": "')
+    # Counted from the tool table, which is the only tool list (5.1). Scraping
+    # the system prompt for it used to report "0 tools" on any model that
+    # supports native tool calling, because the schemas travel with the request
+    # there and never reach the prompt at all.
+    tools_count = len(toolspec.TOOLS) + mcp_client.tool_count()
 
-    logo = f"""\
-{S.ACCENT}{S.BOLD}
-    ██╗      ██████╗  ██████╗ █████╗ ██╗          ██████╗██╗  ██╗ █████╗ ████████╗
-    ██║     ██╔═══██╗██╔════╝██╔══██╗██║         ██╔════╝██║  ██║██╔══██╗╚══██╔══╝
-    ██║     ██║   ██║██║     ███████║██║         ██║     ███████║███████║   ██║   
-    ██║     ██║   ██║██║     ██╔══██║██║         ██║     ██╔══██║██╔══██║   ██║   
-    ███████╗╚██████╔╝╚██████╗██║  ██║███████╗    ╚██████╗██║  ██║██║  ██║   ██║   
-    ╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝     ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   
-{S.R}"""
-    print(logo)
+    print(_logo())
     print(f"  {S.GRAY}model{S.R}      {S.WHITE}{providers.status_line()}{S.R}")
     print(f"  {S.GRAY}os{S.R}         {S.WHITE}{config.CURRENT_OS}{S.R}")
     print(f"  {S.GRAY}python{S.R}     {S.WHITE}{python_info}{S.R}")
@@ -119,12 +142,17 @@ def _show_help():
         ("/perms reload", "Re-read the permission rule files"),
         ("/perms allow|deny <rule>", "Add a rule, e.g. /perms allow run_cmd(git *)"),
         ("/think <on/off>", "Show or hide a reasoning model's thinking"),
+        ("/deepthink", "Show the plan-check-build-review-verify chain and whether it is on"),
+        ("/deepthink <on/off>", "Turn that chain on or off"),
+        ("/undo", "Take back the last file change the AI committed"),
+        ("/autocommit", "Whether each AI edit gets its own git commit, and the recent ones"),
+        ("/autocommit <on/off>", "Turn that on or off"),
     ]
     print()
     print(f"  {S.BOLD}{S.ACCENT}Commands{S.R}")
     print(f"  {_hr(width=44)}")
     for cmd, desc in commands:
-        print(f"  {S.ACCENT}{cmd:12}{S.R} {S.GRAY}{desc}{S.R}")
+        print(f"  {S.ACCENT}{cmd:22}{S.R} {S.GRAY}{desc}{S.R}")
     print()
 
 
@@ -155,7 +183,7 @@ def _show_skills():
 
 def _show_perms():
     """`/perms` - the rules that decide what runs without asking."""
-    import permissions
+    from simple_harness import permissions
 
     permissions.load_rules()
     print()
@@ -313,8 +341,8 @@ def _fmt_tool_result(name: str, result: str):
 
 
 def _approval_prompt(action_label: str, details: list[tuple[str, str]], rule: str = "") -> bool:
-    from renderer import _disp_width
-    import permissions
+    from simple_harness.renderer import _disp_width
+    from simple_harness import permissions
 
     # A permission rule already said yes, or /automode is on.
     if config.AUTO_ALLOW or config.POLICY_AUTO_ALLOW:

@@ -46,7 +46,7 @@ import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
-from sse import iter_sse
+from simple_harness.sse import iter_sse
 
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -69,7 +69,7 @@ class MCPError(Exception):
 
 def _cfg(name: str, default):
     """Read a setting from `config`, tolerating a partially-initialised module."""
-    import config
+    from simple_harness import config
     return getattr(config, name, default)
 
 
@@ -1003,7 +1003,53 @@ def _resource_tool_entries() -> list[dict]:
     ]
 
 
-def mcp_tools_prompt() -> str:
+def native_tool_schemas() -> list:
+    """MCP tools in the same vendor-neutral shape as `toolspec.native_schema`.
+
+    Servers already publish a real JSON Schema for their arguments, so it is
+    passed straight through. Without this, switching a hosted provider to
+    native tools would quietly take every MCP tool away from the model - they
+    would no longer be in the prompt, and nothing would have replaced them.
+    """
+    if not _cfg("MCP_ENABLED", True):
+        return []
+    schemas = []
+    for entry, schema in zip(_tool_entries(), _raw_input_schemas()):
+        schemas.append({
+            "name": entry["name"],
+            "description": entry["description"],
+            "input_schema": schema or {"type": "object", "properties": {}},
+        })
+    for entry in _resource_tool_entries():
+        schemas.append({
+            "name": entry["name"],
+            "description": entry["description"],
+            "input_schema": {
+                "type": "object",
+                "properties": {key: {"type": "string", "description": value}
+                               for key, value in entry["parameters"].items()},
+                "required": [key for key, value in entry["parameters"].items()
+                             if not value.startswith("(Optional)")],
+            },
+        })
+    return schemas
+
+
+def _raw_input_schemas() -> list:
+    """The servers' own schemas, in the same order `_tool_entries` returns."""
+    limit = int(_cfg("MCP_MAX_TOOLS_PER_SERVER", 40))
+    schemas = []
+    for server in connected_servers():
+        for tool in server.tools[:limit]:
+            if not str(tool.get("name") or "").strip():
+                continue
+            schema = tool.get("inputSchema") or tool.get("input_schema")
+            schemas.append(schema if isinstance(schema, dict) else None)
+    return schemas
+
+
+def mcp_tools_prompt(tools_json: bool = True) -> str:
+
     """The MCP section of the system prompt. Empty when nothing is connected."""
     if not _cfg("MCP_ENABLED", True):
         return ""
@@ -1012,17 +1058,27 @@ def mcp_tools_prompt() -> str:
         return ""
     entries.extend(_resource_tool_entries())
 
-    lines = [
-        "\n### MCP TOOLS:",
-        "These tools come from MCP servers attached to this session. Call them",
-        "exactly like the built-in tools, using the full name shown below - the",
-        "`mcp__<server>__<tool>` name is the real tool name, do not shorten it.",
-        "Their results are authoritative: report what they return, never what you",
-        "assume they would return.",
-        "",
-        json.dumps(entries, indent=2, ensure_ascii=False),
-        "",
-    ]
+    if tools_json:
+        lines = [
+            "\n### MCP TOOLS:",
+            "These tools come from MCP servers attached to this session. Call them",
+            "exactly like the built-in tools, using the full name shown below - the",
+            "`mcp__<server>__<tool>` name is the real tool name, do not shorten it.",
+            "Their results are authoritative: report what they return, never what you",
+            "assume they would return.",
+            "",
+            json.dumps(entries, indent=2, ensure_ascii=False),
+            "",
+        ]
+    else:
+        lines = [
+            "\n### MCP TOOLS:",
+            "Some of the tools supplied with this request come from attached MCP",
+            "servers and are named `mcp__<server>__<tool>`. They are called exactly",
+            "like the built-in ones. Their results are authoritative: report what",
+            "they return, never what you assume they would return.",
+            "",
+        ]
 
     notes = []
     for server in connected_servers():

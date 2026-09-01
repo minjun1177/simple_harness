@@ -1,16 +1,24 @@
-ollama
-prompt_toolkit
-duckduckgo_search
-requests
-beautifulsoup4
-psutil
-tree-sitter
-tree-sitter-python
-tree-sitter-javascript
-tree-sitter-typescript
-tree-sitter-java
-tree-sitter-c
-tree-sitter-cpp
-tree-sitter-go
-tree-sitter-rust
-tree-sitter-c-sharp
+# Floors are the versions this harness is actually tested against - not a guess.
+# Ceilings stop the next breaking release from arriving unannounced: the next
+# major, or for a 0.x package the next minor, which is where those break.
+#
+# `pip install -r requirements-lock.txt` instead for the exact set that was tested.
+
+# Only `list()` and the streaming chat client are used, and both have been
+# stable across every 0.x release, so this one gets the wider ceiling.
+ollama>=0.6.2,<1.0
+prompt_toolkit>=3.0.53,<4.0
+duckduckgo_search>=8.1.1,<9.0
+requests>=2.34.2,<3.0
+beautifulsoup4>=4.15.0,<5.0
+psutil>=7.2.2,<8.0
+tree-sitter>=0.26.0,<0.27
+tree-sitter-python>=0.25.0,<0.26
+tree-sitter-javascript>=0.25.0,<0.26
+tree-sitter-typescript>=0.23.2,<0.24
+tree-sitter-java>=0.23.5,<0.24
+tree-sitter-c>=0.24.2,<0.25
+tree-sitter-cpp>=0.23.4,<0.24
+tree-sitter-go>=0.25.0,<0.26
+tree-sitter-rust>=0.24.2,<0.25
+tree-sitter-c-sharp>=0.23.5,<0.24

@@ -3,20 +3,22 @@ import sys
 import os
 import re
 import datetime
-import config
-import skills
-import mcp_client
-import permissions
-import providers
-import connect
-from config import S
-from systemprompt import systemprompt as _build_system_prompt
-from tui import _welcome, _show_help, _show_skills, _show_mcp, _show_perms, _fmt_tool_call, _fmt_tool_result, display_usage_graph, _hr
-from renderer import _render_full
-from session import (save_session, load_session, list_sessions, find_sessions,
+from simple_harness import config
+from simple_harness import deepthink
+from simple_harness import git_ops
+from simple_harness import skills
+from simple_harness import mcp_client
+from simple_harness import permissions
+from simple_harness import providers
+from simple_harness import connect
+from simple_harness.config import S
+from simple_harness.systemprompt import systemprompt as _build_system_prompt
+from simple_harness.tui import _welcome, _show_help, _show_skills, _show_mcp, _show_perms, _fmt_tool_call, _fmt_tool_result, display_usage_graph, _hr
+from simple_harness.renderer import _render_full
+from simple_harness.session import (save_session, load_session, list_sessions, find_sessions,
                      rename_session, generate_session_title, clean_title)
-from context import manage_context
-from llm_client import chat_turn, parse_tool_calls, strip_thinking
+from simple_harness.context import manage_context
+from simple_harness.llm_client import chat_turn, parse_tool_calls, strip_thinking
 
 
 def _compose_system_prompt(summary: str = "") -> str:
@@ -87,8 +89,8 @@ async def main() -> None:
     current_session_id = None
 
     if config.PROMPT_TOOLKIT_AVAILABLE:
-        from config import SlashCommandCompleter, PromptSession, FileHistory, ANSI
-        completer = SlashCommandCompleter(['/help', '/clear', '/usage', '/model', '/models', '/exit', '/quit', '/sessions', '/load', '/title', '/autotitle', '/automode', '/fullcontent', '/record', '/export', '/system', '/planmode', '/skills', '/skill', '/mcp', '/perms', '/think', '/connect'])
+        from simple_harness.config import SlashCommandCompleter, PromptSession, FileHistory, ANSI
+        completer = SlashCommandCompleter(['/help', '/clear', '/usage', '/model', '/models', '/exit', '/quit', '/sessions', '/load', '/title', '/autotitle', '/automode', '/fullcontent', '/record', '/export', '/system', '/planmode', '/skills', '/skill', '/mcp', '/perms', '/think', '/connect', '/undo', '/autocommit', '/deepthink'])
         session_pt = PromptSession(
             history=FileHistory('.chat_history'),
             completer=completer,
@@ -460,7 +462,60 @@ async def main() -> None:
                   f"{S.MUTED} It is never kept in the conversation history.{S.R}\n")
             continue
 
-        if config.PLANMODE:
+        if cmd == "/undo":
+            ok, message = git_ops.undo_last()
+            colour = S.OK if ok else S.WARN
+            print(f"  {colour}{'✓' if ok else '⚠'} {message}{S.R}\n")
+            continue
+
+        if cmd == "/autocommit" or cmd.startswith("/autocommit "):
+            parts = cmd.split(" ", 1)
+            setting = parts[1].strip() if len(parts) > 1 else ""
+            if setting not in ("on", "off"):
+                state = "ON" if config.GIT_AUTO_COMMIT else "OFF"
+                print(f"  {S.INFO}Auto-commit is {S.BOLD}{state}{S.R}"
+                      f"{S.MUTED} - each file an AI tool changes is committed on its own.{S.R}")
+                if not git_ops.repo_root():
+                    print(f"  {S.MUTED}This directory is not a git repository, so nothing "
+                          f"is committed either way.{S.R}")
+                recent = git_ops.recent_ai_commits(5)
+                for commit in recent:
+                    print(f"  {S.MUTED}│{S.R} {S.GRAY}{commit['sha']}{S.R} "
+                          f"{commit['subject']} {S.MUTED}({commit['when']}){S.R}")
+                if recent:
+                    print(f"  {S.MUTED}╰─ /undo takes the newest one back{S.R}")
+                print(f"  {S.MUTED}Usage: /autocommit <on/off>{S.R}\n")
+                continue
+            config.GIT_AUTO_COMMIT = setting == "on"
+            print(f"  {S.INFO}✓ Auto-commit is "
+                  f"{'ON' if config.GIT_AUTO_COMMIT else 'OFF'}."
+                  f"{S.MUTED} {'Each AI edit gets its own commit; /undo takes one back.' if config.GIT_AUTO_COMMIT else 'AI edits are no longer committed for you.'}{S.R}\n")
+            continue
+
+        if cmd == "/deepthink" or cmd.startswith("/deepthink "):
+            parts = cmd.split(" ", 1)
+            setting = parts[1].strip() if len(parts) > 1 else ""
+            if setting not in ("on", "off"):
+                state = "ON" if config.DEEPTHINK else "OFF"
+                print(f"  {S.INFO}Deepthink is {S.BOLD}{state}{S.R}"
+                      f"{S.MUTED} - one request becomes five turns:{S.R}")
+                for i, stage in enumerate(deepthink.STAGES, 1):
+                    print(f"  {S.MUTED}│{S.R} {S.GRAY}{i}.{S.R} {stage.title}")
+                print(f"  {S.MUTED}╰─ a request that needs no changes stops "
+                      f"after the first.{S.R}")
+                print(f"  {S.MUTED}Usage: /deepthink <on/off>{S.R}\n")
+                continue
+            config.DEEPTHINK = setting == "on"
+            if config.DEEPTHINK:
+                print(f"  {S.INFO}✓ Deepthink is ON.{S.MUTED} Say what you want built "
+                      f"and it will plan, argue with the plan, build it, review the "
+                      f"diff, then run it.{S.R}\n")
+            else:
+                print(f"  {S.INFO}✓ Deepthink is OFF.{S.MUTED} Back to one turn per "
+                      f"request.{S.R}\n")
+            continue
+
+        if config.PLANMODE and not config.DEEPTHINK:
             if config.AUTO_ALLOW:
                 plan_prompt = (
                     "\n\n[System Note: PLAN MODE is ON. For complex tasks or file modifications, you MUST use the `submit_plan_for_approval` tool before executing changes. Since AUTOMODE is ON, it will auto-approve. Follow your blueprint and verify afterwards.]"
@@ -480,9 +535,13 @@ async def main() -> None:
         current_session_id = save_session(messages, current_session_id)
 
         try:
-            await manage_context(messages)
-
-            result = await chat_turn(messages)
+            if config.DEEPTHINK:
+                # deepthink drives its own turns, and manages context between
+                # them - it is five passes over one request, not one.
+                result = await deepthink.run(messages)
+            else:
+                await manage_context(messages)
+                result = await chat_turn(messages)
 
             current_session_id = save_session(messages, current_session_id)
 
@@ -501,10 +560,43 @@ async def main() -> None:
             print(f"\n  {S.ERR}✗ Error: {e}{S.R}\n")
 
 
-if __name__ == "__main__":
+def _use_utf8_output() -> None:
+    """Make sure the harness can print its own interface.
+
+    The TUI is drawn with box characters - the tool call alone uses U+25B8 and
+    U+2570 - and an answer is routinely not ASCII either. A Windows console
+    handles those, but a *pipe* on Windows does not: Python falls back to the
+    locale code page there, cp1252 or cp949, and the first tool call raises
+    UnicodeEncodeError halfway through drawing itself. Redirecting the output
+    to a file should not crash the program.
+
+    `errors="replace"` rather than "strict" for the same reason: a character
+    the terminal genuinely cannot show is worth one replacement glyph, never a
+    traceback in the middle of an answer.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass          # not a real stream, or an encoding it will not take
+
+
+def cli() -> None:
+    """The `simple-harness` command, and what `python -m simple_harness` runs.
+
+    `main()` is a coroutine, and a console-script entry point has to be an
+    ordinary function - so the event loop and the two exits that are not errors
+    are handled here rather than under `__main__`, where an installed copy
+    would never reach them.
+    """
+    _use_utf8_output()
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         print(f"\n\n  {S.GRAY}Goodbye!{S.R}\n")
     except Exception as e:
         print(f"\n  {S.ERR}✗ Unexpected error: {e}{S.R}")
+
+
+if __name__ == "__main__":
+    cli()

@@ -18,12 +18,14 @@ project directory - that is a place people commit from.
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import threading
 import time
 
-from sse import iter_sse
+from simple_harness import atomic
+from simple_harness.sse import iter_sse
 
 
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".localchat")
@@ -40,6 +42,71 @@ def _requests():
 # ---------------------------------------------------------------------------
 # message shaping
 # ---------------------------------------------------------------------------
+
+class _PartialCalls:
+    """Collects tool calls that arrive as a stream of JSON fragments.
+
+    Anthropic and OpenAI both send a tool call's arguments a few characters at
+    a time, so nothing can be parsed until the last fragment has landed. Each
+    call is kept under the index or id the provider tags it with, and turned
+    into an event only when the provider says it is finished.
+    """
+
+    def __init__(self):
+        self.calls = {}
+
+    def start(self, key, name: str = "", call_id: str = "") -> None:
+        entry = self.calls.setdefault(key, {"name": "", "id": "", "json": ""})
+        if name:
+            entry["name"] = name
+        if call_id:
+            entry["id"] = call_id
+
+    def feed(self, key, fragment: str) -> None:
+        if key in self.calls and fragment:
+            self.calls[key]["json"] += fragment
+
+    def take(self, key):
+        entry = self.calls.pop(key, None)
+        return _decode_call(entry) if entry else None
+
+    def drain(self):
+        for key in list(self.calls):
+            event = self.take(key)
+            if event:
+                yield event
+
+
+def _decode_call(entry: dict):
+    """One collected call as a `tool_call` event, or None if it has no name."""
+    name = (entry.get("name") or "").strip()
+    if not name:
+        return None
+    blob = (entry.get("json") or "").strip()
+    call = {"name": name, "id": entry.get("id", ""), "arguments": {}}
+    if not blob:
+        return {"tool_call": call}         # a tool that takes no arguments
+    try:
+        arguments = json.loads(blob)
+    except json.JSONDecodeError as error:
+        # The provider built this JSON, so this should not happen - but saying
+        # so beats calling the tool with nothing and reporting a bad result.
+        call["error"] = f"the arguments were not valid JSON ({error})"
+        return {"tool_call": call}
+    call["arguments"] = arguments if isinstance(arguments, dict) else {}
+    return {"tool_call": call}
+
+
+def token_budget(max_tokens: int | None) -> int:
+    """The output cap to send, as an int.
+
+    Every hosted API rejects a float here, and the setting is easy to write as
+    one (`4096 * 1.5` is 6144.0), so it is coerced in the one place they all
+    pass through rather than trusted at four call sites.
+    """
+    from simple_harness import config       # lazily, like everywhere else here - see the header
+    return int(max_tokens or config.NUM_PREDICT)
+
 
 def split_system(messages: list) -> tuple:
     """Separate the system prompt from the conversation.
@@ -116,6 +183,15 @@ class Provider:
     def __init__(self, settings: dict | None = None):
         self.settings = settings or {}
 
+    # Whether this provider takes tool schemas over its own API. Ollama stays
+    # False on purpose: the text <tool_call> protocol and its JSON repair are
+    # what make small local models usable, and nothing here should disturb them.
+    supports_native_tools = False
+
+    def encode_tools(self, schemas: list) -> list:
+        """Reshape `toolspec.native_schema()` into this provider's wire format."""
+        raise NotImplementedError
+
     # -- configuration -----------------------------------------------------
 
     @property
@@ -175,6 +251,71 @@ class Provider:
         return response
 
 
+# What each local model says it can do, asked once per model. `ollama.show`
+# is a local call, but the prompt is rebuilt often enough that asking every
+# time would be wasteful, and a daemon that is down must not stall startup.
+_ollama_capabilities: dict = {}
+
+
+def ollama_supports_tools(model: str) -> bool:
+    """Whether this local model was built with a tool-calling template.
+
+    Ollama reports it outright, and it is worth asking: a model whose template
+    cannot format a tool call will simply never make one, while a model that
+    can is more accurate through that interface than through text. Models
+    differ - of the twenty installed here, five have no tool support at all -
+    so this is per model, not per provider.
+
+    Anything that goes wrong means no: the text protocol works everywhere, so
+    falling back to it is always safe.
+    """
+    if not model:
+        return False
+    if model in _ollama_capabilities:
+        return _ollama_capabilities[model]
+    supported = False
+    try:
+        import ollama
+        shown = ollama.Client(timeout=2.0).show(model)
+        capabilities = (shown.get("capabilities") if isinstance(shown, dict)
+                        else getattr(shown, "capabilities", None)) or []
+        supported = "tools" in capabilities
+    except Exception:
+        supported = False
+    _ollama_capabilities[model] = supported
+    return supported
+
+
+def _ollama_calls(message):
+    """Tool calls out of one Ollama chunk, however the client wrapped them.
+
+    Ollama sends a call whole and has already parsed its arguments, so there
+    is nothing to accumulate. The client returns pydantic objects rather than
+    plain dicts, and older versions returned dicts, so both are read here.
+    """
+    raw = (message.get("tool_calls") if isinstance(message, dict)
+           else getattr(message, "tool_calls", None)) or []
+    events = []
+    for call in raw:
+        function = (call.get("function") if isinstance(call, dict)
+                    else getattr(call, "function", None)) or {}
+        name = (function.get("name") if isinstance(function, dict)
+                else getattr(function, "name", "")) or ""
+        arguments = (function.get("arguments") if isinstance(function, dict)
+                     else getattr(function, "arguments", None))
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+        if not name:
+            continue
+        events.append({"tool_call": {
+            "name": name, "id": "",
+            "arguments": dict(arguments) if isinstance(arguments, dict) else {}}})
+    return events
+
+
 class OllamaProvider(Provider):
     name = "ollama"
     label = "Ollama"
@@ -184,12 +325,23 @@ class OllamaProvider(Provider):
     @property
     def model(self) -> str:
         # Someone who never runs /connect keeps the model from config.py.
-        import config
+        from simple_harness import config
         return str(self.settings.get("model") or config.MODEL or "")
 
     @property
     def host(self) -> str:
         return str(self.settings.get("base_url") or "").rstrip("/")
+
+    @property
+    def supports_native_tools(self) -> bool:
+        """Unlike the hosted providers, this depends on the model, not the API."""
+        return ollama_supports_tools(self.model)
+
+    def encode_tools(self, schemas: list) -> list:
+        # Ollama takes OpenAI's shape.
+        return [{"type": "function",
+                 "function": {"name": s["name"], "description": s["description"],
+                              "parameters": s["input_schema"]}} for s in schemas]
 
     def _client(self):
         import ollama
@@ -212,12 +364,16 @@ class OllamaProvider(Provider):
             models.append({"name": name, "detail": detail})
         return models
 
-    async def stream(self, messages: list, max_tokens: int | None = None):
-        import config
+    async def stream(self, messages: list, max_tokens: int | None = None,
+                     tools: list | None = None):
+        from simple_harness import config
         options = {"num_ctx": config.NUM_CTX,
-                   "num_predict": max_tokens or config.NUM_PREDICT}
-        response = await self._client().chat(model=self.model, messages=messages,
-                                             stream=True, options=options)
+                   "num_predict": token_budget(max_tokens)}
+        request = {"model": self.model, "messages": messages,
+                   "stream": True, "options": options}
+        if tools:
+            request["tools"] = self.encode_tools(tools)
+        response = await self._client().chat(**request)
         async for chunk in response:
             message = chunk.get("message") or {}
             text = message.get("content", "") or ""
@@ -226,6 +382,8 @@ class OllamaProvider(Provider):
                 yield {"thinking": thinking}
             if text:
                 yield {"text": text}
+            for call in _ollama_calls(message):
+                yield call
             if chunk.get("done"):
                 yield {"done": True,
                        "prompt_tokens": chunk.get("prompt_eval_count", 0) or 0,
@@ -241,6 +399,13 @@ class AnthropicProvider(Provider):
     key_help = "console.anthropic.com -> API keys"
     default_base_url = "https://api.anthropic.com"
     api_version = "2023-06-01"
+    supports_native_tools = True
+
+    def encode_tools(self, schemas: list) -> list:
+        # The canonical shape is already Anthropic's, so this is a copy rather
+        # than a translation - kept explicit so the three stay symmetrical.
+        return [{"name": s["name"], "description": s["description"],
+                 "input_schema": s["input_schema"]} for s in schemas]
 
     def _headers(self) -> dict:
         return {"x-api-key": self.api_key,
@@ -252,23 +417,26 @@ class AnthropicProvider(Provider):
         return [{"name": item["id"], "detail": item.get("display_name", "")}
                 for item in data.get("data", []) if item.get("id")]
 
-    def stream(self, messages: list, max_tokens: int | None = None):
-        import config
+    def stream(self, messages: list, max_tokens: int | None = None,
+               tools: list | None = None):
         system, conversation = split_system(messages)
         payload = {
             "model": self.model,
             # Anthropic requires max_tokens; it is a cap, not a target.
-            "max_tokens": max_tokens or config.NUM_PREDICT,
+            "max_tokens": token_budget(max_tokens),
             "messages": merge_runs(conversation) or [{"role": "user", "content": "."}],
             "stream": True,
         }
         if system:
             payload["system"] = system
+        if tools:
+            payload["tools"] = self.encode_tools(tools)
 
         def chunks():
             response = self._post_sse(f"{self.base_url}/v1/messages",
                                       self._headers(), payload)
             prompt_tokens = completion_tokens = 0
+            pending = _PartialCalls()
             started = time.time()
             for _event, data in iter_sse(response):
                 if not data.strip():
@@ -283,18 +451,30 @@ class AnthropicProvider(Provider):
                 if kind == "message_start":
                     usage = (event.get("message") or {}).get("usage") or {}
                     prompt_tokens = usage.get("input_tokens", 0) or 0
+                elif kind == "content_block_start":
+                    block = event.get("content_block") or {}
+                    if block.get("type") == "tool_use":
+                        pending.start(event.get("index"), block.get("name", ""),
+                                      block.get("id", ""))
                 elif kind == "content_block_delta":
                     delta = event.get("delta") or {}
                     if delta.get("type") == "thinking_delta":
                         yield {"thinking": delta.get("thinking", "")}
+                    elif delta.get("type") == "input_json_delta":
+                        pending.feed(event.get("index"), delta.get("partial_json", ""))
                     elif delta.get("text"):
                         yield {"text": delta["text"]}
+                elif kind == "content_block_stop":
+                    finished = pending.take(event.get("index"))
+                    if finished:
+                        yield finished
                 elif kind == "message_delta":
                     completion_tokens = (event.get("usage") or {}).get(
                         "output_tokens", completion_tokens) or completion_tokens
                 elif kind == "error":
                     detail = (event.get("error") or {}).get("message", "unknown error")
                     raise RuntimeError(f"Anthropic: {detail}")
+            yield from pending.drain()      # a stream cut short still reports
             elapsed = time.time() - started
             yield {"done": True, "prompt_tokens": prompt_tokens,
                    "completion_tokens": completion_tokens,
@@ -309,6 +489,12 @@ class OpenAIProvider(Provider):
     key_env = ("OPENAI_API_KEY",)
     key_help = "platform.openai.com -> API keys"
     default_base_url = "https://api.openai.com/v1"
+    supports_native_tools = True
+
+    def encode_tools(self, schemas: list) -> list:
+        return [{"type": "function",
+                 "function": {"name": s["name"], "description": s["description"],
+                              "parameters": s["input_schema"]}} for s in schemas]
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.api_key}",
@@ -319,15 +505,17 @@ class OpenAIProvider(Provider):
         names = sorted(item["id"] for item in data.get("data", []) if item.get("id"))
         return [{"name": name, "detail": ""} for name in names]
 
-    def stream(self, messages: list, max_tokens: int | None = None):
-        import config
+    def stream(self, messages: list, max_tokens: int | None = None,
+               tools: list | None = None):
         payload = {
             "model": self.model,
             "messages": merge_runs(messages),
             "stream": True,
             "stream_options": {"include_usage": True},
-            "max_completion_tokens": max_tokens or config.NUM_PREDICT,
+            "max_completion_tokens": token_budget(max_tokens),
         }
+        if tools:
+            payload["tools"] = self.encode_tools(tools)
 
         def chunks():
             try:
@@ -344,6 +532,7 @@ class OpenAIProvider(Provider):
                                           self._headers(), retry)
 
             prompt_tokens = completion_tokens = 0
+            pending = _PartialCalls()
             started = time.time()
             for _event, data in iter_sse(response):
                 data = data.strip()
@@ -368,6 +557,16 @@ class OpenAIProvider(Provider):
                         yield {"thinking": delta["reasoning_content"]}
                     if delta.get("content"):
                         yield {"text": delta["content"]}
+                    for call in delta.get("tool_calls") or []:
+                        # `index` is what ties the fragments of one call
+                        # together; the id and name arrive only in the first.
+                        key = call.get("index", 0)
+                        function = call.get("function") or {}
+                        pending.start(key, function.get("name", ""), call.get("id", ""))
+                        pending.feed(key, function.get("arguments", ""))
+            # OpenAI marks the end with finish_reason rather than a per-call
+            # stop event, so the calls are read out once the stream is over.
+            yield from pending.drain()
             elapsed = time.time() - started
             yield {"done": True, "prompt_tokens": prompt_tokens,
                    "completion_tokens": completion_tokens,
@@ -382,6 +581,28 @@ class GeminiProvider(Provider):
     key_env = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
     key_help = "aistudio.google.com -> Get API key"
     default_base_url = "https://generativelanguage.googleapis.com"
+    supports_native_tools = True
+
+    def encode_tools(self, schemas: list) -> list:
+        """One declaration per tool, inside the single `tools` entry Gemini takes.
+
+        Gemini validates the schema against its own OpenAPI subset and rejects
+        a parameter object with nothing in it, so a tool that takes no
+        arguments is declared without a schema at all.
+        """
+        declarations = []
+        for schema in schemas:
+            entry = {"name": schema["name"], "description": schema["description"]}
+            parameters = schema["input_schema"]
+            if parameters.get("properties"):
+                entry["parameters"] = {
+                    "type": "object",
+                    "properties": parameters["properties"],
+                }
+                if parameters.get("required"):
+                    entry["parameters"]["required"] = parameters["required"]
+            declarations.append(entry)
+        return [{"functionDeclarations": declarations}]
 
     def _headers(self) -> dict:
         return {"x-goog-api-key": self.api_key, "Content-Type": "application/json"}
@@ -397,18 +618,20 @@ class GeminiProvider(Provider):
                 models.append({"name": name, "detail": item.get("displayName", "")})
         return models
 
-    def stream(self, messages: list, max_tokens: int | None = None):
-        import config
+    def stream(self, messages: list, max_tokens: int | None = None,
+               tools: list | None = None):
         system, conversation = split_system(messages)
         contents = [{"role": "model" if m["role"] == "assistant" else "user",
                      "parts": [{"text": m.get("content", "")}]}
                     for m in merge_runs(conversation)]
         payload = {
             "contents": contents or [{"role": "user", "parts": [{"text": "."}]}],
-            "generationConfig": {"maxOutputTokens": max_tokens or config.NUM_PREDICT},
+            "generationConfig": {"maxOutputTokens": token_budget(max_tokens)},
         }
         if system:
             payload["systemInstruction"] = {"parts": [{"text": system}]}
+        if tools:
+            payload["tools"] = self.encode_tools(tools)
 
         url = (f"{self.base_url}/v1beta/models/{self.model}"
                ":streamGenerateContent?alt=sse")
@@ -434,6 +657,15 @@ class GeminiProvider(Provider):
                                               completion_tokens) or completion_tokens
                 for candidate in event.get("candidates") or []:
                     for part in (candidate.get("content") or {}).get("parts") or []:
+                        call = part.get("functionCall")
+                        if call and call.get("name"):
+                            # Gemini sends a call whole, so there is nothing to
+                            # accumulate and nothing that can arrive half-parsed.
+                            arguments = call.get("args")
+                            yield {"tool_call": {
+                                "name": call["name"], "id": "",
+                                "arguments": arguments if isinstance(arguments, dict) else {}}}
+                            continue
                         text = part.get("text")
                         if not text:
                             continue
@@ -481,14 +713,45 @@ def load_state(force: bool = False) -> dict:
 def save_state() -> str:
     """Write the config with owner-only permissions - it holds API keys."""
     os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as handle:
-        json.dump(_state, handle, indent=2, ensure_ascii=False)
-        handle.write("\n")
-    try:
-        os.chmod(CONFIG_PATH, 0o600)
-    except Exception:
-        pass
+    # `private` keeps the key owner-only for the whole write. Creating the file
+    # and chmodding it afterwards leaves a moment where the key is readable.
+    atomic.write_json(CONFIG_PATH, _state, private=True)
     return CONFIG_PATH
+
+
+@contextlib.contextmanager
+def using_model(model: str):
+    """Run a block against a different model on the current provider.
+
+    Both places a model can be named have to move together: the provider's own
+    saved setting, which wins, and `config.MODEL`, which the display and the
+    session file read. Restoring is in a `finally` because a sub-agent that
+    raises must not leave the assistant talking to the wrong model.
+    """
+    from simple_harness import config
+    provider = current()
+    settings = settings_for(provider.name)
+    had = "model" in settings
+    previous_setting = settings.get("model")
+    previous_config = config.MODEL
+    try:
+        if model:
+            settings["model"] = model
+            config.MODEL = model
+        yield current()
+    finally:
+        if model:
+            if had:
+                settings["model"] = previous_setting
+            else:
+                settings.pop("model", None)
+            config.MODEL = previous_config
+            _active_cache_clear()
+
+
+def _active_cache_clear() -> None:
+    global _active
+    _active = None
 
 
 def settings_for(name: str) -> dict:
@@ -534,7 +797,7 @@ def connect(name: str, model: str = "", api_key: str = "",
 def _sync_config(provider: Provider) -> None:
     """Keep `config.MODEL` in step - the TUI and session files both read it."""
     try:
-        import config
+        from simple_harness import config
         config.MODEL = provider.model or config.MODEL
     except Exception:
         pass

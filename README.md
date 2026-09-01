@@ -1,14 +1,30 @@
-# Local AI Terminal Client
+# Simple Harness
+
+[![CI](https://github.com/minjun1177/chat/actions/workflows/ci.yml/badge.svg)](https://github.com/minjun1177/chat/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 
 ## 1. What It Does
 
-This application is a feature-rich, terminal-based AI assistant client built in Python for local Large Language Models running via Ollama. It transforms local LLMs into an autonomous workspace assistant equipped with function calling, interactive safety prompts, and real-time execution capabilities.
+A terminal AI assistant that can actually work on your machine: read and write
+files, run commands and answer their prompts, search the web, and undo what it
+did. It runs against a local Ollama model or a hosted one (Anthropic, OpenAI,
+Gemini) with the same tools and the same safety prompts either way.
+
+It is built for the local case first. A 4B model cannot reliably escape a
+source file into a JSON string, so it is never asked to; much of what is here
+exists to make small models genuinely usable rather than nearly usable.
 
 ---
 
 ## 2. Features
 
-- **Any Provider**: `/connect` points the harness at Ollama, Anthropic, OpenAI (or anything OpenAI-compatible), or Google Gemini. Tool calls travel as text, so switching provider changes nothing else about how the harness works.
+- **Any Provider**: `/connect` points the harness at Ollama, Anthropic, OpenAI (or anything OpenAI-compatible), or Google Gemini. No vendor SDKs - four wire formats normalised into one event shape.
+- **Two Tool Protocols, One Tool Table**: A model with a real function-calling interface gets the tools through it; one without gets them as `<tool_call>` text with a JSON repair engine behind it. For Ollama this is decided per model. Both come from the same table, and both end up as the same call.
+- **Deepthink**: `/deepthink on` turns one request into plan → argue with the plan → build → review the real diff → run it. The planning stages *cannot* edit, and the harness reports what the final check actually ran.
+- **Undo**: every file an AI tool changes is committed on its own, so `/undo` takes it back. It commits only what the tool named, and refuses to undo over work it did not create.
+- **Sub-agents**: `spawn_agent` hires a second model for one self-contained job. It works in its own context and hands back only its report, so a twenty-tool-call search never enters the conversation.
+- **Crash-safe writes**: sessions, memory, permission rules and saved API keys are written to a temporary file and renamed into place, so being killed mid-write cannot empty one.
 - **ANSI Terminal User Interface**: Provides an ANSI-colored TUI with streaming text responses, live token-per-second (TPS) calculation, custom spinner animations, markdown rendering, syntax code blocks, and ASCII tables.
 - **Interactive Action Approval**: Security layer that prompts the user for confirmation prior to running shell commands, editing/writing files, or sending network API requests.
 - **Dynamic Context Compression**: Monitors active token counts and conversation length to automatically condense conversation history when nearing model limits, tailored to model size.
@@ -29,35 +45,66 @@ This application is a feature-rich, terminal-based AI assistant client built in 
 
 ### Prerequisites
 - **Python**: Version 3.10 or higher
-- **Ollama**: Installed and running locally (default endpoint: `http://localhost:11434`)
+- **Ollama**: Installed and running locally (default endpoint: `http://localhost:11434`).
+  Only needed for the local case - `/connect` reaches Anthropic, OpenAI and
+  Gemini without it.
 
 ### Installation Steps
 
-1. **Install Required Packages**:
+1. **Install it**:
    ```bash
-   pip install -r requirments.txt
+   git clone https://github.com/minjun1177/chat
+   cd chat
+   pip install -e .
    ```
+   Or, to run it straight from the checkout without installing:
+   ```bash
+   pip install -r requirements.txt
+   ```
+   `get_code_skeleton` and `query_ast_node` need Tree-sitter, which is ten
+   grammar wheels for two tools and so is opt-in: `pip install -e ".[ast]"`.
+   Everything else runs without it.
 
 2. **Pull an Ollama Model**:
    ```bash
    ollama pull gemma4:e4b
    ```
 
-3. **Launch the Application**:
+3. **Launch it**:
    ```bash
-   python app.py
+   simple-harness            # if you installed it
+   python -m simple_harness   # if you did not
    ```
+
+### Running the tests
+
+No framework - each file is a script that prints `[ok]` / `[FAIL]` and exits
+non-zero on failure. They need no Ollama daemon and no network:
+
+```bash
+for t in tests/*.py; do python "$t" || echo "FAILED: $t"; done
+```
+
+`tests/test_platform.py` is the one worth running on any new machine, and
+especially on Windows: it checks what that machine can tell you about a command
+waiting for input.
 
 ---
 
 ## 4. Tool Capabilities
 
-The client equips the LLM with 25 function-calling tools divided into five core domain categories:
+The client equips the model with 28 tools. They are listed in one table in
+`toolspec.py`, from which both the system prompt and the dispatcher are
+generated - so this list cannot quietly drift from what actually runs.
 
 ### Tool Call Format
 
-The model calls a tool by emitting a `<tool_call>` block. Anything a parameter
-can hold in one line goes in the JSON; a file body does not:
+A model with a real function-calling interface just calls the tool, and none of
+this section applies to it - skip to *How tools are asked for* under Providers.
+
+Everything below is the **text protocol**, used for models that have no such
+interface. The model emits a `<tool_call>` block. Anything a parameter can hold
+in one line goes in the JSON; a file body does not:
 
 ```
 <tool_call>
@@ -84,6 +131,31 @@ and says so. What it refuses to repair is a reply that stopped early: closing
 the brackets there would invent arguments that were never sent, and `write_file`
 would happily write the empty result over a real file. Those are reported, and
 the model is asked to send the call again.
+
+**The envelope is repaired too.** A model with no tool-calling template of its
+own does not reach for `<tool_call>`; it reaches for the nearest thing it knows.
+Gemma writes a markdown fence, and it writes the name under `tool_name`, and it
+nests the whole call under a `tool_call` key:
+
+````
+```tool_call
+{"tool_name": "write_file", "arguments": {"filepath": "hello.py"}}
+```
+<content>
+print('hi')
+</content>
+````
+
+The JSON inside is usually byte-perfect and the raw block is byte-perfect - only
+the wrapper is wrong. Reading only the literal tag found nothing there, so the
+turn ended with no tool run, no error and nothing said, which is the one failure
+this protocol exists to prevent. All three shapes are now read.
+
+The refusals are what keep that honest. A fence is only read as a call when
+there is no `<tool_call>` anywhere in the reply, so a correctly formatted call is
+never second-guessed; and unless the fence says `tool_call` or `tool_code`
+outright, what it holds has to decode to a tool that actually exists. An
+ordinary ```json block in an answer stays an answer.
 
 ### Web & Network Tools
 - `search_web`: Multi-source search with local relevance ranking (see Web Search below).
@@ -127,6 +199,41 @@ Present only when an MCP server is attached (see MCP Servers below).
 - `submit_plan_for_approval`: Present a task plan and diff blueprint for approval before executing (plan mode).
 - `get_code_skeleton`: Return a JSON outline of a source file's structure via Tree-sitter.
 - `query_ast_node`: Search a source file for Tree-sitter S-expression patterns.
+- `spawn_agent`: Hire a second model for one self-contained job. See below.
+
+### Sub-agents
+
+`spawn_agent` starts a fresh conversation - its own system prompt, its own
+history, its own tool loop - gives it a written brief, and returns its final
+report as the tool result. The user never sees the sub-agent's working; the
+assistant never sees it either, only the report.
+
+It is for work whose *output* matters and whose *process* does not: finding
+where something is handled across a codebase, reading six files to answer one
+question, checking a list of URLs. Twenty tool results that will never be needed
+again fill the sub-agent's context instead of the conversation's.
+
+```
+spawn_agent(task="Find every place a session file is written, and report the
+                  file and line of each.",
+            context="I already know session.py:save_session is one of them.",
+            model="qwen3:8b")        # optional - a cheaper model for a long search
+```
+
+What it may do:
+
+- every tool the assistant has, except `get_user_input`, `submit_plan_for_approval`
+  and `spawn_agent` itself. It has nobody to ask, no plan to submit, and hiring
+  chains have unbounded cost;
+- nothing the assistant could not have done. Its tool calls go through the same
+  permission rules and raise the same approval prompts. A sub-agent is not a way
+  around a `deny` rule;
+- at most `SUBAGENT_MAX_TURNS` turns (12 by default), after which it is asked for
+  a report from what it has rather than being cut off mid-search.
+
+Starting one asks for approval, like running a command does - it costs a stretch
+of time, and on a hosted model real money, before it reaches its first tool.
+Allow it permanently with an `allow` rule for `spawn_agent`.
 
 ---
 
@@ -154,15 +261,53 @@ speaks the same protocol - a local vLLM or llama.cpp server, OpenRouter, Groq,
 Together.
 
 Keys are read from the environment first. A key typed at the `/connect` prompt
-is written to `~/.localchat/providers.json` with owner-only permissions -
-never into the project directory, which is a place people commit from.
+is written to `~/.localchat/providers.json` - never into the project directory,
+which is a place people commit from. On Linux and macOS the file is owner-only
+(0600) from the moment it is created. Windows has no POSIX mode bits, so there
+the file takes whatever ACL its directory gives it; `%USERPROFILE%` is
+per-user, but if that matters to you, keep the key in the environment instead.
 
-**Why this is small.** The harness asks for tool calls as `<tool_call>` text
-rather than through each vendor's function-calling API, so a provider only has
-to turn messages into a stream of text. That is a few dozen lines each and no
-SDK: `providers.py` normalises the three wire formats into one event shape, and
-everything downstream - streaming, `<think>` filtering, tool parsing, titles,
-context compression - is untouched by which provider is answering.
+### How tools are asked for
+
+Two protocols, chosen by who is answering:
+
+| | Tools are | Tool calls come back as |
+| :--- | :--- | :--- |
+| **Anthropic, OpenAI, Gemini** | sent with the request | the API's own tool-call events |
+| **Ollama, model supports tools** | sent with the request | Ollama's own tool-call events |
+| **Ollama, model does not** | listed in the system prompt | `<tool_call>` text, repaired if malformed |
+
+For Ollama this is decided **per model, not per provider**: whether a model can
+call a tool depends on the template it was built with, and Ollama says so
+outright. Of the twenty models installed on the machine this was written on,
+five have no tool support. Each one is asked once and the answer cached; a
+daemon that is down, or a model that cannot be asked, means the text protocol -
+which works everywhere.
+
+That fallback is the point. A model whose template cannot format a tool call
+will simply never make one, and the text protocol plus its JSON repair engine
+is what makes those models usable at all. A model that *can* is more accurate
+through the real interface, and about **12KB of prompt cheaper per turn**,
+because the tool list no longer has to be spelled out:
+
+```
+text protocol      system prompt 17.8KB   (tool schemas + <tool_call> rules)
+native tool calls   system prompt 5.1KB   (schemas travel with the request)
+```
+
+Both protocols describe the same tools, from the same table in `toolspec.py`,
+so they cannot drift apart. Both end up as the same `(name, arguments)` pair,
+so dispatch, permissions, display, session files and context compression see no
+difference - the history stays plain text either way, and a session saved from
+one provider replays under another.
+
+Set `NATIVE_TOOLS = False` in `config.py` to force the text protocol everywhere,
+which is what an OpenAI-compatible server without tool support needs.
+`/connect status` shows which protocol is in use.
+
+**Why this is still small.** `providers.py` normalises four wire formats into
+one event shape - text, thinking, tool call, done - and everything downstream is
+untouched by which provider is answering. No vendor SDKs.
 
 The shapes that do differ are handled in one place: Anthropic and Gemini take
 the system prompt as its own field rather than a message, Gemini calls the
@@ -322,15 +467,17 @@ The protocol client is a self-contained JSON-RPC implementation in
 
 ## 9. Running Commands
 
-`run_cmd` captures the command's output, which means the command can never show
-anything to the user while it runs - including a prompt. So it is given no
-stdin at all (`DEVNULL`) and a deadline (`config.CMD_TIMEOUT`, 120s).
+`run_cmd` captures the command's output, so nothing the command prints reaches
+the user's screen while it runs - including a prompt. An interactive program
+therefore used to hang the whole app: it sat waiting on stdin with its question
+captured and invisible, and there was no way to tell what it wanted or to answer
+it.
 
-Without that, an interactive program inherited the terminal and sat waiting for
-input, with its prompt captured and invisible: the whole app froze with nothing
-on screen and no way to tell what it wanted. A command that simply runs too long
-is now stopped along with everything it started, and whatever it printed first
-is kept.
+The fix is not to deny it stdin. **The model answers the prompt.** The command
+keeps a live pipe, and when it goes quiet its output so far is handed over with
+a session id - see below. A command that never finishes is stopped at
+`config.CMD_TIMEOUT` (120s) along with everything it started, and whatever it
+printed first is kept.
 
 ### Answering a program while it runs
 
@@ -394,7 +541,99 @@ prints and for what `send_input` sends back to it.
 
 ---
 
-## 10. Tool Permissions
+## 10. Deepthink
+
+Off by default. `/deepthink on` turns one request into five turns:
+
+```
+1  Plan      work out what it takes - read the files, change nothing
+2  Check     argue against that plan and settle every assumption
+3  Implement carry out the plan as it now stands
+4  Review    read the diff of what actually changed, and fix what is wrong
+5  Verify    run it, and report what really came back
+```
+
+All five are one conversation, so each stage sees everything the ones before it
+did. What changes is the instruction at the top of each turn.
+
+Asked to implement something, a model goes straight at it. It writes code from
+what it remembers of a file rather than what the file says, and when it is done
+it reports success without running the thing. Both come from the same place -
+one pass, with no step whose only job is to find fault.
+
+**Two of the five carry the mode.** Stage 2 is the only one asked to prove the
+plan wrong, and a plan nobody argued with is usually the one that fails. Stage 4
+is handed the **real `git diff`** rather than being asked what it changed:
+reviewing from memory finds nothing, because the memory is of the intention, not
+of the code. Without git - no repository, or `/autocommit off` - it is told to
+re-read the files instead.
+
+**The first two stages cannot edit.** Not "are asked not to" - the tools that
+change things are switched off until stage 3, and a model that tries one is told
+to say what it would change instead. Telling a model to hold off does not hold
+it off; a local 4B model tried to edit fifteen times in the planning stage
+before this was enforced.
+
+**It stops early when there is nothing to build.** A question costs one turn,
+not five: the plan stage marks it, and if the model forgets to, the plan itself
+is read back in one short call to decide. Anything unclear counts as work to do.
+A build stage that changed nothing also ends the chain rather than reviewing and
+verifying work that was never done.
+
+```
+/deepthink            the stages, and whether it is on
+/deepthink on|off     turn it on or off
+```
+
+Deepthink supersedes plan mode while it is on, so `/planmode` injects nothing -
+two sets of planning instructions only contradict each other.
+
+---
+
+## 11. Undoing AI Edits
+
+Every file an AI tool changes is committed on its own, under a message naming
+the tool that did it:
+
+```
+ai(edit_file): greet.py
+ai(write_file): parser.py
+```
+
+`/undo` takes the newest one back:
+
+```
+/undo             put the last AI edit back the way it was
+/autocommit       whether this is on, and the recent AI commits
+/autocommit off   stop committing (edits still happen, they are just not committed)
+```
+
+An assistant that edits files is only as useful as its undo. Without one the
+honest advice is "commit before you let it touch anything", which nobody
+follows, and a wrong edit three tool calls ago is gone.
+
+Two rules keep this from being a nuisance:
+
+**It commits only what the tool named.** Whatever else you have staged or
+changed is left exactly as it was - `git commit` is given those paths
+explicitly rather than being allowed to sweep up your index.
+
+**Undo refuses rather than destroying work it did not create.** It will not
+touch a commit you wrote, and if a file in the AI's commit has changed since,
+it stops and says which one:
+
+```
+'ai(write_file): shared.py' touched files that have since changed: shared.py.
+Commit or discard those first - undoing now would take them with it.
+```
+
+Outside a git repository, and on a machine with no git installed, nothing is
+committed and nothing breaks. Set `GIT_AUTO_COMMIT = False` in `config.py` to
+default it off.
+
+---
+
+## 12. Tool Permissions
 
 Until now the only gate was the approval prompt, and `/automode on` turned it
 off for everything at once - including `run_cmd` and `delete_file`. Rules give
@@ -416,10 +655,35 @@ file tool, the URL for a network tool. Both halves accept `*` and `?`. A pattern
 with no wildcard also covers `<pattern> <anything>`, so `run_cmd(git status)`
 already allows `git status --short`.
 
-- **deny** never runs and never asks. The tool's handler is never reached, and
-  the model is told it is blocked so it stops retrying.
+- **deny** does not run and does not ask. The tool's handler is never reached,
+  and the model is told it is blocked so it stops retrying.
 - **allow** runs without a prompt.
 - Everything else asks, exactly as before - an empty rule set changes nothing.
+
+### What a rule does not cover
+
+A rule is matched against the call's argument **as text**, and it is worth being
+plain about what that does and does not buy you.
+
+**An allow rule stops at the command it names.** `run_cmd` runs its command
+through a shell, so `git status && rm -rf ~` starts with the text
+`run_cmd(git status)` allows. It is not allowed: an operator the rule itself
+does not contain - `;` `&&` `||` `|` `` ` `` `$(` `${` `>` `<` - means the
+command does more than the rule accounts for, and it falls through to the
+approval prompt instead. A rule that asks for a pipeline outright, such as
+`run_cmd(git log * | grep *)`, still gets one.
+
+**A deny rule is a stop sign, not a sandbox.** It matches text, and text can be
+rewritten: `run_cmd(rm *)` denies `rm -rf x` and does not recognise
+`sh -c 'rm -rf x'` or `/bin/rm -rf x`. Those fall through to the approval
+prompt, so the prompt is still between the model and the command - but with
+`/automode on` there is no prompt, and then a deny rule is only as good as the
+spelling the model happened to use. Deny is for the mistakes you expect, not for
+an adversary.
+
+**A pattern is never empty.** `write_file()` reads as "calls with no arguments"
+and would have meant the opposite, so it is refused at load time and named in
+`/perms`. Write the bare tool name, `write_file`, when you mean every call.
 
 At an approval prompt the choices are now `[y/n/a]`, where `a` allows this
 exact call from now on and appends the rule to `.permissions.json`. `/perms`
@@ -428,7 +692,7 @@ by hand, and `/perms reload` re-reads the files.
 
 ---
 
-## 11. Reasoning Models
+## 13. Reasoning Models
 
 Reasoning models (qwen3, deepseek-r1, gpt-oss) emit their scratch work before
 the answer - either wrapped in `<think>` tags in the content stream, or in
@@ -447,7 +711,51 @@ itself and *then* calls a tool shows only the explanation.
 
 ---
 
-## 12. Slash Commands
+## 14. Configuration
+
+Most behaviour is reachable from a slash command, and those changes last for the
+session. `config.py` is where you change what it starts as. The settings worth
+knowing:
+
+| Setting | Default | What it does |
+| :--- | :--- | :--- |
+| `MODEL` | `gemma4:e4b` | The Ollama model used until `/connect` says otherwise |
+| `NUM_CTX` | 65536 | Context window asked of Ollama |
+| `NUM_PREDICT` | 6144 | Output cap. Must be an int - every hosted API rejects a float |
+| `NATIVE_TOOLS` | `True` | `False` forces the `<tool_call>` text protocol everywhere |
+| `MAX_TOOL_CALLS` | 10 | Tool calls per turn before asking whether to continue |
+| `AUTO_ALLOW` | `False` | `True` is `/automode on` from startup - no approval prompts |
+| `PERMISSIONS_ENABLED` | `True` | Whether `.permissions.json` rules are consulted at all |
+| `GIT_AUTO_COMMIT` | `True` | A commit per AI edit, so `/undo` has something to take back |
+| `DEEPTHINK` | `False` | Start with the five-stage chain on |
+| `SUBAGENT_MAX_TURNS` | 12 | Turns a sub-agent gets before it must report |
+| `SUBAGENT_MAX_DEPTH` | 1 | 1 means sub-agents cannot hire sub-agents |
+| `SHOW_THINKING` | `False` | Show a reasoning model's scratch work |
+| `STORE_THINKING` | `False` | Keep it in the history too. Expensive on a local model |
+| `AUTO_TITLE` | `True` | Let the model name each new session |
+| `SAVE_CHAT_HISTORY` | `True` | Write session files at all |
+| `CMD_TIMEOUT` | 120 | Seconds before a runaway command is killed |
+| `CMD_WAIT_TIMEOUT` | 8 | Silence before a command is called "probably waiting" |
+| `MCP_ENABLED` | `True` | Attach MCP servers on startup |
+| `SEARXNG_URL` | `""` | A self-hosted search instance to prefer over the public sources |
+
+The rest are tuning knobs for search, MCP and command sessions; they are
+documented in the sections above and commented where they are defined.
+
+State that outlives a session lives outside `config.py`:
+
+| Path | Holds |
+| :--- | :--- |
+| `~/.localchat/providers.json` | The connected provider and any API keys typed at `/connect`. Owner-only |
+| `./.permissions.json`, `~/.localchat/permissions.json` | Allow and deny rules |
+| `./.mcp.json`, `~/.localchat/mcp.json` | MCP server declarations |
+| `./sessions/*.json` | Conversation transcripts, named after the session title |
+| `./memory.json` | The long-term key-value memory |
+| `./.chat_history` | Input history for the prompt |
+
+---
+
+## 15. Slash Commands
 
 The interactive terminal supports special slash commands to control options and inspect state:
 
@@ -486,33 +794,66 @@ The interactive terminal supports special slash commands to control options and 
 | `/perms allow <rule>` | Add an allow rule, e.g. `/perms allow run_cmd(git *)` |
 | `/perms deny <rule>` | Add a deny rule |
 | `/think <on/off>` | Show or hide a reasoning model's thinking |
+| `/deepthink` | The plan-check-build-review-verify chain, and whether it is on |
+| `/deepthink <on/off>` | Turn that chain on or off |
+| `/undo` | Take back the last file change the AI committed |
+| `/autocommit` | Whether AI edits are committed, and the recent AI commits |
+| `/autocommit <on/off>` | Turn that on or off |
 | `/exit` or `/quit` | Exit the application |
 
 ---
 
-## 13. Architecture
+## 16. Architecture
 
 The codebase is organized cleanly around the following components:
 
+- **`ARCHITECTURE.md`**: How the codebase is put together - the turn's control flow, the data shapes, the invariants, and what to touch for a given change. Read that before editing; read this to use it.
 - **`app.py`**: Event loop, slash command router, and system prompt composition.
 - **`llm_client.py`**: The conversation loop - streaming a reply, parsing the tool calls out of it, running them. Knows nothing about which provider answered.
-- **`tools.py`**: Tool implementations and the dispatch table.
+- **`tools.py`**: Tool implementations, and the table binding each one to its entry in `toolspec.py`.
+- **`toolspec.py`**: What every built-in tool is - name, description, parameters. The system prompt is rendered from it and dispatch binds arguments through it, so the two cannot drift apart.
+- **`subagent.py`**: `spawn_agent` - a second model, hired for one self-contained job, working in its own context and handing back only its report.
 - **`skills.py`**: Skill discovery, frontmatter parsing, and on-demand loading.
 - **`providers.py`**: The provider abstraction - Ollama, Anthropic, OpenAI, Gemini - and the saved connection.
 - **`connect.py`**: The `/connect` flow.
 - **`sse.py`**: Reading server-sent events without waiting for data that has not been sent. Shared by the providers and the MCP client.
 - **`permissions.py`**: Permission rule loading, matching, and the allow/deny/ask decision.
 - **`shell_session.py`**: Live commands - output draining, waiting-for-input detection, and the session registry.
+- **`deepthink.py`**: The five-stage chain - the stage instructions, what each stage may do, and when the chain stops early.
+- **`git_ops.py`**: A commit per AI edit, and the undo that makes it worth having.
+- **`atomic.py`**: Writing a file so a crash cannot leave half of it behind. Used for sessions, memory, permission rules and the saved API keys.
 - **`tests/test_platform.py`**: Checks the waiting-for-input detection on the machine it is run on. Worth running on any new machine, and especially on Windows - see below.
+- **`tests/test_registry.py`**: Fails if the tool table, the system prompt and the handlers stop describing the same tools.
+- **`tests/test_durability.py`**: Atomic writes (including killing a writer mid-write) and the token estimate.
+- **`tests/test_deepthink.py`**: Stage sequencing, both early stops, and that the planning stages really cannot edit.
+- **`tests/test_git_ops.py`**: Auto-commit and undo against real repositories - including that undo refuses when it would destroy something.
+- **`tests/test_native_tools.py`**: Each provider's tool-call wire format, and that both protocols end up in the same place.
+- **`tests/test_docs.py`**: Fails when README.md or ARCHITECTURE.md names something that is gone, or misses something that is new.
+- **`tests/test_subagent.py`**: What a sub-agent may do, what it may not, and that only its report crosses back.
+- **`tests/test_permissions.py`**: What an allow rule covers - and that it stops at the command it names, rather than at whatever the shell was told to run next.
+- **`tests/test_tool_parsing.py`**: Every shape a model wraps a tool call in, and every shape that must not be read as one.
+- **`requirements-lock.txt`**: The exact dependency set the harness was tested against. `requirements.txt` gives the tested floors and a ceiling before the next breaking release.
 - **`mcp_client.py`**: MCP transports (stdio / streamable HTTP / SSE), the JSON-RPC session, tool and resource calls, and the prompt section they are advertised in.
 - **`websearch.py`**: Multi-source retrieval, page extraction, and BM25 reranking.
-- **`context.py`**: Token budgeting, tool-result trimming, and context compression.
+- **`context.py`**: Token budgeting, tool-result trimming, and context compression. The token estimate is script-aware and calibrates itself against the counts each provider reports.
 - **`renderer.py`** / **`tui.py`**: Markdown rendering and the terminal chrome.
 - **`session.py`**: Session save/load/list and the persistent memory store.
-- **`systemprompt.py`**: System prompt builder, tool specification schemas (in JSON format), and context summarization prompt definitions.
+- **`systemprompt.py`**: The system prompt - the assistant's own instructions, plus the tool-protocol rules that `subagent.py` shares. The tool schemas themselves come from `toolspec.py`.
 - **`skills/`**: Project-level skills. Personal skills live in `~/.localchat/skills/`.
 - **`.permissions.json`**: Project-level tool permission rules (see `.permissions.json.example`). Personal ones live in `~/.localchat/permissions.json`.
 - **`.mcp.json`**: Project-level MCP server declarations (see `.mcp.json.example`). Personal ones live in `~/.localchat/mcp.json`.
 - **`memory.json`**: Key-value JSON storage backing the long-term memory system.
 - **`sessions/`**: Session directory containing JSON transcript backups for conversation history. Each file is named after the session's title (slugified, e.g. `웹-검색-랭킹-개선.json`); untitled sessions fall back to a timestamp until a title exists.
 - **`.chat_history`**: History file managed by `prompt_toolkit` for command history recall across terminal runs.
+
+---
+
+## 17. License
+
+Apache License 2.0 - see [LICENSE](LICENSE).
+
+`pyproject.toml` holds the packaging metadata under the name `simple-harness`.
+The modules live in `simple_harness/`, and the distribution installs that one
+package rather than twenty-two top-level modules - which would otherwise put
+`config`, `tools` and `session` in the importable root of every environment that
+took it.

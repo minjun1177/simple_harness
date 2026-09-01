@@ -1,23 +1,16 @@
-import asyncio
-import sys
-import itertools
+# Only what this file itself uses. Everything else moved out with the code that
+# needed it, and leaving the imports behind was not free: `bs4`, `requests`,
+# `psutil` and `duckduckgo_search` were imported here unguarded, so any one of
+# them missing stopped the whole program from starting - `config` is the base of
+# the import graph and builds SYSTEM_PROMPT at import time (ARCHITECTURE 5.2).
+# A machine with no `bs4` could not open a chat window, let alone search.
 import platform
 import re
-import json
-import shlex
-import subprocess
-import os
-import datetime
 import shutil
-import unicodedata
-import time
-from duckduckgo_search import DDGS
-import requests
-from bs4 import BeautifulSoup
-import random
-import psutil
-import hashlib
 
+# `Parser`, `Query` and `QueryCursor` look unused here and are not: `tools.py`
+# reaches them as `config.Parser` and friends, so that the optional-dependency
+# guard lives in exactly one place. Do not delete them.
 try:
     from tree_sitter import Language, Parser, Query, QueryCursor
     import tree_sitter_python as _ts_python
@@ -60,6 +53,8 @@ except ImportError:
     _TS_LANGUAGES = {}
     _EXT_TO_LANG = {}
 
+# Re-exported the same way: `app.py` reads `config.PromptSession`,
+# `config.FileHistory` and `config.ANSI` behind `PROMPT_TOOLKIT_AVAILABLE`.
 try:
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import FileHistory
@@ -80,9 +75,11 @@ try:
 except ImportError:
     PROMPT_TOOLKIT_AVAILABLE = False
 
-from systemprompt import systemprompt as syp
-from systemprompt import summarizeprompt as smrp
-from systemprompt import titleprompt as ttlp
+# `smrp` and `ttlp` are read as `config.smrp` / `config.ttlp` by the summariser
+# and the session titler.
+from simple_harness.systemprompt import systemprompt as syp
+from simple_harness.systemprompt import summarizeprompt as smrp
+from simple_harness.systemprompt import titleprompt as ttlp
 
 
 MODEL = "gemma4:e4b"
@@ -119,7 +116,9 @@ SEARCH_FETCH_TIMEOUT = 10
 SEARCH_TOTAL_TIMEOUT = 25
 
 NUM_CTX = 32768*2
-NUM_PREDICT = 4096*1.5      # 2048 truncated file writes mid-way
+NUM_PREDICT = 6144          # 2048 and 4096 both truncated file writes mid-way.
+                            # Keep this an int: every hosted API rejects a float
+                            # in max_tokens, and 4096*1.5 is a float.
 
 AUTO_ALLOW = False
 RETURN_ALL_FILE_CONTENT = True
@@ -143,7 +142,34 @@ CMD_SESSION_LIFETIME = 900  # seconds a live command may sit idle before it is k
 
 MAX_TOOL_CALLS = 10
 
+# Sub-agents (spawn_agent). A sub-agent gets a hard turn budget instead of the
+# assistant's "shall I keep going?" prompt - the point of delegating is not
+# being asked about it. Depth 1 means sub-agents cannot hire sub-agents, which
+# is the only setting with a bounded cost.
+# Hosted providers get the tool list through their own function-calling
+# interface instead of the <tool_call> text protocol: more accurate, and about
+# 12KB less prompt per turn. Ollama ignores this - the text protocol and its
+# JSON repair are what make small local models work. Set False to force text
+# everywhere, e.g. against an OpenAI-compatible server that has no tool support.
+NATIVE_TOOLS = True
+
+# Commit each file an AI tool changes, on its own, so /undo can take it back.
+# Only the paths the tool named are committed - whatever else you have staged
+# or changed is left alone. Toggle it in a session with /autocommit.
+GIT_AUTO_COMMIT = True
+
+SUBAGENT_MAX_TURNS = 12
+SUBAGENT_MAX_DEPTH = 1
+SUBAGENT_DEPTH = 0              # how deep we currently are; not a user setting
+
 PLANMODE = False
+
+# Deepthink: one request becomes plan -> check -> build -> review -> verify,
+# driven by the harness rather than left to the model to remember. Off by
+# default - it costs five turns where one would often do. Toggle with
+# /deepthink. See deepthink.py.
+DEEPTHINK = False
+DEEPTHINK_READONLY = False      # set per stage by deepthink.py; not a user setting
 
 LOADED_SKILLS = []
 

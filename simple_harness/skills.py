@@ -290,7 +290,7 @@ def loaded_skill_names(messages: list[dict]) -> list[str]:
 
 
 def handle_use_skill(name: str) -> str:
-    import config
+    from simple_harness import config
 
     if not name:
         available = ", ".join(s["name"] for s in list_skills()) or "(none)"

@@ -27,6 +27,8 @@ import json
 import os
 from fnmatch import fnmatch
 
+from simple_harness import atomic
+
 
 PROJECT_CONFIG_FILES = (".permissions.json", "permissions.json")
 USER_CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".localchat", "permissions.json")
@@ -85,8 +87,14 @@ def load_rules(force: bool = False) -> dict[str, list[tuple[str, str]]]:
             if not isinstance(entries, list):
                 continue
             for entry in entries:
-                if isinstance(entry, str) and entry.strip():
-                    _rules[verdict].append((entry.strip(), path))
+                if not isinstance(entry, str) or not entry.strip():
+                    continue
+                entry = entry.strip()
+                problem = rule_problem(entry)
+                if problem:
+                    errors.append(f"{path}: {verdict} rule '{entry}' ignored - {problem}")
+                    continue
+                _rules[verdict].append((entry, path))
 
     _loaded = True
     return _rules
@@ -107,13 +115,18 @@ def rules_for(verdict: str) -> list[tuple[str, str]]:
 
 def target_for(arguments: dict) -> str:
     """The argument a rule pattern is matched against."""
+    return _target_and_key(arguments)[0]
+
+
+def _target_and_key(arguments: dict) -> tuple[str, str]:
+    """The matched argument and the parameter it came from."""
     if not isinstance(arguments, dict):
-        return ""
+        return "", ""
     for key in _TARGET_KEYS:
         value = arguments.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
+            return value.strip(), key
+    return "", ""
 
 
 def _normalise(text: str) -> str:
@@ -126,6 +139,46 @@ def _split_rule(rule: str) -> tuple[str, str]:
     if not sep:
         return rule.strip(), ""
     return name.strip(), pattern[:-1].strip() if pattern.endswith(")") else pattern.strip()
+
+
+def rule_problem(rule: str) -> str:
+    """Why a rule cannot be used, or "" when it is fine.
+
+    `write_file()` is the one worth catching. It reads to a person as "calls
+    with no arguments", and it used to mean the opposite: an empty pattern
+    matched every call, so one stray pair of brackets quietly granted
+    write_file over every path on the machine. A rule that means "every call"
+    has to be written as the bare tool name, where it looks like what it is.
+    """
+    name, sep, rest = rule.partition("(")
+    if not name.strip():
+        return "it names no tool"
+    if not sep:
+        return ""
+    if not rest.endswith(")"):
+        return "its bracket is never closed"
+    if not rest[:-1].strip():
+        return ("an empty pattern would match every call - write it as "
+                f"'{name.strip()}' if that is what you meant")
+    return ""
+
+
+# Everything the shell reads as "and then do this too". A rule pattern is
+# matched against the command as text, so `run_cmd(git status)` also matches
+# `git status && rm -rf ~`: the pattern covers the prefix and the shell runs
+# whatever follows. Nobody writing that rule meant to allow the second command.
+_SHELL_OPERATORS = (";", "&", "|", "`", "$(", "${", ">", "<", "\n", "\r")
+
+
+def chains_a_second_command(pattern: str, target: str) -> bool:
+    """True when the command does more than the rule's pattern accounts for.
+
+    Only an operator the pattern does not itself contain counts, so a rule
+    written deliberately as `run_cmd(* | grep *)` still works. This downgrades
+    an `allow` to the approval prompt; it never turns an `ask` into a `deny`,
+    and it leaves `deny` alone - a deny that matches should keep matching.
+    """
+    return any(op in target and op not in pattern for op in _SHELL_OPERATORS)
 
 
 def matches(rule: str, tool: str, target: str) -> bool:
@@ -148,15 +201,22 @@ def matches(rule: str, tool: str, target: str) -> bool:
 
 def decide(tool: str, arguments: dict) -> tuple[str, str]:
     """Return ("deny"|"allow"|"ask", the rule that decided it)."""
-    import config
+    from simple_harness import config
     if not getattr(config, "PERMISSIONS_ENABLED", True):
         return "ask", ""
 
-    target = target_for(arguments)
+    target, key = _target_and_key(arguments)
     for verdict in VERDICTS:               # deny is checked first and wins
         for rule, _source in rules_for(verdict):
-            if matches(rule, tool, target):
-                return verdict, rule
+            if not matches(rule, tool, target):
+                continue
+            if (verdict == "allow" and key == "command"
+                    and chains_a_second_command(_split_rule(rule)[1], target)):
+                # The rule covers the command it names; it does not cover
+                # whatever the shell was told to run afterwards. Fall through
+                # to the prompt rather than waving the whole line through.
+                continue
+            return verdict, rule
     return "ask", ""
 
 
@@ -175,6 +235,9 @@ def add_rule(rule: str, verdict: str = "allow") -> tuple[bool, str]:
     rule = (rule or "").strip()
     if not rule:
         return False, "an empty rule cannot be saved"
+    problem = rule_problem(rule)
+    if problem:
+        return False, f"'{rule}' cannot be saved - {problem}"
     if verdict not in VERDICTS:
         return False, f"unknown verdict '{verdict}'"
 
@@ -198,9 +261,7 @@ def add_rule(rule: str, verdict: str = "allow") -> tuple[bool, str]:
     data[verdict] = entries
 
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-            f.write("\n")
+        atomic.write_json(path, data)
     except Exception as e:
         return False, f"{path} could not be written ({e})"
 
