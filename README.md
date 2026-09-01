@@ -1,6 +1,6 @@
 # Simple Harness
 
-[![CI](https://github.com/minjun1177/chat/actions/workflows/ci.yml/badge.svg)](https://github.com/minjun1177/chat/actions/workflows/ci.yml)
+[![CI](https://github.com/minjun1177/simple_harness/actions/workflows/ci.yml/badge.svg)](https://github.com/minjun1177/simple_harness/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 
@@ -53,7 +53,7 @@ exists to make small models genuinely usable rather than nearly usable.
 
 1. **Install it**:
    ```bash
-   git clone https://github.com/minjun1177/chat
+   git clone https://github.com/minjun1177/simple_harness
    cd chat
    pip install -e .
    ```
@@ -389,6 +389,16 @@ Instructions in plain markdown.
 
 Two skills ship with the repo: `git-commit` and `code-review`. See
 `skills/README.md` for the full format reference.
+
+They are *in the repository*, not in the installed package - skills are looked
+for in the working directory and in `~/.localchat/skills/`, never next to the
+code, so that a project's own skills win and an install cannot quietly add
+instructions you did not write. From a `pip install`, copy the two you want:
+
+```bash
+git clone https://github.com/minjun1177/simple_harness
+cp -r simple_harness/skills/* ~/.localchat/skills/
+```
 
 ---
 
