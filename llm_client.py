@@ -16,7 +16,10 @@ from config import S
 from tui import _fmt_tool_call, _fmt_tool_result, _fmt_tokens
 from renderer import _render_line, _format_table, _render_full
 from tools import dispatch_tool
+import context
+import mcp_client
 import providers
+import toolspec
 
 
 TOOL_CALL_TAG = "<tool_call>"
@@ -110,7 +113,32 @@ def strip_thinking(text: str) -> str:
     return cleaned.strip()
 
 
-async def stream_reply(messages: list[dict]) -> str:
+def native_tools(exclude: tuple = ()) -> list:
+    """Every tool the model may call, in the vendor-neutral native shape.
+
+    The built-ins and the MCP tools have to travel together: with native tool
+    calling the prompt no longer lists either, so a tool missing from here is a
+    tool the model cannot see at all.
+    """
+    return toolspec.native_schema(exclude=exclude) + mcp_client.native_tool_schemas()
+
+
+def native_enabled() -> bool:
+    if not getattr(config, "NATIVE_TOOLS", True):
+        return False
+    return bool(providers.current().supports_native_tools)
+
+
+async def stream_reply(messages: list[dict], tools: list | None = None,
+                       calls_out: list | None = None) -> str:
+    """Stream one reply. Returns the text; native tool calls land in `calls_out`.
+
+    The two protocols meet here. A provider that speaks text puts its calls in
+    the reply, where `parse_tool_calls` finds them; a provider with a real tool
+    interface reports them as events instead, and they are appended to
+    `calls_out` as the same `(name, arguments)` pairs. Everything downstream -
+    dispatch, display, history, session files - sees no difference.
+    """
 
     async def spinner():
         """· ✢ ✳ ✶ ✻ ✽"""
@@ -212,7 +240,10 @@ async def stream_reply(messages: list[dict]) -> str:
     chunk_count = 0
 
     try:
-        reply = providers.current().stream(messages)
+        # Only mentioned when there is something to send: `tools=None` tells a
+        # provider nothing, and not every provider has to know the word.
+        reply = (providers.current().stream(messages, tools=tools) if tools
+                 else providers.current().stream(messages))
 
         async for chunk in reply:
             if start_time is None:
@@ -222,6 +253,10 @@ async def stream_reply(messages: list[dict]) -> str:
 
             content = chunk.get('text', '') or ''
             full_text += content
+
+            native_call = chunk.get('tool_call')
+            if native_call is not None and calls_out is not None:
+                calls_out.append(native_call)
 
             if chunk.get('done'):
                 prompt_tokens = chunk.get("prompt_tokens", 0)
@@ -299,6 +334,9 @@ async def stream_reply(messages: list[dict]) -> str:
             except asyncio.CancelledError: pass
             
     config.token_history.append({"prompt": prompt_tokens, "completion": completion_tokens})
+    # `messages` is still exactly what was sent - the reply is appended by the
+    # caller - so this is a clean sample to calibrate the estimator against.
+    context.observe_usage(messages, prompt_tokens)
     
     if not stream.saw_tool_call:
         _fmt_tokens(prompt_tokens, completion_tokens, total_duration, eval_duration)
@@ -442,7 +480,7 @@ def _normalise_arguments(tool_data: dict) -> dict:
     if isinstance(arguments, dict) and arguments:
         return arguments
     flattened = {key: value for key, value in tool_data.items()
-                 if key not in ("name", "arguments")}
+                 if key not in _NAME_KEYS and key != "arguments"}
     if flattened:
         return flattened
     return arguments if isinstance(arguments, dict) else {}
@@ -458,6 +496,34 @@ _RAW_BLOCK_PATTERN = re.compile(
 
 
 _RAW_OPEN_PATTERN = re.compile(r"<(content|new_content|old_content|text|body|stdin)>\r?\n?")
+
+
+# A model whose template has no tool-call format of its own reaches for the
+# nearest thing it knows, and that is a markdown fence. Gemma writes
+#
+#     ```tool_call
+#     {"name": "write_file", "arguments": {"filepath": "hello.py"}}
+#     ```
+#     <content>
+#     print('hi')
+#     </content>
+#
+# where the JSON is byte-perfect and the raw block is byte-perfect - only the
+# envelope is wrong. Reading `<tool_call>` alone found nothing there, so the
+# turn ended with no tool run, no error, and nothing said. That silence is the
+# one failure the text protocol exists to prevent, and gemma3 is the whole of
+# its audience: those are the models Ollama reports as having no tool support.
+#
+# The raw block sits *outside* the fence, so the text after it comes along too.
+_FENCED_CALL = re.compile(
+    r"```[ \t]*(?P<lang>[A-Za-z_][A-Za-z0-9_]*)?[ \t]*\r?\n(?P<body>.*?)\r?\n?```",
+    re.DOTALL)
+
+# Info strings that say "this is a call" outright. Anything else - a bare fence,
+# ```json, ```python - is only read as one if what it decodes to actually names
+# a tool that exists, so an ordinary code block in an answer stays an answer.
+_CALL_FENCE_LANGS = frozenset(
+    ("tool_call", "tool_code", "tool_use", "toolcall", "function_call", "functioncall"))
 
 
 def _take_raw_blocks(blob: str, complete: bool) -> tuple[str, dict, bool]:
@@ -488,6 +554,50 @@ def _take_raw_blocks(blob: str, complete: bool) -> tuple[str, dict, bool]:
         stripped = stripped[:opened.start()]
 
     return stripped, blocks, False
+
+
+# A model that has been shown `<tool_call>{...}</tool_call>` sometimes keeps the
+# tag as a *key* and nests the real call under it:
+#
+#     {"tool_call": {"name": "write_file", "arguments": {...}}}
+#
+# There is exactly one thing that can mean, so unwrapping it invents nothing.
+# The test is deliberately narrow - a lone key whose only value is a dict that
+# carries a name - because a call with real arguments beside it is not an
+# envelope and must not be flattened.
+_ENVELOPE_KEYS = frozenset(
+    ("tool_call", "tool_use", "toolcall", "function_call", "functioncall",
+     "function", "tool", "call", "action"))
+
+
+# The same models also rename the key that holds the tool's name. There is no
+# ambiguity in any of these - a call has exactly one name - so the value is
+# read from whichever one the model used.
+_NAME_KEYS = ("name", "tool_name", "toolName", "function_name", "functionName",
+              "tool", "function", "recipient_name")
+
+
+def _unwrap_envelope(data: dict) -> dict:
+    """A call the model nested one level too deep, brought back up."""
+    if data.get("name") or len(data) != 1:
+        return data
+    key, inner = next(iter(data.items()))
+    if key.lower() not in _ENVELOPE_KEYS or not isinstance(inner, dict):
+        return data
+    return inner if inner.get("name") else data
+
+
+def _rename_to_name(data: dict) -> dict:
+    """The tool's name, taken from whichever key the model put it under."""
+    if data.get("name"):
+        return data
+    for key in _NAME_KEYS:
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            renamed = {k: v for k, v in data.items() if k != key}
+            renamed["name"] = value.strip()
+            return renamed
+    return data
 
 
 def _decode_tool_call(blob: str, quiet: bool, complete: bool = True) -> tuple[str, dict] | None:
@@ -536,6 +646,9 @@ def _decode_tool_call(blob: str, quiet: bool, complete: bool = True) -> tuple[st
                 print(f"  {S.ERR}✗ AI generated invalid JSON for the tool call.{S.R}")
         return None
 
+    tool_data = _unwrap_envelope(tool_data)
+    tool_data = _rename_to_name(tool_data)
+
     if not tool_data.get("name"):
         if not quiet:
             print(f"  {S.ERR}✗ The tool call is missing a tool name.{S.R}")
@@ -571,21 +684,92 @@ def parse_tool_calls(response_text: str, quiet: bool = False) -> list[tuple[str,
         return calls
 
     start = response_text.find(TOOL_CALL_TAG)
-    if start == -1:
-        return []
-    # The model opened a tool call and never closed it. The tag is hidden from
-    # the user either way, so read the JSON that follows rather than letting the
-    # turn die silently.
-    call = _decode_tool_call(response_text[start + len(TOOL_CALL_TAG):], quiet, complete=False)
-    return [call] if call else []
+    if start != -1:
+        # The model opened a tool call and never closed it. The tag is hidden
+        # from the user either way, so read the JSON that follows rather than
+        # letting the turn die silently.
+        call = _decode_tool_call(response_text[start + len(TOOL_CALL_TAG):],
+                                 quiet, complete=False)
+        return [call] if call else []
+
+    return _fenced_tool_calls(response_text, quiet)
+
+
+def _fenced_tool_calls(response_text: str, quiet: bool) -> list[tuple[str, dict]]:
+    """Tool calls a model wrapped in a markdown fence instead of the tag.
+
+    Only reached when there is no `<tool_call>` anywhere in the reply, so this
+    can never override a call the model formatted correctly. A fence that does
+    not decode to a tool that exists is left alone as the code block it is.
+    """
+    calls = []
+    for match in _FENCED_CALL.finditer(response_text):
+        lang = (match.group("lang") or "").lower()
+        if lang and lang not in _CALL_FENCE_LANGS and lang != "json":
+            continue
+        # The raw block that carries a file body is written after the closing
+        # fence, so hand over everything up to the next one.
+        tail = response_text[match.end():]
+        next_fence = tail.find("```")
+        blob = match.group("body") + "\n" + (tail if next_fence == -1 else tail[:next_fence])
+
+        call = _decode_tool_call(blob, quiet=True)
+        if not call or not toolspec.get(call[0]):
+            continue
+        if not quiet:
+            print(f"  {S.WARN}\u26a0 The tool call came wrapped in a markdown fence "
+                  f"instead of {TOOL_CALL_TAG}. Read it anyway.{S.R}")
+        calls.append(call)
+    return calls
+
+
+def _render_call(call: dict) -> str:
+    """A native call written the way the text protocol would have written it."""
+    body = {"name": call.get("name", ""), "arguments": call.get("arguments") or {}}
+    return (f"{TOOL_CALL_TAG}\n"
+            f"{json.dumps(body, ensure_ascii=False)}\n</tool_call>")
+
+
+NATIVE_ERROR = "__native_error__"
+
+
+def _from_native(calls: list) -> list:
+    """Native tool-call events as the (name, arguments) pairs dispatch takes.
+
+    A call whose arguments would not parse keeps its name and carries the
+    reason under `NATIVE_ERROR` instead. The turn loop reports that to the
+    model rather than running the tool - calling `delete_file` with no
+    arguments because its JSON arrived broken is not a recoverable mistake.
+    """
+    pairs = []
+    for call in calls:
+        name = call.get("name", "")
+        if call.get("error"):
+            pairs.append((name, {NATIVE_ERROR: call["error"]}))
+        else:
+            arguments = call.get("arguments")
+            pairs.append((name, arguments if isinstance(arguments, dict) else {}))
+    return pairs
 
 
 MAX_PARSE_RETRIES = 2
+MAX_EMPTY_REPLIES = 1      # one nudge, then say so
+
+# A refused tool is not an error the model can fix by trying again, and some
+# models will try again anyway until the turn's budget is gone. Every refusal
+# in this harness - a deny rule, a stage that is read-only, a tool a sub-agent
+# does not have, an approval the user declined - starts with this, so counting
+# them needs no special case per source.
+REFUSAL_PREFIX = "[System]"
+MAX_REFUSALS_IN_A_ROW = 3
 
 
 async def chat_turn(messages: list[dict]) -> str:
     call_count = 0
     parse_failures = 0
+    empty_replies = 0
+    refusals = 0
+    refusal_nudges = 0
     while True:
         # Text a console mangled cannot be encoded, so one bad character would
         # fail this request and every later one. Repair it before it is sent.
@@ -599,13 +783,48 @@ async def chat_turn(messages: list[dict]) -> str:
             if user_choice != 'y':
                 return messages[-2]["content"] if len(messages) >= 2 else "Tool usage stopped."
                 
-        response_text = await stream_reply(messages)
+        native_calls: list = []
+        use_native = native_enabled()
+        response_text = await stream_reply(
+            messages,
+            tools=native_tools() if use_native else None,
+            calls_out=native_calls if use_native else None)
         stored = response_text if config.STORE_THINKING else strip_thinking(response_text)
+
+        if not stored.strip() and not native_calls:
+            # A reasoning model can spend a whole turn thinking and then stop
+            # without saying anything. Left alone that shows the user a blank
+            # turn and no reason for it, so ask once, and say so if it happens
+            # again rather than returning nothing at all.
+            if empty_replies < MAX_EMPTY_REPLIES:
+                empty_replies += 1
+                print(f"  {S.MUTED}⟳ the model reasoned but said nothing; asking again{S.R}")
+                messages.append({"role": "user", "content": (
+                    "[System] Your last reply was empty - you reasoned but sent no "
+                    "answer. Reply now: either the <tool_call> you decided on, or "
+                    "your answer to the user. Do not think further.")})
+                continue
+            print(f"\n  {S.WARN}⚠  The model reasoned but produced no reply, twice. "
+                  f"Try rewording the request.{S.R}")
+            return ("[The model spent both attempts reasoning without producing a "
+                    "reply. Nothing was run.]")
+
+        empty_replies = 0
+        if native_calls:
+            # History stays plain text for every provider: sessions, the
+            # summariser and the token estimate all read one format. Rendering
+            # the call back into the tag it would have had over the text
+            # protocol keeps that true without a second history shape.
+            stored = (stored + "\n" if stored.strip() else "") + "\n".join(
+                _render_call(call) for call in native_calls)
         messages.append({"role": "assistant", "content": stored})
 
-        parsed = parse_tool_calls(response_text)
+        # Native calls come as events; text calls are dug out of the reply. A
+        # provider does one or the other, so this is a choice, not a merge.
+        parsed = _from_native(native_calls) if native_calls else parse_tool_calls(response_text)
         if not parsed:
-            if TOOL_CALL_TAG in response_text and parse_failures < MAX_PARSE_RETRIES:
+            if (not use_native and TOOL_CALL_TAG in response_text
+                    and parse_failures < MAX_PARSE_RETRIES):
                 # The model meant to call a tool and produced something we could
                 # not read. Say so instead of ending the turn in silence - the
                 # model can correct itself, and usually does.
@@ -622,7 +841,17 @@ async def chat_turn(messages: list[dict]) -> str:
 
         parse_failures = 0
 
+        stop_after_tools = False
         for function_name, arguments in parsed:
+            if NATIVE_ERROR in arguments:
+                tool_result = (f"[Error] Your call to '{function_name}' could not be "
+                               f"read: {arguments[NATIVE_ERROR]}. Nothing was run. "
+                               "Make the call again.")
+                _fmt_tool_result(function_name, tool_result)
+                messages.append({"role": "user", "content":
+                                 f"[Tool Result for '{function_name}']:\n{tool_result}"})
+                call_count += 1
+                continue
             tool_result = dispatch_tool(function_name, arguments)
             if tool_result is None:
                 # An unknown tool used to end the turn in silence. Hand the
@@ -637,3 +866,27 @@ async def chat_turn(messages: list[dict]) -> str:
                 "content": f"[Tool Result for '{function_name}']:\n{tool_result}",
             })
             call_count += 1
+
+            if isinstance(tool_result, str) and tool_result.startswith(REFUSAL_PREFIX):
+                refusals += 1
+                if refusals >= MAX_REFUSALS_IN_A_ROW:
+                    refusals = 0
+                    if refusal_nudges:
+                        # Told once already and still knocking. End the turn on
+                        # what it has rather than spending the rest of the
+                        # budget on a door that is not going to open.
+                        print(f"  {S.WARN}⚠  The model kept calling tools it is not "
+                              f"allowed right now; ending the turn.{S.R}")
+                        stop_after_tools = True
+                        break
+                    refusal_nudges += 1
+                    messages.append({"role": "user", "content": (
+                        f"[System] That is the {MAX_REFUSALS_IN_A_ROW}rd tool in a row "
+                        "you have been refused. Trying again will be refused again - "
+                        "the answer will not change. Stop calling tools and write out "
+                        "in words what you wanted to do and why.")})
+            else:
+                refusals = 0
+
+        if stop_after_tools:
+            return stored
