@@ -77,6 +77,21 @@ check("the protocol rules are shared, not copied",
 check("rule 17 no longer contradicts DO rule 3",
       "escape it as JSON" not in prompt)
 
+# Rule 3 tells the model to read a file before changing it. Rule 9 used to tell
+# it the opposite for anything large - "avoid reading massive files at once" -
+# and a contradiction in this prompt is not a style problem: the pair of rules
+# that disagreed about escaping cost seven sessions out of seven.
+check("the model is told to read a file before changing it",
+      "Read before you change" in prompt)
+check("and to list a directory before creating one in it",
+      "`list_dir` the directory before creating a new file" in prompt)
+check("with the one case that has nothing to read spelled out",
+      "does not exist yet has nothing to read" in prompt)
+check("and rule 9 no longer tells it to avoid reading files",
+      "Avoid reading massive files" not in prompt)
+check("rule 9 sends it back to read_file after a search",
+      "before you change it" in prompt and "search_in_file" in prompt)
+
 print("\n--- arguments bind the way the handlers expect ---")
 cases = [
     ("run_cmd", {"command": "ls"}, ["ls", ""]),

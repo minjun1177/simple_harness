@@ -318,8 +318,8 @@ through the real interface, and about **12KB of prompt cheaper per turn**,
 because the tool list no longer has to be spelled out:
 
 ```
-text protocol      system prompt 17.8KB   (tool schemas + <tool_call> rules)
-native tool calls   system prompt 5.1KB   (schemas travel with the request)
+text protocol      system prompt 17.9KB   (tool schemas + <tool_call> rules)
+native tool calls   system prompt 5.9KB   (schemas travel with the request)
 ```
 
 Both protocols describe the same tools, from the same table in `toolspec.py`,

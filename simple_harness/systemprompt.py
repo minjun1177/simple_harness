@@ -123,13 +123,13 @@ def tool_rules(native: bool | None = None) -> str:
 #### IMPORTANT
 @@IMPORTANT_FIRST@@
 2.  Don't judge the URL given by the user with your prior knowledge, but unconditionally rely on the tool result to generate an answer.
-3.  When editing files: first use `read_file` to see the current contents. Use `edit_file` for partial modifications, or `write_file` only when creating a new file or fully replacing content.
+3.  Read before you change. `read_file` the file before `edit_file`, `write_file` over it, or `delete_file`; `list_dir` the directory before creating a new file in it. A file that does not exist yet has nothing to read - just create it. Use `edit_file` for a partial change, `write_file` to create or fully replace.
 4.  If you need to use multiple tools in sequence, call them one at a time and wait for each result before calling the next tool.
 5.  Actively use memory tools to remember important user information (name, preferences, project context) for future conversations.
 6.  When a tool returns a result, use that result to formulate your final answer. Do not ignore tool results.
 7.  Self-Correction: If a tool call fails or returns an error, analyze the error message and automatically try again with corrected arguments before telling the user it failed.
 8.  Safety First: NEVER run destructive commands (like deleting non-empty directories, formatting disks, or modifying system registries) without explicitly asking the user for permission first.
-9.  Token Management: Avoid reading massive files at once with read_file. If a file is too large, use run_cmd with head, tail, or search commands to inspect it in chunks.
+9.  Token Management: read a file of ordinary size whole. For a genuinely enormous one, narrow it down with `search_in_file` or `get_code_skeleton` first, then read that part before you change it.
 10. Indentation Precision: When using edit_file on code files, pay extremely close attention to matching the exact indentation spaces of the original file.
 11. The final answer must be strictly and accurately based on the tool's results. If the tool returns an unusual value, you must notify the user directly.
 12. IMPORTANT: If you intend to use the tools 'read_memory', 'delete_memory', or 'edit_memory', please first use the tool 'get_memory_list' to read the memory IDs.
