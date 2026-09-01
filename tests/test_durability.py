@@ -56,10 +56,19 @@ check("still no temporaries", [f for f in os.listdir(work) if f.startswith(".tmp
 
 secret = os.path.join(work, "providers.json")
 atomic.write_json(secret, {"api_key": "sk-test"}, private=True)
-check("a private file is owner-only", oct(os.stat(secret).st_mode)[-3:] == "600",
-      oct(os.stat(secret).st_mode)[-3:])
-check("an ordinary one is not", oct(os.stat(target).st_mode)[-3:] != "600",
-      oct(os.stat(target).st_mode)[-3:])
+check("a private file is still written and readable",
+      json.load(open(secret, encoding="utf-8"))["api_key"] == "sk-test")
+if os.name == "nt":
+    # Windows has no POSIX mode bits - `chmod` there toggles the read-only
+    # flag and nothing else, and a file's access is decided by the ACL it
+    # inherits from its directory. There is no "600" to assert, so this says
+    # so rather than asserting something that cannot be true.
+    print("  [skip] owner-only permissions are POSIX; Windows uses ACLs")
+else:
+    check("a private file is owner-only", oct(os.stat(secret).st_mode)[-3:] == "600",
+          oct(os.stat(secret).st_mode)[-3:])
+    check("an ordinary one is not", oct(os.stat(target).st_mode)[-3:] != "600",
+          oct(os.stat(target).st_mode)[-3:])
 
 # The real claim is that a reader never sees a half-written file. Kill the writer
 # mid-write and check what a reader would have found.
