@@ -112,6 +112,19 @@ def _get_summary_predict_tokens() -> int:
 # file, the first search hits - so both ends are kept.
 _TAIL_SHARE = 0.35
 
+# Ceilings tried in order, loosest first, and only as far down as the budget
+# forces. Trimming used to be unconditional at 3000 characters: with a 65536
+# context and 49,000 tokens of headroom, asking to read a 12,000-character file
+# returned a quarter of it and threw the rest away for good. The model then
+# edited from a fragment - which is the failure the whole harness is built to
+# avoid, arriving from inside the harness.
+#
+# 24000 stays as a backstop, because `read_file` has no ceiling of its own and a
+# single result should not be able to eat the whole budget. The tighter steps
+# only happen under real pressure, and compression follows if even 3000 is not
+# enough.
+_TRIM_STEPS = (24000, 12000, 6000, 3000)
+
 
 def _trim_tool_results(messages: list[dict], max_chars: int = 3000) -> list[dict]:
     result = []
@@ -225,13 +238,16 @@ async def manage_context(messages: list[dict]) -> None:
 async def _manage_context(messages: list[dict]) -> None:
     budget = _get_ctx_budget()
 
-    trimmed = _trim_tool_results(messages)
-    if _estimate_tokens(trimmed) <= budget:
-        if trimmed != messages:
-            messages[:] = trimmed
-        return
+    # Each candidate is built from the untrimmed list, so a result is never
+    # trimmed twice and the omission counts stay true.
+    for ceiling in _TRIM_STEPS:
+        candidate = _trim_tool_results(messages, ceiling)
+        if _estimate_tokens(candidate) <= budget:
+            if candidate != messages:
+                messages[:] = candidate
+            return
 
-    messages[:] = trimmed
+    messages[:] = candidate
 
     pairs = _get_conv_pairs(messages)
     n_pairs = len(pairs)

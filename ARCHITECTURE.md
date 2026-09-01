@@ -208,13 +208,25 @@ does not. POSIX only: Windows has no mode bits, so `private` buys nothing there
 and `test_durability.py` says so instead of asserting a "600" that cannot
 exist.
 
-**5.6b A tool result is trimmed from the middle.** The answer in a traceback is
-its *last* line. `context._trim_tool_results` used to keep only the front, which
-kept "Traceback (most recent call last):" and deleted "RuntimeError: kaboom" -
-permanently, because `manage_context` writes the trimmed list back. On a local
-model, whose budget is small enough that this runs constantly, the harness was
-removing the reason every failure failed. Both ends are kept now; the front
-still matters for the results that are not errors.
+**5.6b A tool result is trimmed only as much as the budget forces, and from the
+middle.** Two separate bugs lived here.
+
+Trimming ran at a flat 3000 characters on every `manage_context`, whatever the
+budget: with a 65536 context and 49,000 tokens spare, a 12,000-character file
+read came back as a quarter of itself and the rest was gone for good. It is
+budget-driven now - `_TRIM_STEPS` is tried loosest first and stops at the first
+ceiling that fits, with 24000 as a plain backstop because `read_file` has no
+ceiling of its own.
+
+And it kept only the front, which for a traceback means keeping "Traceback
+(most recent call last):" and deleting "RuntimeError: kaboom" - the one line
+that says what went wrong. Both ends are kept now; the front still matters for
+the results that are not errors.
+
+`manage_context` runs once per turn, not inside the tool loop, so neither bug
+touched a result the model had just asked for - they shredded what it had read
+*earlier*. Deepthink is where that hurts, because each of its six stages is
+another `manage_context` over the same conversation.
 
 **5.7a State that is about the person goes in `paths.home()`; state that is
 about a project stays with the project.** Sessions, memory, input history and

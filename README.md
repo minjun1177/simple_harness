@@ -178,9 +178,11 @@ the error's own text is kept whole - it is usually the only thing that says what
 to do next. `FileNotFoundError: 'confg.py'` is a typo you can see; "a file error
 occurred" is a turn spent running the command again to find out.
 
-When the conversation has to be shortened, a long result is trimmed **from the
-middle**. The answer in a traceback is its last line, and keeping only the front
-used to delete exactly that.
+A long result is only shortened when the context actually needs the room, and
+then **from the middle**. It used to be cut to 3000 characters on every turn no
+matter how much room was left - so reading a 12,000-character file left a
+quarter of it - and the cut took the end, which for a traceback is the line
+that says what went wrong.
 
 ### Web & Network Tools
 - `search_web`: Multi-source search with local relevance ranking (see Web Search below).

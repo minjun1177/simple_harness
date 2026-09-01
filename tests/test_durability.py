@@ -161,6 +161,44 @@ check("a message that is not a tool result is untouched",
       context._trim_tool_results([{"role": "user", "content": "x" * 900}],
                                  max_chars=400)[0]["content"] == "x" * 900)
 
+# ---------------------------------------------------------------------------
+print("\n--- trimming happens because of the budget, not on principle ---")
+# It used to run at a flat 3000 characters every turn, whatever the budget. With
+# a 65536 context and 49,000 tokens spare, reading a 12,000-character file
+# returned a quarter of it and threw the rest away for good.
+import asyncio                                                     # noqa: E402
+from simple_harness import config as cfg                           # noqa: E402
+
+BIG = "[Tool Result for 'read_file']:\n" + "x = 1\n" * 1600      # ~9600 chars
+
+
+def after_manage(num_ctx):
+    kept_ctx, kept_predict = cfg.NUM_CTX, cfg.NUM_PREDICT
+    cfg.NUM_CTX, cfg.NUM_PREDICT = num_ctx, 64
+    messages = [{"role": "system", "content": "s"},
+                {"role": "user", "content": "read it"},
+                {"role": "assistant", "content": "done"},
+                {"role": "user", "content": BIG}]
+    try:
+        asyncio.run(context.manage_context(messages))
+    finally:
+        cfg.NUM_CTX, cfg.NUM_PREDICT = kept_ctx, kept_predict
+    return messages[3]["content"]
+
+roomy = after_manage(65536)
+check("a result that fits is left whole", roomy == BIG,
+      f"{len(BIG)} -> {len(roomy)}")
+
+squeezed = after_manage(2048)
+check("a budget too small does trim it", len(squeezed) < len(BIG),
+      f"{len(BIG)} -> {len(squeezed)}")
+check("and it steps down no further than it must",
+      len(squeezed) >= min(context._TRIM_STEPS),
+      f"{len(squeezed)} vs floor {min(context._TRIM_STEPS)}")
+check("the ceilings go loosest first",
+      list(context._TRIM_STEPS) == sorted(context._TRIM_STEPS, reverse=True),
+      str(context._TRIM_STEPS))
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S): {failures}")
