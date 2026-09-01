@@ -560,14 +560,36 @@ async def main() -> None:
             print(f"\n  {S.ERR}✗ Error: {e}{S.R}\n")
 
 
+def _use_utf8_output() -> None:
+    """Make sure the harness can print its own interface.
+
+    The TUI is drawn with box characters - the tool call alone uses U+25B8 and
+    U+2570 - and an answer is routinely not ASCII either. A Windows console
+    handles those, but a *pipe* on Windows does not: Python falls back to the
+    locale code page there, cp1252 or cp949, and the first tool call raises
+    UnicodeEncodeError halfway through drawing itself. Redirecting the output
+    to a file should not crash the program.
+
+    `errors="replace"` rather than "strict" for the same reason: a character
+    the terminal genuinely cannot show is worth one replacement glyph, never a
+    traceback in the middle of an answer.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass          # not a real stream, or an encoding it will not take
+
+
 def cli() -> None:
-    """The `simple-harness` command, and what `python app.py` runs.
+    """The `simple-harness` command, and what `python -m simple_harness` runs.
 
     `main()` is a coroutine, and a console-script entry point has to be an
     ordinary function - so the event loop and the two exits that are not errors
     are handled here rather than under `__main__`, where an installed copy
     would never reach them.
     """
+    _use_utf8_output()
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
