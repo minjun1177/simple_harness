@@ -202,6 +202,24 @@ does not. POSIX only: Windows has no mode bits, so `private` buys nothing there
 and `test_durability.py` says so instead of asserting a "600" that cannot
 exist.
 
+**5.7a State that is about the person goes in `paths.home()`; state that is
+about a project stays with the project.** Sessions, memory, input history and
+the saved keys are the person's, and resolve under `~/.localchat` - never to a
+relative path. `.permissions.json`, `.mcp.json` and `skills/` are the
+project's, and are read from the working directory first so a repository can
+carry its own and win.
+
+Writing the first group relative to the working directory is what this used to
+do, and it only looked harmless while the harness was run as `python app.py`
+from its own checkout: as an installed command it scattered files wherever you
+happened to start, and split one memory into one per directory. `paths.py` is
+stdlib-only and imports nothing local, so the modules below `config` can use it
+without breaking 5.2.
+
+Nothing is ever moved on the user's behalf. `sessions` and `memory.json` are
+ordinary enough names that acting on sight would eventually destroy real work,
+so `strays_in_cwd()` reports and stops.
+
 **5.8 Auto-commit takes only the paths the tool named.** `git commit` is given
 those paths explicitly. Never let it sweep up the index - the user's staged work
 is not ours to commit.
@@ -259,7 +277,7 @@ app.py            the loop, slash commands, session lifecycle
 | `websearch.py` | Retrieval, extraction, BM25 reranking | |
 | `skills.py` | Skill discovery and loading | |
 | `tui.py` / `renderer.py` | Terminal chrome and markdown | Decisions |
-| `atomic.py`, `sse.py` | One job each. Stdlib only | |
+| `atomic.py`, `sse.py`, `paths.py` | One job each. Stdlib only, importing nothing local | |
 
 ---
 
@@ -352,6 +370,7 @@ for t in tests/*.py; do python "$t" || echo "FAILED: $t"; done
 | `test_subagent.py` | What a sub-agent may do, and that only its report crosses back |
 | `test_platform.py` | Waiting-for-input detection on *this* machine. Run it on any new one, especially Windows |
 | `test_permissions.py` | What an allow rule covers, and the two ways one used to cover more than it said |
+| `test_paths.py` | That state resolves under `~/.localchat` and never into the working directory |
 | `test_tool_parsing.py` | The text protocol's repair engine: the shapes it reads, and the ones it refuses |
 | `test_docs.py` | That this file and `README.md` still describe the program that exists |
 

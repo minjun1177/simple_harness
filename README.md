@@ -756,12 +756,28 @@ State that outlives a session lives outside `config.py`:
 
 | Path | Holds |
 | :--- | :--- |
-| `~/.localchat/providers.json` | The connected provider and any API keys typed at `/connect`. Owner-only |
-| `./.permissions.json`, `~/.localchat/permissions.json` | Allow and deny rules |
-| `./.mcp.json`, `~/.localchat/mcp.json` | MCP server declarations |
-| `./sessions/*.json` | Conversation transcripts, named after the session title |
-| `./memory.json` | The long-term key-value memory |
-| `./.chat_history` | Input history for the prompt |
+Everything about *you* lives in one directory, `~/.localchat`. Everything about
+*a project* is read from that project's own directory first, and from
+`~/.localchat` second - so a repository can carry its own rules, servers and
+skills, and they win.
+
+| Path | Holds |
+| :--- | :--- |
+| `~/.localchat/providers.json` | The connected provider and any API keys typed at `/connect`. Owner-only on POSIX |
+| `~/.localchat/sessions/*.json` | Conversation transcripts, named after the session title |
+| `~/.localchat/memory.json` | The long-term key-value memory |
+| `~/.localchat/history` | Input history for the prompt |
+| `./.permissions.json`, then `~/.localchat/permissions.json` | Allow and deny rules |
+| `./.mcp.json`, then `~/.localchat/mcp.json` | MCP server declarations |
+| `./skills/`, then `~/.localchat/skills/` | Skills |
+
+Set `LOCALCHAT_HOME` to put that directory somewhere else - two profiles, or a
+throwaway one for trying something out.
+
+Before 0.2.0 the sessions, the memory and the input history were written into
+whatever directory the harness started in. If you have those, they are not read
+any more and nothing has moved them; the harness names them at startup and
+prints the one line that moves them across.
 
 ---
 
@@ -841,6 +857,7 @@ The codebase is organized cleanly around the following components:
 - **`tests/test_docs.py`**: Fails when README.md or ARCHITECTURE.md names something that is gone, or misses something that is new.
 - **`tests/test_subagent.py`**: What a sub-agent may do, what it may not, and that only its report crosses back.
 - **`tests/test_permissions.py`**: What an allow rule covers - and that it stops at the command it names, rather than at whatever the shell was told to run next.
+- **`tests/test_paths.py`**: That nothing personal is written into whatever directory you started in, and that state from an older version is named rather than moved.
 - **`tests/test_tool_parsing.py`**: Every shape a model wraps a tool call in, and every shape that must not be read as one.
 - **`requirements-lock.txt`**: The exact dependency set the harness was tested against. `requirements.txt` gives the tested floors and a ceiling before the next breaking release.
 - **`mcp_client.py`**: MCP transports (stdio / streamable HTTP / SSE), the JSON-RPC session, tool and resource calls, and the prompt section they are advertised in.
