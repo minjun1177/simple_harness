@@ -10,11 +10,11 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: "Which index to upload to"
+        description: "Where to send it (dry-run uploads nothing)"
         required: true
-        default: testpypi
+        default: dry-run
         type: choice
-        options: [testpypi, pypi]
+        options: [dry-run, testpypi, pypi]
 
 jobs:
   build:
@@ -48,6 +48,13 @@ jobs:
         with:
           name: dist
           path: dist/
+
+      - name: What a dry run proves
+        if: github.event_name == 'workflow_dispatch' && inputs.target == 'dry-run'
+        run: |
+          echo "Built and checked. Nothing was uploaded."
+          echo "The files are on this run as the 'dist' artifact."
+          ls -la dist/
 
   testpypi:
     needs: build
