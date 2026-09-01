@@ -1,10 +1,10 @@
 import platform
 import os
 
-import toolspec
+from simple_harness import toolspec
 
-from skills import skills_catalog_prompt
-from mcp_client import mcp_tools_prompt
+from simple_harness.skills import skills_catalog_prompt
+from simple_harness.mcp_client import mcp_tools_prompt
 
 CURRENT_OS = platform.system()
 
@@ -86,11 +86,11 @@ def native_tools_active() -> bool:
     Imported late: `providers` reads `config`, which builds a prompt at import
     time, and asking at module level would close that circle.
     """
-    import config
+    from simple_harness import config
     if not getattr(config, "NATIVE_TOOLS", True):
         return False
     try:
-        import providers
+        from simple_harness import providers
         return bool(providers.current().supports_native_tools)
     except Exception:
         return False

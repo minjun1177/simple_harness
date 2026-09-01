@@ -24,8 +24,8 @@ import os
 import threading
 import time
 
-import atomic
-from sse import iter_sse
+from simple_harness import atomic
+from simple_harness.sse import iter_sse
 
 
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".localchat")
@@ -104,7 +104,7 @@ def token_budget(max_tokens: int | None) -> int:
     one (`4096 * 1.5` is 6144.0), so it is coerced in the one place they all
     pass through rather than trusted at four call sites.
     """
-    import config       # lazily, like everywhere else here - see the header
+    from simple_harness import config       # lazily, like everywhere else here - see the header
     return int(max_tokens or config.NUM_PREDICT)
 
 
@@ -325,7 +325,7 @@ class OllamaProvider(Provider):
     @property
     def model(self) -> str:
         # Someone who never runs /connect keeps the model from config.py.
-        import config
+        from simple_harness import config
         return str(self.settings.get("model") or config.MODEL or "")
 
     @property
@@ -366,7 +366,7 @@ class OllamaProvider(Provider):
 
     async def stream(self, messages: list, max_tokens: int | None = None,
                      tools: list | None = None):
-        import config
+        from simple_harness import config
         options = {"num_ctx": config.NUM_CTX,
                    "num_predict": token_budget(max_tokens)}
         request = {"model": self.model, "messages": messages,
@@ -728,7 +728,7 @@ def using_model(model: str):
     session file read. Restoring is in a `finally` because a sub-agent that
     raises must not leave the assistant talking to the wrong model.
     """
-    import config
+    from simple_harness import config
     provider = current()
     settings = settings_for(provider.name)
     had = "model" in settings
@@ -797,7 +797,7 @@ def connect(name: str, model: str = "", api_key: str = "",
 def _sync_config(provider: Provider) -> None:
     """Keep `config.MODEL` in step - the TUI and session files both read it."""
     try:
-        import config
+        from simple_harness import config
         config.MODEL = provider.model or config.MODEL
     except Exception:
         pass

@@ -3,22 +3,22 @@ import sys
 import os
 import re
 import datetime
-import config
-import deepthink
-import git_ops
-import skills
-import mcp_client
-import permissions
-import providers
-import connect
-from config import S
-from systemprompt import systemprompt as _build_system_prompt
-from tui import _welcome, _show_help, _show_skills, _show_mcp, _show_perms, _fmt_tool_call, _fmt_tool_result, display_usage_graph, _hr
-from renderer import _render_full
-from session import (save_session, load_session, list_sessions, find_sessions,
+from simple_harness import config
+from simple_harness import deepthink
+from simple_harness import git_ops
+from simple_harness import skills
+from simple_harness import mcp_client
+from simple_harness import permissions
+from simple_harness import providers
+from simple_harness import connect
+from simple_harness.config import S
+from simple_harness.systemprompt import systemprompt as _build_system_prompt
+from simple_harness.tui import _welcome, _show_help, _show_skills, _show_mcp, _show_perms, _fmt_tool_call, _fmt_tool_result, display_usage_graph, _hr
+from simple_harness.renderer import _render_full
+from simple_harness.session import (save_session, load_session, list_sessions, find_sessions,
                      rename_session, generate_session_title, clean_title)
-from context import manage_context
-from llm_client import chat_turn, parse_tool_calls, strip_thinking
+from simple_harness.context import manage_context
+from simple_harness.llm_client import chat_turn, parse_tool_calls, strip_thinking
 
 
 def _compose_system_prompt(summary: str = "") -> str:
@@ -89,7 +89,7 @@ async def main() -> None:
     current_session_id = None
 
     if config.PROMPT_TOOLKIT_AVAILABLE:
-        from config import SlashCommandCompleter, PromptSession, FileHistory, ANSI
+        from simple_harness.config import SlashCommandCompleter, PromptSession, FileHistory, ANSI
         completer = SlashCommandCompleter(['/help', '/clear', '/usage', '/model', '/models', '/exit', '/quit', '/sessions', '/load', '/title', '/autotitle', '/automode', '/fullcontent', '/record', '/export', '/system', '/planmode', '/skills', '/skill', '/mcp', '/perms', '/think', '/connect', '/undo', '/autocommit', '/deepthink'])
         session_pt = PromptSession(
             history=FileHistory('.chat_history'),

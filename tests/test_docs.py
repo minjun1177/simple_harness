@@ -15,12 +15,12 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-import config
+from simple_harness import config
 config.MCP_ENABLED = False
 config.SAVE_CHAT_HISTORY = False
 
-import toolspec
-import tools
+from simple_harness import toolspec
+from simple_harness import tools
 
 failures = []
 
@@ -31,9 +31,22 @@ def check(label, ok, extra=""):
     print(f"  [{'ok  ' if ok else 'FAIL'}] {label}{f'  {extra}' if extra else ''}")
 
 
+PKG = os.path.join(ROOT, "simple_harness")
+
+
 def read(name):
-    with open(os.path.join(ROOT, name), encoding="utf-8") as f:
-        return f.read()
+    """A file by the name the docs use, found wherever it actually lives."""
+    for base in (ROOT, PKG, os.path.join(ROOT, "tests")):
+        path = os.path.join(base, name)
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                return f.read()
+    raise FileNotFoundError(name)
+
+
+def exists(name):
+    return any(os.path.isfile(os.path.join(base, name))
+               for base in (ROOT, PKG, os.path.join(ROOT, "tests")))
 
 
 README = read("README.md")
@@ -86,14 +99,13 @@ if install:
 
 print("\n--- ARCHITECTURE.md points at things that exist ---")
 named_files = sorted(set(re.findall(r"`([a-z_]+\.py)`", ARCH)))
-missing = [f for f in named_files
-           if not (os.path.exists(os.path.join(ROOT, f))
-                   or os.path.exists(os.path.join(ROOT, "tests", f)))]
+missing = [f for f in named_files if not exists(f)]
 check("every file it names exists", not missing, str(missing))
 check("and it names most of them", len(named_files) > 15, f"{len(named_files)} files")
 
 # Anything written as `module.function` should resolve.
-import atomic, context, deepthink, git_ops, llm_client, providers, session, subagent
+from simple_harness import (atomic, context, deepthink, git_ops, llm_client,
+                            providers, session, subagent)
 MODULES = {m.__name__: m for m in (atomic, config, context, deepthink, git_ops,
                                    llm_client, providers, session, subagent,
                                    toolspec, tools)}
@@ -125,10 +137,11 @@ check("the stage table matches deepthink.STAGES",
 check("it describes the read-only stages correctly",
       [s.edits for s in deepthink.STAGES] == [False, False, True, True, True])
 check("toolspec really imports nothing local",
-      not re.search(r"^(?:import|from) (config|tools|providers|app|systemprompt)",
+      not re.search(r"^(?:import|from) (?:simple_harness\b|"
+                    r"(?:config|tools|providers|app|systemprompt)\b)",
                     read("toolspec.py"), re.M))
 check("config really imports systemprompt at module level",
-      "from systemprompt import" in read("config.py"))
+      "from simple_harness.systemprompt import" in read("config.py"))
 
 print("\n--- every test file the docs list exists ---")
 listed = set(re.findall(r"`(test_[a-z_]+\.py)`", ARCH)) | set(

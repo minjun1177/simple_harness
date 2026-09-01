@@ -10,16 +10,16 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import config
+from simple_harness import config
 config.MCP_ENABLED = False
 config.SAVE_CHAT_HISTORY = False
 # The local model may or may not support native tool calling, and this file is
 # about the text prompt, so the protocol is pinned rather than assumed.
 config.NATIVE_TOOLS = False
 
-import systemprompt
-import toolspec
-import tools
+from simple_harness import systemprompt
+from simple_harness import toolspec
+from simple_harness import tools
 
 failures = []
 

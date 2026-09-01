@@ -12,9 +12,9 @@ takes arguments for the times you already know what you want:
 
 import os
 
-import config
-import providers
-from config import S, _hr
+from simple_harness import config
+from simple_harness import providers
+from simple_harness.config import S, _hr
 
 
 def _ask(prompt: str) -> str:

@@ -3,9 +3,9 @@ import sys
 import asyncio
 import itertools
 import ollama
-import config
-import providers
-from config import S, smrp
+from simple_harness import config
+from simple_harness import providers
+from simple_harness.config import S, smrp
 
 
 # How many characters go into one token, by script. Measured against the model

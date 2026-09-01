@@ -14,8 +14,8 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import atomic
-import context
+from simple_harness import atomic
+from simple_harness import context
 
 failures = []
 
@@ -68,7 +68,7 @@ atomic.write_json(victim, {"kept": "original"})
 script = f'''
 import os, sys, time
 sys.path.insert(0, {os.path.dirname(os.path.dirname(os.path.abspath(__file__)))!r})
-import atomic
+from simple_harness import atomic
 real = atomic.write_text
 def slow(path, data, private=False):
     # Stall between writing the temporary file and swapping it in.

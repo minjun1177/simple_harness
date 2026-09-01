@@ -3,10 +3,10 @@ import re
 import json
 import datetime
 
-import atomic
-import config
-import providers
-from config import S, ttlp
+from simple_harness import atomic
+from simple_harness import config
+from simple_harness import providers
+from simple_harness.config import S, ttlp
 
 
 def load_memory() -> dict:

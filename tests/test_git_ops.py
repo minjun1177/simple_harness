@@ -11,13 +11,13 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import config
+from simple_harness import config
 config.MCP_ENABLED = False
 config.SAVE_CHAT_HISTORY = False
 config.AUTO_ALLOW = True
 config.GIT_AUTO_COMMIT = True
 
-import git_ops
+from simple_harness import git_ops
 
 failures = []
 
@@ -174,7 +174,7 @@ print("\n--- the dispatcher commits, and only on success ---")
 root = new_repo()
 os.chdir(root)
 git_ops._repo_root_cache.clear()
-import tools
+from simple_harness import tools
 
 tools.dispatch_tool("write_file", {"filepath": os.path.join(root, "tool.py"),
                                    "content": "print('made by a tool')\n"})

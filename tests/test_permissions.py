@@ -20,12 +20,12 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import config
+from simple_harness import config
 config.MCP_ENABLED = False
 config.SAVE_CHAT_HISTORY = False
 config.PERMISSIONS_ENABLED = True
 
-import permissions
+from simple_harness import permissions
 
 failures = []
 

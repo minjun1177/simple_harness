@@ -13,16 +13,16 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import config
+from simple_harness import config
 config.AUTO_ALLOW = True
 config.MCP_ENABLED = False
 config.SAVE_CHAT_HISTORY = False
 config.SUBAGENT_MAX_TURNS = 4
 
-import providers
-import subagent
-import toolspec
-import tools
+from simple_harness import providers
+from simple_harness import subagent
+from simple_harness import toolspec
+from simple_harness import tools
 
 failures = []
 

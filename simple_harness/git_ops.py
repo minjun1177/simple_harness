@@ -31,7 +31,7 @@ _repo_root_cache: dict = {}
 
 
 def _cfg(name, default):
-    import config
+    from simple_harness import config
     return getattr(config, name, default)
 
 

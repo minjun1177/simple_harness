@@ -2,14 +2,14 @@ import os
 import sys
 import subprocess
 import textwrap
-import config
-from config import S, tw, _hr, _visible_len
-from session import load_memory, list_sessions
-from context import _estimate_tokens, _get_ctx_budget, _get_conv_pairs
-from skills import list_skills, skill_dirs
-import mcp_client
-import providers
-import toolspec
+from simple_harness import config
+from simple_harness.config import S, tw, _hr, _visible_len
+from simple_harness.session import load_memory, list_sessions
+from simple_harness.context import _estimate_tokens, _get_ctx_budget, _get_conv_pairs
+from simple_harness.skills import list_skills, skill_dirs
+from simple_harness import mcp_client
+from simple_harness import providers
+from simple_harness import toolspec
 
 
 def _get_git_info() -> str:
@@ -183,7 +183,7 @@ def _show_skills():
 
 def _show_perms():
     """`/perms` - the rules that decide what runs without asking."""
-    import permissions
+    from simple_harness import permissions
 
     permissions.load_rules()
     print()
@@ -341,8 +341,8 @@ def _fmt_tool_result(name: str, result: str):
 
 
 def _approval_prompt(action_label: str, details: list[tuple[str, str]], rule: str = "") -> bool:
-    from renderer import _disp_width
-    import permissions
+    from simple_harness.renderer import _disp_width
+    from simple_harness import permissions
 
     # A permission rule already said yes, or /automode is on.
     if config.AUTO_ALLOW or config.POLICY_AUTO_ALLOW:

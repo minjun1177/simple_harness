@@ -72,8 +72,8 @@ exists to make small models genuinely usable rather than nearly usable.
 
 3. **Launch it**:
    ```bash
-   simple-harness      # if you installed it
-   python app.py       # if you did not
+   simple-harness            # if you installed it
+   python -m simple_harness   # if you did not
    ```
 
 ### Running the tests
@@ -850,6 +850,7 @@ The codebase is organized cleanly around the following components:
 Apache License 2.0 - see [LICENSE](LICENSE).
 
 `pyproject.toml` holds the packaging metadata under the name `simple-harness`.
-It is set up for `pip install -e .`; publishing to PyPI needs the flat modules
-moved into a `simple_harness/` package first, and the file says so where it
-matters.
+The modules live in `simple_harness/`, and the distribution installs that one
+package rather than twenty-two top-level modules - which would otherwise put
+`config`, `tools` and `session` in the importable root of every environment that
+took it.

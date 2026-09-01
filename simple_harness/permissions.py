@@ -27,7 +27,7 @@ import json
 import os
 from fnmatch import fnmatch
 
-import atomic
+from simple_harness import atomic
 
 
 PROJECT_CONFIG_FILES = (".permissions.json", "permissions.json")
@@ -201,7 +201,7 @@ def matches(rule: str, tool: str, target: str) -> bool:
 
 def decide(tool: str, arguments: dict) -> tuple[str, str]:
     """Return ("deny"|"allow"|"ask", the rule that decided it)."""
-    import config
+    from simple_harness import config
     if not getattr(config, "PERMISSIONS_ENABLED", True):
         return "ask", ""
 

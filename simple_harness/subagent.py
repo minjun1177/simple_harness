@@ -28,11 +28,11 @@ delegated precisely so they would not have to watch it.
 import asyncio
 import threading
 
-import config
-import providers
-import toolspec
-from config import S, _hr
-from systemprompt import tool_rules
+from simple_harness import config
+from simple_harness import providers
+from simple_harness import toolspec
+from simple_harness.config import S, _hr
+from simple_harness.systemprompt import tool_rules
 
 
 # Not offered to a sub-agent, and refused if it asks anyway. The listing and the
@@ -52,7 +52,7 @@ def withheld(depth: int) -> tuple:
 
 def prompt(depth: int, native: bool | None = None) -> str:
     """The sub-agent's system prompt: the same protocol, a different job."""
-    from systemprompt import native_tools_active
+    from simple_harness.systemprompt import native_tools_active
     if native is None:
         native = native_tools_active()
     catalogue = ("The tools you can use are supplied with this request. Use the "
@@ -102,11 +102,11 @@ def brief(task: str, context: str = "") -> str:
 async def _work(task: str, context: str, depth: int) -> str:
     # Imported here because `tools` imports this module to reach `run`, and at
     # module level that would close a circle.
-    from llm_client import (stream_reply, parse_tool_calls, strip_thinking,
+    from simple_harness.llm_client import (stream_reply, parse_tool_calls, strip_thinking,
                             native_tools, native_enabled, _from_native,
                             _render_call, NATIVE_ERROR)
-    from tools import dispatch_tool
-    from tui import _fmt_tool_call, _fmt_tool_result
+    from simple_harness.tools import dispatch_tool
+    from simple_harness.tui import _fmt_tool_call, _fmt_tool_result
 
     messages = [{"role": "system", "content": prompt(depth, native_enabled())},
                 {"role": "user", "content": brief(task, context)}]

@@ -33,7 +33,7 @@ import time
 import requests
 from bs4 import BeautifulSoup
 
-import config
+from simple_harness import config
 
 UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

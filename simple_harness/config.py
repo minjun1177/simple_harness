@@ -77,9 +77,9 @@ except ImportError:
 
 # `smrp` and `ttlp` are read as `config.smrp` / `config.ttlp` by the summariser
 # and the session titler.
-from systemprompt import systemprompt as syp
-from systemprompt import summarizeprompt as smrp
-from systemprompt import titleprompt as ttlp
+from simple_harness.systemprompt import systemprompt as syp
+from simple_harness.systemprompt import summarizeprompt as smrp
+from simple_harness.systemprompt import titleprompt as ttlp
 
 
 MODEL = "gemma4:e4b"

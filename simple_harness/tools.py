@@ -8,19 +8,19 @@ import hashlib
 import inspect
 import requests
 import psutil
-import config
-from config import S, TREE_SITTER_AVAILABLE, _TS_LANGUAGES, _EXT_TO_LANG
-from tui import _fmt_tool_call, _approval_prompt
-from skills import handle_use_skill
-import mcp_client
-import git_ops
-import permissions
-import shell_session
-import toolspec
-from websearch import search_web as search_pipeline, strip_html
+from simple_harness import config
+from simple_harness.config import S, TREE_SITTER_AVAILABLE, _TS_LANGUAGES, _EXT_TO_LANG
+from simple_harness.tui import _fmt_tool_call, _approval_prompt
+from simple_harness.skills import handle_use_skill
+from simple_harness import mcp_client
+from simple_harness import git_ops
+from simple_harness import permissions
+from simple_harness import shell_session
+from simple_harness import toolspec
+from simple_harness.websearch import search_web as search_pipeline, strip_html
 
 if TREE_SITTER_AVAILABLE:
-    from config import Parser, Query, QueryCursor
+    from simple_harness.config import Parser, Query, QueryCursor
 
 
 def handle_search_web(query: str) -> str:
@@ -951,7 +951,7 @@ def handle_spawn_agent(task: str, context: str = "", model: str = "") -> str:
     on a hosted model, real money before it reaches its first tool - so the
     decision to hire one is the user's, the same as running a command is.
     """
-    import subagent
+    from simple_harness import subagent
     first_line = (task or "").strip().splitlines()[0] if (task or "").strip() else ""
     details = [("task", first_line), ("model", model or "same as this one")]
     if not _approval_prompt("Hire Sub-agent", details, rule="spawn_agent"):
@@ -1047,7 +1047,7 @@ def _handlers() -> dict:
     """
     global _HANDLERS
     if _HANDLERS is None:
-        from session import (handle_write_memory, handle_get_memory_list,
+        from simple_harness.session import (handle_write_memory, handle_get_memory_list,
                              handle_read_memory, handle_delete_memory,
                              handle_edit_memory)
         _HANDLERS = {

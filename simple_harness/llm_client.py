@@ -11,15 +11,15 @@ import asyncio
 import itertools
 import time
 import random
-import config
-from config import S
-from tui import _fmt_tool_call, _fmt_tool_result, _fmt_tokens
-from renderer import _render_line, _format_table, _render_full
-from tools import dispatch_tool
-import context
-import mcp_client
-import providers
-import toolspec
+from simple_harness import config
+from simple_harness.config import S
+from simple_harness.tui import _fmt_tool_call, _fmt_tool_result, _fmt_tokens
+from simple_harness.renderer import _render_line, _format_table, _render_full
+from simple_harness.tools import dispatch_tool
+from simple_harness import context
+from simple_harness import mcp_client
+from simple_harness import providers
+from simple_harness import toolspec
 
 
 TOOL_CALL_TAG = "<tool_call>"

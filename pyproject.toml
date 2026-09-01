@@ -62,28 +62,7 @@ Repository = "https://github.com/minjun1177/chat"
 Issues = "https://github.com/minjun1177/chat/issues"
 
 [project.scripts]
-simple-harness = "app:cli"
+simple-harness = "simple_harness.app:cli"
 
-# ---------------------------------------------------------------------------
-# NOT READY TO PUBLISH - read this before `twine upload`
-#
-# The harness is a flat set of top-level modules, and they are installed as
-# top-level modules. That is fine for `pip install -e .` here, and wrong on
-# PyPI: it would put `config`, `tools`, `session` and `context` into the
-# importable root of every environment that installed it, where they would
-# shadow anybody else's module of the same name.
-#
-# Publishing needs the modules moved into a `simple_harness/` package first and
-# every `import config` turned into a package-relative import. Until that is
-# done this file is for local installs and for holding the name.
-# ---------------------------------------------------------------------------
 [tool.setuptools]
-py-modules = [
-    "app", "atomic", "config", "connect", "context", "deepthink", "git_ops",
-    "llm_client", "mcp_client", "permissions", "providers", "renderer",
-    "session", "shell_session", "skills", "sse", "subagent", "systemprompt",
-    "toolspec", "tools", "tui", "websearch",
-]
-
-[tool.setuptools.package-data]
-"*" = ["skills/**/*.md", "*.example"]
+packages = ["simple_harness"]

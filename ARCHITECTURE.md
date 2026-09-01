@@ -216,6 +216,11 @@ believes the last line.
 
 ## 6. Module map
 
+Every module lives in `simple_harness/`, and imports it by the package name:
+`from simple_harness import config`, `from simple_harness.tui import _hr`. The
+tree below leaves that prefix off for readability; on disk `app.py` is
+`simple_harness/app.py`. Tests and the two documents sit outside the package.
+
 Layered by what may import what. A module may import anything above it.
 
 ```

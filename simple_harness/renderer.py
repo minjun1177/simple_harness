@@ -1,6 +1,6 @@
 import re
 import unicodedata
-from config import S, tw
+from simple_harness.config import S, tw
 
 
 _LATEX_SYMBOLS: list[tuple[str, str]] = [

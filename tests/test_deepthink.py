@@ -15,15 +15,15 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import config
+from simple_harness import config
 config.MCP_ENABLED = False
 config.SAVE_CHAT_HISTORY = False
 config.AUTO_ALLOW = True
 config.NATIVE_TOOLS = False
 
-import deepthink
-import git_ops
-import providers
+from simple_harness import deepthink
+from simple_harness import git_ops
+from simple_harness import providers
 
 failures = []
 
@@ -288,7 +288,7 @@ check("the review stage is told to look for callers",
 print("\n--- the planning stages cannot edit, whatever the model tries ---")
 os.chdir(plain)
 git_ops._repo_root_cache.clear()
-import tools
+from simple_harness import tools
 
 config.DEEPTHINK_READONLY = True
 quiet, real = io.StringIO(), sys.stdout
@@ -314,7 +314,7 @@ check("only the last three stages may edit",
       edits_allowed == ["build", "review", "verify"], str(edits_allowed))
 
 print("\n--- a model that keeps knocking is stopped ---")
-import llm_client
+from simple_harness import llm_client
 knock = ('<tool_call>\n{"name": "edit_file", "arguments": {"filepath": "x.py"}}\n'
          "<old_content>\na\n</old_content>\n<new_content>\nb\n</new_content>\n</tool_call>")
 config.DEEPTHINK_READONLY = True

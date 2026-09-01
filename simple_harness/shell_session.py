@@ -33,14 +33,14 @@ _sessions: "dict[str, Session]" = {}
 
 
 def _cfg(name, default):
-    import config
+    from simple_harness import config
     return getattr(config, name, default)
 
 
 def _fallback_encodings() -> list:
     """What the console might be speaking when it is not UTF-8, best first."""
     try:
-        import config
+        from simple_harness import config
         return [enc for enc in config._console_encodings()
                 if enc.lower().replace("-", "") != "utf8"]
     except Exception:

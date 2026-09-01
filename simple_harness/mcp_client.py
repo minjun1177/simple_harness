@@ -46,7 +46,7 @@ import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
-from sse import iter_sse
+from simple_harness.sse import iter_sse
 
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -69,7 +69,7 @@ class MCPError(Exception):
 
 def _cfg(name: str, default):
     """Read a setting from `config`, tolerating a partially-initialised module."""
-    import config
+    from simple_harness import config
     return getattr(config, name, default)
 
 

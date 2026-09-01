@@ -29,10 +29,10 @@ a question - so stage 1 is allowed to end the chain when there is nothing to
 build.
 """
 
-import config
-import git_ops
-import providers
-from config import S, _hr
+from simple_harness import config
+from simple_harness import git_ops
+from simple_harness import providers
+from simple_harness.config import S, _hr
 
 
 class Stage:
@@ -144,8 +144,8 @@ def enabled() -> bool:
 
 async def run(messages: list) -> str:
     """Drive the five stages over one request. Returns the last answer."""
-    from context import manage_context
-    from llm_client import chat_turn
+    from simple_harness.context import manage_context
+    from simple_harness.llm_client import chat_turn
 
     answer = ""
     build_from = ""
