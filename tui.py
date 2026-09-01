@@ -9,6 +9,7 @@ from context import _estimate_tokens, _get_ctx_budget, _get_conv_pairs
 from skills import list_skills, skill_dirs
 import mcp_client
 import providers
+import toolspec
 
 
 def _get_git_info() -> str:
@@ -82,9 +83,11 @@ def _welcome():
     git_info = _get_git_info()
     rules_info = _get_rules_info()
     python_info = _get_python_info()
-    # count only top-level entries of the tool array, not the "name" key in the
-    # RULES example or in a tool's own parameter list
-    tools_count = config.SYSTEM_PROMPT.count('\n    "name": "')
+    # Counted from the tool table, which is the only tool list (5.1). Scraping
+    # the system prompt for it used to report "0 tools" on any model that
+    # supports native tool calling, because the schemas travel with the request
+    # there and never reach the prompt at all.
+    tools_count = len(toolspec.TOOLS) + mcp_client.tool_count()
 
     print(_logo())
     print(f"  {S.GRAY}model{S.R}      {S.WHITE}{providers.status_line()}{S.R}")
