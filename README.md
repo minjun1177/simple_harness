@@ -49,6 +49,40 @@ exists to make small models genuinely usable rather than nearly usable.
   Only needed for the local case - `/connect` reaches Anthropic, OpenAI and
   Gemini without it.
 
+### What the model has to be able to do
+
+The harness is built so a small model is *usable*, not so any model is. The
+thing that decides it is not size but whether the model can be made to emit a
+tool call at all - and having done the work to make 4B models usable, here is
+where that actually lands.
+
+| | Runs | Notes |
+| :--- | :--- | :--- |
+| **Recommended** | `gemma4:e4b`, or any model Ollama reports `tools` for at 8B+ | Native tool calling, ~5-9GB. Reliable in testing |
+| **Workable** | A 12B-class model without `tools`, e.g. `gemma3:12b` | Text protocol. **11/15** tool calls landed in testing |
+| **The floor** | A 4B-class model, e.g. `gemma3:4b` | Roughly a coin flip. Fine for one-shot edits, not for `/deepthink` |
+| **Below that** | 1-3B | Not recommended. Expect it to describe a tool call rather than make one |
+
+Two things matter more than the parameter count:
+
+**Whether Ollama reports `tools` for it.** That is per model, not per family -
+`gemma4:e4b` has it and `gemma3:12b` does not. A model that has it goes through
+the real function-calling interface, gets a 12KB smaller prompt, and is
+markedly more reliable. `/connect status` shows which protocol is in use.
+
+**Context window.** `NUM_CTX` defaults to 65536. A model that cannot hold that
+will have its conversation compressed early and often; 32k is workable, below
+16k is not really.
+
+Measured on this project's own test tasks - creating a file, and fixing a
+function halfway down a 5,700-character file - on the machine it was written
+on. Sample sizes are small (6-15 runs); treat them as the difference between
+"works" and "does not", not as a benchmark.
+
+Nothing here applies to `/connect anthropic|openai|gemini`. Those all support
+native tool calling, and the floor is whatever that provider's smallest model
+is.
+
 ### Installation Steps
 
 1. **Install it**:
@@ -885,6 +919,7 @@ The codebase is organized cleanly around the following components:
 - **`deepthink.py`**: The five-stage chain - the stage instructions, what each stage may do, and when the chain stops early.
 - **`git_ops.py`**: A commit per AI edit, and the undo that makes it worth having.
 - **`atomic.py`**: Writing a file so a crash cannot leave half of it behind. Used for sessions, memory, permission rules and the saved API keys.
+- **`terms.py`**: What the harness does to the machine it runs on, shown once before it does it.
 - **`tests/test_platform.py`**: Checks the waiting-for-input detection on the machine it is run on. Worth running on any new machine, and especially on Windows - see below.
 - **`tests/test_registry.py`**: Fails if the tool table, the system prompt and the handlers stop describing the same tools.
 - **`tests/test_durability.py`**: Atomic writes (including killing a writer mid-write) and the token estimate.
@@ -895,6 +930,7 @@ The codebase is organized cleanly around the following components:
 - **`tests/test_subagent.py`**: What a sub-agent may do, what it may not, and that only its report crosses back.
 - **`tests/test_permissions.py`**: What an allow rule covers - and that it stops at the command it names, rather than at whatever the shell was told to run next.
 - **`tests/test_paths.py`**: That nothing personal is written into whatever directory you started in, and that state from an older version is named rather than moved.
+- **`tests/test_terms.py`**: That the terms are shown before the harness can act, asked once, and never assumed from a pipe.
 - **`tests/test_tool_parsing.py`**: Every shape a model wraps a tool call in, and every shape that must not be read as one.
 - **`requirements-lock.txt`**: The exact dependency set the harness was tested against. `requirements.txt` gives the tested floors and a ceiling before the next breaking release.
 - **`mcp_client.py`**: MCP transports (stdio / streamable HTTP / SSE), the JSON-RPC session, tool and resource calls, and the prompt section they are advertised in.
@@ -914,7 +950,20 @@ The codebase is organized cleanly around the following components:
 
 ## 17. License
 
-Apache License 2.0 - see [LICENSE](LICENSE).
+Apache License 2.0 - see [LICENSE](LICENSE). It is provided **"AS IS", without
+warranties or conditions of any kind**, and its authors and contributors are
+**not liable** for any damage, data loss or other harm arising from its use;
+sections 7 and 8 of the licence are the ones that say this properly.
+
+Because a licence file nobody opens is a poor way to tell someone that the
+program they just installed runs shell commands on their computer at a language
+model's suggestion, the first run says so on screen and asks. The answer is kept
+in `~/.localchat/accepted-terms.json` and not asked again. Refusing starts
+nothing. With no terminal to ask - a pipe, a cron job, a container - it refuses
+rather than assuming, and `SIMPLE_HARNESS_ACCEPT_TERMS=1` answers for it.
+
+Agreeing adds nothing to the licence and refusing takes nothing away. What it
+adds is that the disclaimer is read.
 
 `pyproject.toml` holds the packaging metadata under the name `simple-harness`.
 The modules live in `simple_harness/`, and the distribution installs that one

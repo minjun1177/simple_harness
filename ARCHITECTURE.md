@@ -304,6 +304,7 @@ app.py            the loop, slash commands, session lifecycle
 | `skills.py` | Skill discovery and loading | |
 | `tui.py` / `renderer.py` | Terminal chrome and markdown | Decisions |
 | `atomic.py`, `sse.py`, `paths.py` | One job each. Stdlib only, importing nothing local | |
+| `terms.py` | What the harness does to this machine, asked once before it does it | |
 
 ---
 
@@ -408,6 +409,7 @@ for t in tests/*.py; do python "$t" || echo "FAILED: $t"; done
 | `test_platform.py` | Waiting-for-input detection on *this* machine. Run it on any new one, especially Windows |
 | `test_permissions.py` | What an allow rule covers, and the two ways one used to cover more than it said |
 | `test_paths.py` | That state resolves under `~/.localchat` and never into the working directory |
+| `test_terms.py` | That the terms are shown before anything runs, asked once, and never assumed from a pipe |
 | `test_tool_parsing.py` | The text protocol's repair engine: the shapes it reads, and the ones it refuses |
 | `test_docs.py` | That this file and `README.md` still describe the program that exists |
 
