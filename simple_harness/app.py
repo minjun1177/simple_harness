@@ -7,6 +7,7 @@ import datetime
 from simple_harness import __version__
 from simple_harness import config
 from simple_harness import paths
+from simple_harness import terms
 from simple_harness import deepthink
 from simple_harness import git_ops
 from simple_harness import skills
@@ -632,6 +633,10 @@ def cli() -> None:
     """
     _use_utf8_output()
     _parse_args(sys.argv[1:])
+    # Before anything is started, and before the first turn can ask to run a
+    # command: what this does to the machine it is on. Asked once per machine.
+    if not terms.require():
+        raise SystemExit(1)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
