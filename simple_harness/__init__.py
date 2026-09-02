@@ -6,4 +6,4 @@ every `from simple_harness import ...` in the package, and the import order that
 invariant depends on would stop being obvious.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"

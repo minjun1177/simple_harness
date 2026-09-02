@@ -170,7 +170,7 @@ You have access to file, web, system, and memory tools to help the user.
 Your goal is to be maximally helpful by leveraging your tools when needed.
 
 """ + catalogue + "\n\n" + tool_rules(native) + """
-Finally, You must reply with **Korean**.
+Finally, You must reply in the language of the given text/sentence/question.
 """
     return (base_prompt + mcp_tools_prompt(tools_json=not native)
             + skills_catalog_prompt() + load_context_file())
