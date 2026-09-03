@@ -40,13 +40,29 @@ def _unquote(token: str) -> str:
     return token
 
 
+def _exists(path: str) -> bool:
+    """`os.path.exists`, minus the lie Windows tells about trailing punctuation.
+
+    Win32 strips trailing dots and spaces off a name before looking it up, so
+    `config.txt.` reports as existing when only `config.txt` does. That is the
+    exact shape a full stop at the end of a sentence makes, and taking it at
+    face value means the file is attached - and then reported back to the user -
+    under a name that is not on disk.
+    """
+    if os.name == "nt":
+        name = os.path.basename(path.replace("\\", "/").rstrip("/"))
+        if name not in (".", "..") and name[-1:] in (".", " "):
+            return False
+    return os.path.exists(path)
+
+
 def resolve(token: str) -> str:
     """The path a mention names, allowing for punctuation that closed a sentence."""
     path = _unquote(token)
-    if os.path.exists(path):
+    if _exists(path):
         return path
     trimmed = path.rstrip(_SENTENCE_TAIL)
-    if trimmed and trimmed != path and os.path.exists(trimmed):
+    if trimmed and trimmed != path and _exists(trimmed):
         return trimmed
     return path          # report the miss against what was actually typed
 

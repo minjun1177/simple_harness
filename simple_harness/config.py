@@ -90,6 +90,8 @@ try:
         A directory completes with its separator still attached and no space
         after it, which is what makes typing straight on through `@src/` work:
         the next keystroke re-opens this against the directory just entered.
+        That separator is `/` on every platform, so the completion reads back
+        the way the path was typed.
         """
 
         def get_completions(self, document, complete_event):
@@ -112,7 +114,10 @@ try:
                 if not name.lower().startswith(prefix.lower()):
                     continue
                 is_dir = os.path.isdir(os.path.join(base, name))
-                full = os.path.join(directory, name) if directory else name
+                # Joined with a forward slash rather than os.sep: the text here
+                # replaces what the user typed, and they typed `src/`. Windows
+                # opens either separator, so the one that matches the line wins.
+                full = f"{directory}/{name}" if directory else name
                 if is_dir:
                     full += "/"
                 yield Completion(
