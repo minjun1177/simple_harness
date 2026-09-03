@@ -8,7 +8,10 @@
 # stable across every 0.x release, so this one gets the wider ceiling.
 ollama>=0.6.2,<1.0
 prompt_toolkit>=3.0.53,<4.0
-duckduckgo_search>=8.1.1,<9.0
+# Renamed from `duckduckgo_search` at 9.0. The old name still works and is
+# still accepted, but it warns on every client it builds; installing this one
+# is what stops that.
+ddgs>=9.0,<10.0
 requests>=2.34.2,<3.0
 beautifulsoup4>=4.15.0,<5.0
 psutil>=7.2.2,<8.0

@@ -73,6 +73,13 @@ def handle_edit_memory(memory_id: str, new_content: str) -> str:
     return f"[Success] Memory edited: '{memory_id}'"
 
 
+# What `save_session` writes, and every shape `load_session` can still read.
+# 4 added `cwd` - the directory the session was last worked in, which is the
+# only thing `-c` has to go on.
+SESSION_FORMAT = 4
+SESSION_FORMATS = (2, 3, 4)
+
+
 _FS_UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 _WINDOWS_RESERVED = ({"CON", "PRN", "AUX", "NUL", "CLOCK$"}
                      | {f"COM{i}" for i in range(1, 10)}
@@ -139,10 +146,11 @@ def save_session(messages: list[dict], session_id: str) -> str:
     filepath = os.path.join(config.SESSION_DIR, f"{session_id}.json")
 
     data = {
-        "version": 3,
+        "version": SESSION_FORMAT,
         "title": config.SESSION_TITLE,
         "model": config.MODEL,
         "persona": config.CUSTOM_PERSONA,
+        "cwd": os.getcwd(),
         "token_history": config.token_history,
         "messages": config.repair_messages(messages),
         "updated_at": datetime.datetime.now().isoformat()
@@ -217,23 +225,40 @@ def load_session(session_id: str) -> dict | list:
     return None
 
 
-def list_sessions() -> list[tuple[str, str, str]]:
-    """Return (session_id, title, meta), newest first."""
+def _dir_key(path: str) -> str:
+    """A directory as one comparable string, so two spellings of it match.
+
+    Symlinks are resolved because `/home/me/work` and a symlink pointing at it
+    are the same place to work in; case is folded only where the filesystem
+    folds it, which `normcase` already knows per platform.
+    """
+    if not path:
+        return ""
+    return os.path.normcase(os.path.realpath(os.path.expanduser(path)))
+
+
+def _session_records() -> list[dict]:
+    """Every saved session, parsed once, newest first.
+
+    One pass over the directory serves the listing, the lookup by name and the
+    lookup by directory - they only differ in which field they read.
+    """
     if not os.path.exists(config.SESSION_DIR):
         return []
-    sessions = []
+    records = []
     for f in os.listdir(config.SESSION_DIR):
         if not f.endswith(".json"):
             continue
         sid = f[:-len(".json")]
         filepath = os.path.join(config.SESSION_DIR, f)
-        title, meta_str, updated = "", "", ""
+        title, meta_str, updated, cwd = "", "", "", ""
         try:
             with open(filepath, "r", encoding="utf-8") as file:
                 data = json.load(file)
-            if isinstance(data, dict) and data.get("version") in (2, 3):
+            if isinstance(data, dict) and data.get("version") in SESSION_FORMATS:
                 title = data.get("title", "")
                 updated = data.get("updated_at", "")
+                cwd = data.get("cwd", "")          # "" in anything written before 4
                 m = data.get("model", "unknown")
                 msgs = len(data.get("messages", []))
                 tokens = sum(t.get("prompt", 0) + t.get("completion", 0) for t in data.get("token_history", []))
@@ -247,9 +272,32 @@ def list_sessions() -> list[tuple[str, str, str]]:
                 updated = datetime.datetime.fromtimestamp(os.path.getmtime(filepath)).isoformat()
             except OSError:
                 updated = ""
-        sessions.append((sid, title, meta_str, updated))
-    sessions.sort(key=lambda x: x[3], reverse=True)
-    return [(sid, title, meta) for sid, title, meta, _ in sessions]
+        records.append({"id": sid, "title": title, "meta": meta_str,
+                        "updated": updated, "cwd": cwd})
+    records.sort(key=lambda r: r["updated"], reverse=True)
+    return records
+
+
+def list_sessions() -> list[tuple[str, str, str]]:
+    """Return (session_id, title, meta), newest first."""
+    return [(r["id"], r["title"], r["meta"]) for r in _session_records()]
+
+
+def latest_in_dir(directory: str) -> str:
+    """The id of the newest session last worked on in `directory` ("" if none).
+
+    This is what `-c` resolves: continue where you left off *here*, rather than
+    whatever conversation happened to be the most recent one anywhere. Sessions
+    written before the format recorded a directory have nothing to match on and
+    are never picked - guessing at one would be worse than saying there is none.
+    """
+    key = _dir_key(directory)
+    if not key:
+        return ""
+    for record in _session_records():
+        if record["cwd"] and _dir_key(record["cwd"]) == key:
+            return record["id"]
+    return ""
 
 
 def find_sessions(query: str) -> list[tuple[str, str, str]]:

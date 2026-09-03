@@ -148,11 +148,27 @@ def _show_help():
         ("/autocommit", "Whether each AI edit gets its own git commit, and the recent ones"),
         ("/autocommit <on/off>", "Turn that on or off"),
     ]
+    # Not slash commands: these two act on the line itself, so they are listed
+    # apart from the table rather than pretending to belong to it.
+    prefixes = [
+        ("@<path>", "Attach a file or directory to the message. Typing @ opens a "
+                    "list of what is here - arrows to move, Tab to insert"),
+        ("!<command>", "Run a shell command yourself. Its output joins the "
+                       "conversation, so the next question can be about it"),
+    ]
     print()
     print(f"  {S.BOLD}{S.ACCENT}Commands{S.R}")
     print(f"  {_hr(width=44)}")
     for cmd, desc in commands:
         print(f"  {S.ACCENT}{cmd:22}{S.R} {S.GRAY}{desc}{S.R}")
+    print()
+    print(f"  {S.BOLD}{S.ACCENT}In a message{S.R}")
+    print(f"  {_hr(width=44)}")
+    for cmd, desc in prefixes:
+        wrapped = textwrap.wrap(desc, max(30, tw() - 32)) or [""]
+        print(f"  {S.ACCENT}{cmd:22}{S.R} {S.GRAY}{wrapped[0]}{S.R}")
+        for line in wrapped[1:]:
+            print(f"  {' ' * 22} {S.GRAY}{line}{S.R}")
     print()
 
 
@@ -334,8 +350,21 @@ def _fmt_tool_result(name: str, result: str):
     if footer:
         print(f"  {S.MUTED}│{S.R}  {footer}")
     print(f"  {S.MUTED}│{S.R}")
-    if "[Error]" in result or "[System] User denied" in result:
+    # Anchored, not searched. Every failure this harness produces puts its
+    # marker at the front - `tools._name_the_failure`, `_commit_if_changed` and
+    # `deepthink` all decide the same way - so a result that merely *contains*
+    # "[Error]" is a result, not a failure: a page `get_url` fetched that
+    # discusses one, a file whose source raises one, a `run_cmd` grep that
+    # matched the word. Searching the whole body put a red "error" under output
+    # that was perfectly good, and did it more often the better the tool worked.
+    if result.startswith(config.TOOL_ERROR_PREFIX):
         print(f"  {S.ERR}╰─ error{S.R}")
+    elif result.startswith(config.TOOL_REFUSAL_PREFIX):
+        # A refusal is not a failure and not a success: a deny rule, a read-only
+        # stage or a declined prompt each stopped the tool before it ran. Only
+        # "User denied" was recognised here before, so the rest reported "done"
+        # under output saying plainly that nothing had been done.
+        print(f"  {S.WARN}╰─ refused{S.R}")
     else:
         print(f"  {S.OK}╰─ done{S.R}")
 

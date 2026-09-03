@@ -31,6 +31,9 @@ exists to make small models genuinely usable rather than nearly usable.
 - **Persistent Memory Storage**: Long-term key-value memory storage system backed by `memory.json` to store user preferences, facts, and instructions across sessions.
 - **Session & History Management**: Save, list, load, record, and export conversation transcripts in JSON or Markdown format.
 - **Named Sessions**: Sessions are filed under a readable title instead of a timestamp. The model names each new session after its first exchange (`/autotitle off` to stop it), `/title <name>` renames it by hand, and `/load` accepts either the title or the id.
+- **Resuming from the command line**: `simple-harness --resume <id or title>` reopens a saved conversation, and `-c` reopens the newest one you were last working on *in this directory* - a session records where it was worked, so `-c` in a project picks up that project's thread rather than whatever you did most recently anywhere.
+- **`@` file attachments**: Typing `@` opens a list of what is in the directory you are standing in - arrow keys to move, Tab to insert, `/` to descend into a folder. `@src/main.py` sends that file with your message instead of spending a round trip on the model asking for it. Directories arrive as their listing, a path that does not exist is reported without stopping the turn, and one mention cannot swallow the context window (`MENTION_MAX_CHARS`).
+- **`!` shell escape**: A line starting with `!` runs as a shell command - yours, not the model's, so no approval prompt - and its output joins the conversation, so the next question can be about what it printed.
 - **Enhanced Terminal Shell**: Input autocompletion for slash commands and persistent input history across restarts powered by `prompt_toolkit`.
 - **Hashline Line-Level Hashing**: File reading appends 2-character MD5 hashes to line numbers (`LINE_NUM:HASH|`) allowing the agent to target precise code locations when making edits.
 - **Multi-Source Web Search**: Queries several keyless sources (DuckDuckGo, Wikipedia, Stack Exchange, GitHub, optional self-hosted SearXNG), reads the actual pages, ranks passages locally with BM25, and reports "no relevant results" rather than returning off-topic pages.
@@ -62,6 +65,9 @@ where that actually lands.
 | **Workable** | A 12B-class model without `tools`, e.g. `gemma3:12b` | Text protocol. **11/15** tool calls landed in testing |
 | **The floor** | A 4B-class model, e.g. `gemma3:4b` | Roughly a coin flip. Fine for one-shot edits, not for `/deepthink` |
 | **Below that** | 1-3B | Not recommended. Expect it to describe a tool call rather than make one |
+
+Across five tool-calling tasks - one call, using the result, exact arguments, two
+calls in order, and correctly calling nothing - `gemma4:e4b` passed all five.
 
 Two things matter more than the parameter count:
 
@@ -109,6 +115,16 @@ is.
    simple-harness            # if you installed it
    python -m simple_harness   # if you did not
    ```
+
+   To carry on where you left off instead of starting fresh:
+   ```bash
+   simple-harness -c                     # the newest session worked on in this directory
+   simple-harness --resume <id or title>  # a particular one, by either name
+   ```
+   `-resume` and `-continue` are accepted too. Both stop with an error rather
+   than opening a blank session when there is nothing to resume, and `--resume`
+   lists the candidates instead of choosing when a name matches more than one.
+   `/sessions` inside a session shows the ids.
 
 ### Running the tests
 
@@ -813,6 +829,7 @@ knowing:
 | `SUBAGENT_MAX_DEPTH` | 1 | 1 means sub-agents cannot hire sub-agents |
 | `SHOW_THINKING` | `False` | Show a reasoning model's scratch work |
 | `STORE_THINKING` | `False` | Keep it in the history too. Expensive on a local model |
+| `MENTION_MAX_CHARS` | `40000` | Ceiling on what one `@path` may add to the context |
 | `AUTO_TITLE` | `True` | Let the model name each new session |
 | `SAVE_CHAT_HISTORY` | `True` | Write session files at all |
 | `CMD_TIMEOUT` | 120 | Seconds before a runaway command is killed |
@@ -835,7 +852,7 @@ skills, and they win.
 | Path | Holds |
 | :--- | :--- |
 | `~/.localchat/providers.json` | The connected provider and any API keys typed at `/connect`. Owner-only on POSIX |
-| `~/.localchat/sessions/*.json` | Conversation transcripts, named after the session title |
+| `~/.localchat/sessions/*.json` | Conversation transcripts, named after the session title, each recording the directory it was last worked in so `-c` can find it |
 | `~/.localchat/memory.json` | The long-term key-value memory |
 | `~/.localchat/history` | Input history for the prompt |
 | `./.permissions.json`, then `~/.localchat/permissions.json` | Allow and deny rules |
@@ -884,6 +901,13 @@ The interactive terminal supports special slash commands to control options and 
 | `/mcp connect <name>` | Reconnect a single server |
 | `/mcp prompt <server> <name> [k=v]` | Run a prompt template the server offers |
 | `/mcp <on/off>` | Attach or detach every MCP server for this session |
+
+Two prefixes act on the message itself rather than being commands:
+
+| Prefix | Description |
+| :--- | :--- |
+| `@<path>` | Attach a file (or a directory's listing) to this message. Typing `@` opens a completion menu of the current directory - arrows to move, Tab to insert |
+| `!<command>` | Run a shell command yourself. It skips the approval prompt, because you typed it, and its output is added to the conversation |
 | `/connect [provider] [model]` | Connect a provider, or pick one interactively |
 | `/connect status` | Show every provider and whether it is usable |
 | `/perms` | Show the active tool permission rules |
@@ -932,6 +956,9 @@ The codebase is organized cleanly around the following components:
 - **`tests/test_paths.py`**: That nothing personal is written into whatever directory you started in, and that state from an older version is named rather than moved.
 - **`tests/test_terms.py`**: That the terms are shown before the harness can act, asked once, and never assumed from a pipe.
 - **`tests/test_tool_parsing.py`**: Every shape a model wraps a tool call in, and every shape that must not be read as one.
+- **`tests/test_resume.py`**: That `--resume` and `-c` open the conversation they name - and that neither hands back a blank one, or guesses, when they cannot.
+- **`tests/test_tool_reporting.py`**: That a tool result is judged by the marker it *starts* with, not one it happens to contain, and that no library writes an unasked-for paragraph to stderr while a tool is running.
+- **`tests/test_mentions.py`**: What `@` attaches and what it must leave alone - an email address is not a file - and that the completion menu reads the real directory.
 - **`requirements-lock.txt`**: The exact dependency set the harness was tested against. `requirements.txt` gives the tested floors and a ceiling before the next breaking release.
 - **`mcp_client.py`**: MCP transports (stdio / streamable HTTP / SSE), the JSON-RPC session, tool and resource calls, and the prompt section they are advertised in.
 - **`websearch.py`**: Multi-source retrieval, page extraction, and BM25 reranking.
@@ -943,7 +970,7 @@ The codebase is organized cleanly around the following components:
 - **`.permissions.json`**: Project-level tool permission rules (see `.permissions.json.example`). Personal ones live in `~/.localchat/permissions.json`.
 - **`.mcp.json`**: Project-level MCP server declarations (see `.mcp.json.example`). Personal ones live in `~/.localchat/mcp.json`.
 - **`memory.json`**: Key-value JSON storage backing the long-term memory system.
-- **`sessions/`**: Session directory containing JSON transcript backups for conversation history. Each file is named after the session's title (slugified, e.g. `웹-검색-랭킹-개선.json`); untitled sessions fall back to a timestamp until a title exists.
+- **`sessions/`**: Session directory containing JSON transcript backups for conversation history. Each file is named after the session's title (slugified, e.g. `웹-검색-랭킹-개선.json`); untitled sessions fall back to a timestamp until a title exists. Each also records the working directory it was last saved from, which is what `-c` matches against.
 - **`.chat_history`**: History file managed by `prompt_toolkit` for command history recall across terminal runs.
 
 ---

@@ -246,11 +246,36 @@ Nothing is ever moved on the user's behalf. `sessions` and `memory.json` are
 ordinary enough names that acting on sight would eventually destroy real work,
 so `strays_in_cwd()` reports and stops.
 
+One session file still records a directory: the one it was last saved from.
+That is the only thing `-c` has to go on. Sessions are the person's and stay in
+one place, so "the session I was in here" cannot be answered by where the file
+lives - it has to be written down when the session is. `session.latest_in_dir`
+compares them through `realpath` and `normcase`, so a symlink or a differently
+cased spelling of the same directory is the same directory; a file written
+before the format recorded one is never picked, because a wrong guess at which
+conversation to reopen is worse than saying there is none.
+
 **5.8 Auto-commit takes only the paths the tool named.** `git commit` is given
 those paths explicitly. Never let it sweep up the index - the user's staged work
 is not ours to commit.
 
-**5.9 `[System]` prefixes a refusal.** See §4.
+**5.9 `[System]` prefixes a refusal.** See §4. `[Error]` prefixes a failure, and
+both are `config.TOOL_REFUSAL_PREFIX` and `config.TOOL_ERROR_PREFIX` - one copy
+each, because `tools` writes them, `llm_client` counts them and `tui` colours
+them, and none of the three can import the others.
+
+They are **anchors, tested with `startswith`, never searched for**. Everything a
+tool returns is content somebody else wrote: a page `get_url` fetched, a file
+`read_file` read, whatever `run_cmd` printed. Any of it may contain either
+marker as ordinary text - this repository's own source contains dozens - and a
+substring test turns that into a failure report under output that was perfectly
+good. `tui._fmt_tool_result` searched the whole body until it was made to match
+`tools._name_the_failure` and `_commit_if_changed`, which had always anchored.
+
+The same rule covers the terminal generally: **nothing writes to stderr while a
+tool is running unless the tool failed.** A dependency's warning printed
+mid-search is indistinguishable, to the person watching, from the tool breaking.
+`websearch` is where this bites - see the top of that module and `strip_html`.
 
 **5.10 Never report success you did not verify.** This applies to the code as
 much as to the model: `deepthink._report_checks` counts the commands the final
@@ -296,7 +321,8 @@ app.py            the loop, slash commands, session lifecycle
 | `subagent.py` | The sub-agent's own loop and prompt | A second protocol |
 | `git_ops.py` | Commit, undo, diff. Never raises | Anything not about git |
 | `context.py` | Token estimate, trimming, compression | |
-| `session.py` | Session files and long-term memory | |
+| `session.py` | Session files, the directory each was worked in, and long-term memory | |
+| `mentions.py` | `@path` in a typed message: what it names, and what it attaches | Printing - the caller does that |
 | `permissions.py` | Rule loading and the allow/deny/ask decision | |
 | `shell_session.py` | Live commands, waiting-vs-busy detection | |
 | `mcp_client.py` | MCP transports, JSON-RPC, MCP tool schemas | |
@@ -411,6 +437,9 @@ for t in tests/*.py; do python "$t" || echo "FAILED: $t"; done
 | `test_paths.py` | That state resolves under `~/.localchat` and never into the working directory |
 | `test_terms.py` | That the terms are shown before anything runs, asked once, and never assumed from a pipe |
 | `test_tool_parsing.py` | The text protocol's repair engine: the shapes it reads, and the ones it refuses |
+| `test_resume.py` | That `--resume` and `-c` resolve on the command line, and refuse rather than guess |
+| `test_tool_reporting.py` | That the result markers are read as anchors (5.9), and that nothing warns onto stderr mid-tool |
+| `test_mentions.py` | What `@` attaches, what it refuses to, and that the menu reads the real directory |
 | `test_docs.py` | That this file and `README.md` still describe the program that exists |
 
 `test_docs.py` is why the two documents can be trusted: it fails if either names

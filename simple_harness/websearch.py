@@ -29,11 +29,31 @@ import html
 import math
 import re
 import time
+import warnings
 
 import requests
 from bs4 import BeautifulSoup
 
 from simple_harness import config
+
+# A backstop, not the fix. Beautiful Soup guesses on two shapes of input that
+# the caller has made a mistake and says so on stderr in a paragraph - and it
+# does it from the fetch threads, in the middle of a search the user is
+# watching, where an unasked-for block of text reads like the tool failed while
+# the content it warned about comes back perfectly good.
+#
+# `strip_html` below no longer gives it either shape, which is the real fix,
+# because a filter is only as durable as the last library to call
+# `warnings.simplefilter` - that resets the whole process's filters, and at
+# least one dependency does it. These stay for the cases the shapes miss: a
+# byte-order mark before an XML prolog, a guess a future bs4 adds.
+try:
+    from bs4 import MarkupResemblesLocatorWarning, XMLParsedAsHTMLWarning
+except ImportError:                       # a bs4 old enough not to raise them
+    pass
+else:
+    warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+    warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 
 UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -130,13 +150,42 @@ def _has_hangul(text):
     return bool(_HANGUL.search(text or ""))
 
 
+def _tidy_lines(text):
+    """Collapse a block of extracted text to its non-empty, stripped lines."""
+    return "\n".join(line.strip() for line in text.splitlines() if line.strip())
+
+
 def strip_html(raw):
-    """HTML to readable text. Shared with the get_url tool."""
-    soup = BeautifulSoup(raw or "", "html.parser")
+    """HTML to readable text. Shared with the get_url tool.
+
+    Two early exits, both there because bs4 treats the input as evidence about
+    the *caller* and warns when it looks wrong - see the filters at the top of
+    this module for why that matters. Both produce exactly what the parser
+    would have produced, so nothing is traded for the quiet.
+    """
+    raw = raw or ""
+
+    if "<" not in raw:
+        # No markup at all, so there is nothing for a parser to strip - only
+        # entities to decode. This is the ordinary case for a search snippet,
+        # and a short unmarked line is precisely what makes bs4 decide the
+        # caller meant to pass a filename or a URL.
+        return _tidy_lines(html.unescape(raw))
+
+    stripped = raw.lstrip()
+    if stripped.startswith("<?xml"):
+        # An XML declaration is a processing instruction: it carries no text,
+        # and it is the whole of what makes bs4 announce that this document
+        # should have been parsed as XML. RSS, Atom and sitemaps all arrive
+        # with one, and all of them are ordinary things to hand `get_url`.
+        end = stripped.find("?>")
+        if end != -1:
+            raw = stripped[end + 2:]
+
+    soup = BeautifulSoup(raw, "html.parser")
     for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "iframe", "svg", "form"]):
         tag.decompose()
-    text = soup.get_text("\n", strip=True)
-    return "\n".join(line.strip() for line in text.splitlines() if line.strip())
+    return _tidy_lines(soup.get_text("\n", strip=True))
 
 
 # ---------------------------------------------------------------------------
@@ -164,15 +213,39 @@ def _src_searxng(query):
     return out
 
 
+def _ddgs_client():
+    """A search client, under whichever of the package's two names is installed.
+
+    `duckduckgo_search` has been renamed to `ddgs`. The old package still works,
+    but every client it constructs raises a RuntimeWarning saying so - and this
+    constructs one per search, so the notice lands in the terminal in the middle
+    of a search the user is watching, where an unasked-for message on stderr
+    reads like the search failed. It is also not something the model or the user
+    can act on mid-run; `requirements.txt` is where a package to install belongs.
+
+    Worse, the old package calls `warnings.simplefilter("always")` before
+    warning, which resets the whole process's warning filters as a side effect
+    of building an object - so no filter installed in advance can survive to
+    silence it.
+
+    Hence: the new name first, and the old one built inside `catch_warnings`,
+    which swallows the notice by replacing the sink rather than the filters, and
+    puts the filters back the way they were on the way out.
+    """
+    try:
+        from ddgs import DDGS               # the package's current name
+        return DDGS()
+    except ImportError:
+        from duckduckgo_search import DDGS  # the name it had until 9.0
+    with warnings.catch_warnings(record=True):
+        return DDGS()
+
+
 def _src_ddg(query):
     """General web. Broad coverage, weak precision - the pool, not the answer."""
-    try:
-        from duckduckgo_search import DDGS  # pinned in requirements.txt
-    except ImportError:
-        from ddgs import DDGS               # the package's new name
     region = "kr-kr" if _has_hangul(query) else "wt-wt"
-    results = DDGS().text(query, region=region, safesearch="moderate",
-                          max_results=config.SEARCH_CANDIDATES)
+    results = _ddgs_client().text(query, region=region, safesearch="moderate",
+                                  max_results=config.SEARCH_CANDIDATES)
     out = []
     for item in results or []:
         if item.get("href"):

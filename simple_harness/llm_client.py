@@ -760,7 +760,7 @@ MAX_EMPTY_REPLIES = 1      # one nudge, then say so
 # in this harness - a deny rule, a stage that is read-only, a tool a sub-agent
 # does not have, an approval the user declined - starts with this, so counting
 # them needs no special case per source.
-REFUSAL_PREFIX = "[System]"
+REFUSAL_PREFIX = config.TOOL_REFUSAL_PREFIX
 MAX_REFUSALS_IN_A_ROW = 3
 
 

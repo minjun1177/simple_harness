@@ -1005,7 +1005,7 @@ def _commit_if_changed(function_name: str, arguments: dict, result) -> None:
 # had to work that out from its own memory of what it asked for, and a small one
 # often gets it wrong - it fixes the file it was thinking about rather than the
 # one that broke. Naming the call costs one line and removes the guess.
-_ERROR_PREFIX = "[Error]"
+_ERROR_PREFIX = config.TOOL_ERROR_PREFIX
 _ARG_VALUE_CHARS = 60          # a file body must not push the error off the top
 _ARG_LINE_CHARS = 200
 

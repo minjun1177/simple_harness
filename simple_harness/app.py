@@ -15,12 +15,14 @@ from simple_harness import mcp_client
 from simple_harness import permissions
 from simple_harness import providers
 from simple_harness import connect
+from simple_harness import mentions
+from simple_harness import tools
 from simple_harness.config import S
 from simple_harness.systemprompt import systemprompt as _build_system_prompt
 from simple_harness.tui import _welcome, _show_help, _show_skills, _show_mcp, _show_perms, _fmt_tool_call, _fmt_tool_result, display_usage_graph, _hr
 from simple_harness.renderer import _render_full
 from simple_harness.session import (save_session, load_session, list_sessions, find_sessions,
-                     rename_session, generate_session_title, clean_title)
+                     latest_in_dir, rename_session, generate_session_title, clean_title)
 from simple_harness.context import manage_context
 from simple_harness.llm_client import chat_turn, parse_tool_calls, strip_thinking
 
@@ -42,6 +44,101 @@ def _refresh_system_prompt(messages: list[dict]) -> None:
     summary = _extract_summary(messages[0]["content"])
     config.SYSTEM_PROMPT = _build_system_prompt()
     messages[0]["content"] = _compose_system_prompt(summary)
+
+
+def _adopt_session(loaded) -> list[dict]:
+    """Make a loaded session file the live conversation. Returns its messages.
+
+    `/load` and `--resume` are the same act at different moments, so they are
+    the same code: the model, the persona, the token history and the loaded
+    skills all belong to the conversation being resumed, not to the one being
+    left behind.
+    """
+    if isinstance(loaded, dict):
+        messages = loaded.get("messages", [])
+        config.token_history.clear()
+        config.token_history.extend(loaded.get("token_history", []))
+        config.MODEL = loaded.get("model", config.MODEL)
+        config.CUSTOM_PERSONA = loaded.get("persona", config.CUSTOM_PERSONA)
+        config.SESSION_TITLE = loaded.get("title", "")
+    else:                                   # a transcript from before version 2
+        messages = loaded
+        config.token_history.clear()
+        config.SESSION_TITLE = ""
+    if not messages or messages[0].get("role") != "system":
+        # Every later turn addresses messages[0] as the system message. A file
+        # saved with none - or with none left after a repair - must not make the
+        # next turn raise.
+        config.SYSTEM_PROMPT = _build_system_prompt()
+        messages.insert(0, {"role": "system", "content": _compose_system_prompt()})
+    config.LOADED_SKILLS[:] = skills.loaded_skill_names(messages)
+    return messages
+
+
+def _replay_session(messages: list[dict]) -> None:
+    """Print a resumed conversation the way it looked while it was happening."""
+    for msg in messages:
+        if msg["role"] == "system":
+            continue
+        elif msg["role"] == "user":
+            if msg["content"].startswith("[Tool Result for '"):
+                m = re.match(r"\[Tool Result for '([^']+)'\]:\n(.*)", msg["content"], re.DOTALL)
+                if m:
+                    _fmt_tool_result(m.group(1), m.group(2))
+                continue
+            print(f"  {S.USER_CLR}{S.BOLD}❯{S.R} {msg['content']}")
+        elif msg["role"] == "assistant":
+            for name, arguments in parse_tool_calls(msg["content"], quiet=True):
+                _fmt_tool_call(name, arguments)
+
+            c = re.sub(r'<tool_call>.*?</tool_call>', '', msg["content"], flags=re.DOTALL)
+            c = strip_thinking(c)
+            if c:
+                print(_render_full(c))
+                print()
+
+
+def _show_ambiguous(query: str, matches: list, hint: str) -> None:
+    """Say which sessions a name matched, rather than picking one of them."""
+    print(f"  {S.WARN}⚠ '{query}' matches {len(matches)} sessions:{S.R}")
+    for sid, title, _ in matches[:10]:
+        print(f"  {S.GRAY}•{S.R} {S.WHITE}{title or '(untitled)'}{S.R}  {S.MUTED}{sid}{S.R}")
+    print(f"  {S.GRAY}{hint}{S.R}\n")
+
+
+def _run_user_command(command: str) -> str:
+    """Run what the user typed after `!`, with the approval gate lifted.
+
+    The prompt and the permission rules exist to put a person between the model
+    and the machine. Here the person *is* the one asking, so making them approve
+    their own keystrokes would be theatre. Everything else that makes `run_cmd`
+    survivable is exactly what is wanted - the idle detection, the timeout, the
+    output trimming, the session left registered when a program stops at a
+    prompt - so this is `safe_run_cmd` with only the gate held open, the same
+    way `dispatch_tool` holds it open for an allow rule.
+    """
+    config.POLICY_AUTO_ALLOW = True
+    try:
+        return tools.safe_run_cmd(command)
+    finally:
+        config.POLICY_AUTO_ALLOW = False
+
+
+def _attach_mentions(text: str) -> str:
+    """Expand `@path` in a typed message and say what came with it.
+
+    The model is never told a mention failed by silence: a path that is not
+    there is named on screen, and the message goes as written.
+    """
+    expanded, notes = mentions.expand(text)
+    for path, attached, detail in notes:
+        if attached:
+            print(f"  {S.MUTED}◆ attached {S.WHITE}{path}{S.R} {S.GRAY}({detail}){S.R}")
+        else:
+            print(f"  {S.WARN}⚠ @{path}: {detail}{S.R}")
+    if notes:
+        print()
+    return expanded
 
 
 def _connect_mcp_servers() -> list:
@@ -93,7 +190,7 @@ def _report_strays() -> None:
     print(f"  {S.GRAY}    mv {' '.join(strays)} {paths.home()}/{S.R}\n")
 
 
-async def main() -> None:
+async def main(resume_id: str = "") -> None:
 
     if config.CURRENT_OS == "Windows":
         os.system("")
@@ -104,19 +201,43 @@ async def main() -> None:
     config.SYSTEM_PROMPT = _build_system_prompt()
     messages: list[dict] = [{"role": "system", "content": _compose_system_prompt()}]
 
+    current_session_id = None
+    # Adopted before the banner, so the banner reports the resumed session's
+    # model rather than the one it is about to be replaced by; replayed after
+    # it, so the transcript reads downwards from the header as it did the first
+    # time. `cli()` has already established that the id names a real file.
+    resumed = load_session(resume_id) if resume_id else None
+    if resumed:
+        messages = _adopt_session(resumed)
+        current_session_id = resume_id
+
     _welcome()
     _report_mcp_problems(failed_mcp)
     _report_strays()
 
-    current_session_id = None
+    if resume_id:
+        if resumed:
+            print(f"  {S.OK}✓ Resumed session: {config.SESSION_TITLE or resume_id} "
+                  f"(Model: {config.MODEL}){S.R}\n")
+            _replay_session(messages)
+        else:
+            print(f"  {S.ERR}✗ Session not found: {resume_id}{S.R}")
+            print(f"  {S.GRAY}Starting a new one instead.{S.R}\n")
 
     if config.PROMPT_TOOLKIT_AVAILABLE:
         paths.ensure_home()          # FileHistory opens its file straight away
-        from simple_harness.config import SlashCommandCompleter, PromptSession, FileHistory, ANSI
-        completer = SlashCommandCompleter(['/help', '/clear', '/usage', '/model', '/models', '/exit', '/quit', '/sessions', '/load', '/title', '/autotitle', '/automode', '/fullcontent', '/record', '/export', '/system', '/planmode', '/skills', '/skill', '/mcp', '/perms', '/think', '/connect', '/undo', '/autocommit', '/deepthink'])
+        from simple_harness.config import (SlashCommandCompleter, PathMentionCompleter,
+                                      merge_completers, PromptSession, FileHistory, ANSI)
+        completer = merge_completers([
+            SlashCommandCompleter(['/help', '/clear', '/usage', '/model', '/models', '/exit', '/quit', '/sessions', '/load', '/title', '/autotitle', '/automode', '/fullcontent', '/record', '/export', '/system', '/planmode', '/skills', '/skill', '/mcp', '/perms', '/think', '/connect', '/undo', '/autocommit', '/deepthink']),
+            PathMentionCompleter(),
+        ])
         session_pt = PromptSession(
             history=FileHistory(config.HISTORY_FILE),
             completer=completer,
+            # The menu has to open on its own for `@` to be discoverable: nobody
+            # presses Tab after a character they have not been told completes.
+            complete_while_typing=True,
         )
 
     while True:
@@ -135,6 +256,23 @@ async def main() -> None:
             break
 
         if not user_input:
+            continue
+
+        if user_input.startswith("!"):
+            # The user's own command, not the model's. It still goes into the
+            # conversation, because the reason to run `!git status` mid-chat is
+            # almost always so that the next question can be about its output.
+            command = user_input[1:].strip()
+            if not command:
+                print(f"  {S.ERR}✗ Usage: !<shell command>{S.R}\n")
+                continue
+            print(f"\n  {S.MUTED}${S.R} {S.WHITE}{command}{S.R}")
+            output = _run_user_command(command)
+            _fmt_tool_result(command, output)
+            print()
+            messages.append({"role": "user",
+                             "content": f"[Shell] $ {command}\n{output}"})
+            current_session_id = save_session(messages, current_session_id)
             continue
 
         cmd = user_input.lower()
@@ -204,48 +342,16 @@ async def main() -> None:
             query = parts[1].strip()
             matches = find_sessions(query)
             if len(matches) > 1:
-                print(f"  {S.WARN}⚠ '{query}' matches {len(matches)} sessions:{S.R}")
-                for m_sid, m_title, _ in matches[:10]:
-                    print(f"  {S.GRAY}•{S.R} {S.WHITE}{m_title or '(untitled)'}{S.R}  {S.MUTED}{m_sid}{S.R}")
-                print(f"  {S.GRAY}Re-run /load with one of the ids above.{S.R}\n")
+                _show_ambiguous(query, matches, "Re-run /load with one of the ids above.")
                 continue
             sid = matches[0][0] if matches else query
             loaded = load_session(sid)
             if loaded:
-                if isinstance(loaded, dict) and loaded.get("version") in (2, 3):
-                    messages = loaded.get("messages", [])
-                    config.token_history.clear()
-                    config.token_history.extend(loaded.get("token_history", []))
-                    config.MODEL = loaded.get("model", config.MODEL)
-                    config.CUSTOM_PERSONA = loaded.get("persona", config.CUSTOM_PERSONA)
-                    config.SESSION_TITLE = loaded.get("title", "")
-                else:
-                    messages = loaded
-                    config.token_history.clear()
-                    config.SESSION_TITLE = ""
+                messages = _adopt_session(loaded)
                 current_session_id = sid
-                config.LOADED_SKILLS[:] = skills.loaded_skill_names(messages)
                 label = config.SESSION_TITLE or sid
                 print(f"  {S.OK}✓ Loaded session: {label} (Model: {config.MODEL}){S.R}\n")
-                for msg in messages:
-                    if msg["role"] == "system": 
-                        continue
-                    elif msg["role"] == "user":
-                        if msg["content"].startswith("[Tool Result for '"):
-                            m = re.match(r"\[Tool Result for '([^']+)'\]:\n(.*)", msg["content"], re.DOTALL)
-                            if m:
-                                _fmt_tool_result(m.group(1), m.group(2))
-                            continue
-                        print(f"  {S.USER_CLR}{S.BOLD}❯{S.R} {msg['content']}")
-                    elif msg["role"] == "assistant":
-                        for name, arguments in parse_tool_calls(msg["content"], quiet=True):
-                            _fmt_tool_call(name, arguments)
-
-                        c = re.sub(r'<tool_call>.*?</tool_call>', '', msg["content"], flags=re.DOTALL)
-                        c = strip_thinking(c)
-                        if c:
-                            print(_render_full(c))
-                            print()
+                _replay_session(messages)
             else:
                 print(f"  {S.ERR}✗ Session not found: {sid}{S.R}\n")
             continue
@@ -539,6 +645,12 @@ async def main() -> None:
                       f"request.{S.R}\n")
             continue
 
+        # Every slash command has had its turn and continued; what is left is a
+        # message for the model, so this is where an `@path` becomes context.
+        # Before the plan-mode note, so the attachment stays under the sentence
+        # the user wrote rather than under a system aside.
+        user_input = _attach_mentions(user_input)
+
         if config.PLANMODE and not config.DEEPTHINK:
             if config.AUTO_ALLOW:
                 plan_prompt = (
@@ -605,22 +717,66 @@ def _use_utf8_output() -> None:
             pass          # not a real stream, or an encoding it will not take
 
 
-def _parse_args(argv: list) -> None:
-    """Answer `--help` and `--version`, and refuse anything else.
+def _parse_args(argv: list) -> argparse.Namespace:
+    """Answer `--help` and `--version`, and take the session to pick up from.
 
-    There are no options: the harness is driven by slash commands once it is
-    running. But it is installed as a command now, and the first thing anyone
-    types at an unfamiliar command is `--help`. Ignoring it and opening an
-    interactive session instead is the wrong answer to a reasonable question.
+    Almost everything is a slash command once the harness is running; what
+    cannot be is which conversation to open, because by the time there is a
+    prompt to type at, a new one has already been started. So the two ways of
+    naming one live here: `--resume` for a session you can name, and `-c` for
+    the one you were last in, in this directory.
+
+    Both spellings of each are accepted. `-resume` is the single dash the
+    request was written with, and `--resume` is what anyone who has used
+    another CLI will reach for first; refusing either would be pedantry.
     """
     parser = argparse.ArgumentParser(
         prog="simple-harness",
         description="A terminal AI assistant built for small local models.",
-        epilog="Run with no arguments to start a session. Everything else is a "
+        epilog="Run with no arguments to start a new session. Everything else is a "
                "slash command inside it - type /help there for the list.")
     parser.add_argument("-V", "--version", action="version",
                         version=f"simple-harness {__version__}")
-    parser.parse_args(argv)
+    picked = parser.add_mutually_exclusive_group()
+    picked.add_argument("-r", "-resume", "--resume", metavar="ID", dest="resume",
+                        help="resume a saved session by id or title (see /sessions)")
+    picked.add_argument("-c", "-continue", "--continue", dest="continue_here",
+                        action="store_true",
+                        help="resume the newest session last worked on in this directory")
+    return parser.parse_args(argv)
+
+
+def _session_to_resume(args: argparse.Namespace) -> str:
+    """The session id the command line asks for, or "" for a new conversation.
+
+    Neither flag falls back to a fresh session when it cannot find one, and
+    neither guesses between candidates: being dropped into an empty prompt when
+    you asked to continue something is how an afternoon's context gets lost
+    quietly. Both say what they looked for and stop.
+    """
+    if getattr(args, "continue_here", False):
+        here = os.getcwd()
+        sid = latest_in_dir(here)
+        if not sid:
+            print(f"\n  {S.ERR}✗ No saved session was last worked on here:{S.R} {S.WHITE}{here}{S.R}")
+            print(f"  {S.GRAY}Run with no arguments to start one, or name another with "
+                  f"{S.ACCENT}--resume <id>{S.GRAY}.{S.R}\n")
+            raise SystemExit(1)
+        return sid
+
+    query = (args.resume or "").strip()
+    if not query:
+        return ""
+    matches = find_sessions(query)
+    if not matches:
+        print(f"\n  {S.ERR}✗ No saved session matches: {query}{S.R}")
+        print(f"  {S.GRAY}Sessions are listed by {S.ACCENT}/sessions{S.GRAY} inside one.{S.R}\n")
+        raise SystemExit(1)
+    if len(matches) > 1:
+        print()
+        _show_ambiguous(query, matches, "Re-run with one of the ids above.")
+        raise SystemExit(1)
+    return matches[0][0]
 
 
 def cli() -> None:
@@ -632,13 +788,17 @@ def cli() -> None:
     would never reach them.
     """
     _use_utf8_output()
-    _parse_args(sys.argv[1:])
+    args = _parse_args(sys.argv[1:])
     # Before anything is started, and before the first turn can ask to run a
     # command: what this does to the machine it is on. Asked once per machine.
     if not terms.require():
         raise SystemExit(1)
+    # Resolved here rather than inside `main()`: a name that matches nothing, or
+    # matches several, is a mistake in the command that was typed, and the place
+    # to answer it is before a screen has been cleared and servers started.
+    resume_id = _session_to_resume(args)
     try:
-        asyncio.run(main())
+        asyncio.run(main(resume_id))
     except KeyboardInterrupt:
         print(f"\n\n  {S.GRAY}Goodbye!{S.R}\n")
     except Exception as e:

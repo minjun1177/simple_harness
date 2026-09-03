@@ -4,6 +4,7 @@
 # them missing stopped the whole program from starting - `config` is the base of
 # the import graph and builds SYSTEM_PROMPT at import time (ARCHITECTURE 5.2).
 # A machine with no `bs4` could not open a chat window, let alone search.
+import os
 import platform
 import re
 import shutil
@@ -64,6 +65,8 @@ try:
     from prompt_toolkit.formatted_text import ANSI
     PROMPT_TOOLKIT_AVAILABLE = True
 
+    from prompt_toolkit.completion import merge_completers
+
     class SlashCommandCompleter(Completer):
         def __init__(self, commands):
             self.commands = commands
@@ -74,6 +77,61 @@ try:
                 for cmd in self.commands:
                     if cmd.startswith(text):
                         yield Completion(cmd, start_position=-len(text))
+
+    # `@` at the start of a word opens this, and it lists what is actually in
+    # the directory being typed - so the path is picked from disk rather than
+    # remembered and mistyped. Arrow keys move through the menu and Tab inserts;
+    # both come from prompt_toolkit once the completions are yielded.
+    _AT_WORD = re.compile(r'(?:^|(?<=\s))@("[^"]*|\'[^\']*|[^\s]*)$')
+
+    class PathMentionCompleter(Completer):
+        """Files and directories for the `@` mention under the cursor.
+
+        A directory completes with its separator still attached and no space
+        after it, which is what makes typing straight on through `@src/` work:
+        the next keystroke re-opens this against the directory just entered.
+        """
+
+        def get_completions(self, document, complete_event):
+            match = _AT_WORD.search(document.text_before_cursor)
+            if not match:
+                return
+            typed = match.group(1).lstrip("\"'")
+            directory, prefix = os.path.split(typed)
+            base = os.path.expanduser(directory) if directory else "."
+            try:
+                names = sorted(os.listdir(base), key=str.lower)
+            except OSError:
+                return                      # half-typed directory: nothing to offer
+
+            for name in names:
+                # Dotfiles stay out of the way until the dot is typed, which is
+                # the difference between a useful menu and 40 lines of .git.
+                if name.startswith(".") and not prefix.startswith("."):
+                    continue
+                if not name.lower().startswith(prefix.lower()):
+                    continue
+                is_dir = os.path.isdir(os.path.join(base, name))
+                full = os.path.join(directory, name) if directory else name
+                if is_dir:
+                    full += "/"
+                yield Completion(
+                    full,
+                    start_position=-len(typed),
+                    display=name + ("/" if is_dir else ""),
+                    display_meta="dir" if is_dir else _entry_size(os.path.join(base, name)),
+                )
+
+    def _entry_size(path) -> str:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return ""
+        for unit in ("B", "KB", "MB", "GB"):
+            if size < 1024 or unit == "GB":
+                return f"{size:.0f}{unit}" if unit == "B" else f"{size:.1f}{unit}"
+            size /= 1024
+        return ""
 except ImportError:
     PROMPT_TOOLKIT_AVAILABLE = False
 
@@ -104,6 +162,24 @@ AUTO_TITLE = True
 SESSION_TITLE = ""
 SESSION_TITLE_MAX_LEN = 60
 SESSION_SLUG_MAX_LEN = 48
+
+# The two markers a tool result may begin with, and the only two the harness
+# reads back out of one. `[Error]` means the tool ran and failed; `[System]`
+# means it was refused before it ran - a deny rule, a read-only stage, an
+# approval the user declined. Anything else is a result.
+#
+# They are anchors, never searched for: a page fetched by `get_url`, a file read
+# by `read_file` or the output of a `grep` may contain either string as ordinary
+# content, and treating that as a failure marks good output bad. They live here
+# because three modules need them and none can import the others - `tools`
+# writes them, `llm_client` counts them, `tui` colours them.
+TOOL_ERROR_PREFIX = "[Error]"
+TOOL_REFUSAL_PREFIX = "[System]"
+
+# A single `@path` can name a file of any size, and the context window is the
+# scarce thing. Cut at this many characters with a line saying so, rather than
+# letting one mention crowd out the conversation it was meant to inform.
+MENTION_MAX_CHARS = 40000
 
 SEARCH_MAX_RESULTS = 5
 
