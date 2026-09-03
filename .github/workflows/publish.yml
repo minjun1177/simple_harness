@@ -40,8 +40,10 @@ jobs:
         # `simple_harness.__version__` stops the release here rather than
         # putting the wrong number on PyPI for good.
         env:
-          TAG: ${{ github.ref_name }}
-          EVENT: ${{ github.event_name }}
+          # Empty on a branch, so a dry run from main still builds. A hand-run
+          # dispatch from a tag is now checked too - that is how a 0.3.1 wheel
+          # got built out of a v0.4.0 checkout.
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: python .github/check_version.py
 
       - uses: actions/upload-artifact@v4
