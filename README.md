@@ -1174,7 +1174,7 @@ The interactive terminal supports special slash commands to control options and 
 | Command | Description |
 | :--- | :--- |
 | `/help` | Display the list of available commands |
-| `/usage` | Token cost per turn, as an ASCII chart, plus the cumulative total. One bar is one thing you asked for, tool calls included |
+| `/usage` | Token cost per turn, as an ASCII chart, plus the cumulative total and what every request pays before the conversation starts. One bar is one thing you asked for, tool calls included |
 | `/model` | Show the connected provider and pick another of its models |
 | `/models` | List the models the connected provider offers |
 | `/clear` | Clear the terminal display and reset conversation history |

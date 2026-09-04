@@ -249,10 +249,13 @@ MAX_TOOL_CALLS = 10
 # being asked about it. Depth 1 means sub-agents cannot hire sub-agents, which
 # is the only setting with a bounded cost.
 # Hosted providers get the tool list through their own function-calling
-# interface instead of the <tool_call> text protocol: more accurate, and about
-# 12KB less prompt per turn. Ollama ignores this - the text protocol and its
-# JSON repair are what make small local models work. Set False to force text
-# everywhere, e.g. against an OpenAI-compatible server that has no tool support.
+# interface instead of the <tool_call> text protocol. It is more accurate, and
+# it is about 12KB less *prompt text* - but not less prompt, which is what
+# costs: measured against gemma4:e4b the two come to 6,013 and 5,958 tokens, a
+# difference of 55. The schemas move out of the system prompt and into the
+# request's own `tools` field, and they are tokenised either way. Choose this
+# for accuracy, not to save context. Set False to force text everywhere, e.g.
+# against an OpenAI-compatible server that has no tool support.
 NATIVE_TOOLS = True
 
 # Commit each file an AI tool changes, on its own, so /undo can take it back.

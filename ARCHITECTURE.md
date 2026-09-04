@@ -656,6 +656,19 @@ it.
   and far more stable than an inclusion list would be. `settings.json` records
   only the values that differ from this file's, so a default improved in a
   later release still reaches anybody who never overrode it.
+- **`_get_conv_pairs` does not count turns**, and `/usage` no longer calls its
+  answer one. It opens a new block at every user message that is not a tool
+  result, and the harness writes several of those itself - each of deepthink's
+  six stage instructions, the nudge after an empty reply, the one after an
+  unparseable call, a channel note, a `!` command. One question answered by
+  deepthink is one turn and seven blocks. It is the right unit for what it is
+  for, which is what compression keeps or drops.
+- **The tool list costs the same wherever it travels.** Over the text protocol
+  it is in the system prompt; over a native interface it is in the request's
+  own `tools` field. Against gemma4:e4b the two prompts come to 6,013 and 5,958
+  tokens - a difference of 55. `tui._fixed_overhead` adds the schemas back in
+  for the native case, because counting `messages[0]` alone would report 1,866
+  and hide two thirds of what each request actually pays.
 - **`config.token_history` has one entry per request to the model, not per
   turn.** A question answered with four tool calls leaves five entries. They
   carry the turn they belong to, and `context.token_turns` is the only thing

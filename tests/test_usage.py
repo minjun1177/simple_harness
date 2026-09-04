@@ -195,6 +195,79 @@ finally:
 check("but a turn of one request is shown exactly as it always was",
       "this turn" not in re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", buf.getvalue()))
 
+# ---------------------------------------------------------------------------
+print("\n--- the two counts on that screen are not the same count ---")
+# `_get_conv_pairs` opens a new block at every user message that is not a tool
+# result, and the harness writes several of those itself. One question answered
+# by deepthink is one turn and seven blocks, and calling both of them "turns"
+# on one screen said the conversation was seven times what it was.
+from simple_harness import deepthink                                # noqa: E402
+one_question = [{"role": "system", "content": "s"},
+                {"role": "user", "content": "만들어줘"}]
+for number, stage in enumerate(deepthink.STAGES, 1):
+    one_question += [{"role": "user", "content": f"[Deepthink {number}/6 - {stage.key}]"},
+                     {"role": "assistant", "content": "ok"},
+                     {"role": "user", "content": "[Tool Result for 'read_file']:\nx"}]
+blocks = len(context._get_conv_pairs(one_question))
+check("one deepthink question is seven blocks", blocks == 7, str(blocks))
+
+config.token_history[:] = [{"prompt": 8600, "completion": 375, "turn": 1}
+                           for _ in range(16)]
+buf, real = io.StringIO(), sys.stdout
+sys.stdout = buf
+try:
+    tui.display_usage_graph(one_question)
+finally:
+    sys.stdout = real
+printed = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", buf.getvalue())
+check("but it is still one turn", "turns 1 " in printed,
+      printed[printed.find("turns"):][:36])
+check("and the seven are no longer called turns too",
+      "blocks 7" in printed and printed.count("turns") == 1, printed)
+
+# The largest single thing in a short conversation's context, and the screen
+# never used to say so - it had to be worked out by hand.
+config.NATIVE_TOOLS = False
+config.SYSTEM_PROMPT = __import__(
+    "simple_harness.systemprompt", fromlist=["x"]).systemprompt()
+with_prompt = [{"role": "system", "content": config.SYSTEM_PROMPT},
+               {"role": "user", "content": "x" * 4000}]
+buf, real = io.StringIO(), sys.stdout
+sys.stdout = buf
+try:
+    tui.display_usage_graph(with_prompt)
+finally:
+    sys.stdout = real
+printed = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", buf.getvalue())
+check("the fixed per-request overhead is reported", "fixed" in printed,
+      printed[printed.find("fixed"):][:80])
+# Not asserted as an absolute number of tokens: the estimator calibrates
+# itself against whatever the provider last reported, and the scripted one
+# above reported figures of its own. What must hold is the shape - over the
+# text protocol the whole tool list is in messages[0], and it dominates.
+overhead = tui._fixed_overhead(with_prompt)
+check("over the text protocol that is messages[0] and nothing else",
+      overhead == tui._estimate_tokens(with_prompt[:1]), f"~{overhead:,}")
+check("and the tool list is most of what makes it big",
+      len(config.SYSTEM_PROMPT) > 20000
+      and "read_file" in config.SYSTEM_PROMPT,
+      f"{len(config.SYSTEM_PROMPT):,} chars")
+
+# Over a native interface the tool list is not in messages[0] at all - it goes
+# in the request's own `tools` field. Counting only messages[0] there would
+# report about a third of what the request actually costs.
+config.NATIVE_TOOLS = True
+native_prompt = __import__(
+    "simple_harness.systemprompt", fromlist=["x"]).systemprompt()
+native = [{"role": "system", "content": native_prompt}]
+if llm_client.native_enabled():
+    check("a native provider is charged for its schemas too",
+          tui._fixed_overhead(native) > tui._estimate_tokens(native) * 2,
+          f"{tui._fixed_overhead(native):,} vs messages[0] {tui._estimate_tokens(native):,}")
+else:
+    print("  [skip] no native provider connected here")
+config.NATIVE_TOOLS = False
+
 config.token_history.clear()
 config.turn_index = 0
 

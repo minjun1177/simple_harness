@@ -537,6 +537,30 @@ def _fmt_tokens(prompt_t: int, comp_t: int, total_dur: float, eval_dur: float,
     print()
 
 
+def _fixed_overhead(messages: list[dict]) -> int:
+    """What every request pays before the conversation is even counted.
+
+    Almost all of it is the tool list, and *where* the tool list travels is not
+    the point: over the text protocol it is in the system prompt, over a native
+    interface it is in the request's own `tools` field instead - and it is
+    tokenised either way. Measured against gemma4:e4b the two come to 6,013 and
+    5,958 tokens. Counting only `messages[0]` would report 1,866 for the native
+    one and quietly hide two thirds of the bill.
+    """
+    if not messages:
+        return 0
+    total = _estimate_tokens(messages[:1])
+    try:
+        from simple_harness import llm_client
+        if llm_client.native_enabled():
+            import json as _json
+            total += _estimate_tokens([{"role": "user", "content": _json.dumps(
+                llm_client.native_tools(), ensure_ascii=False)}])
+    except Exception:
+        pass            # a display must not fail because a provider is down
+    return total
+
+
 def display_usage_graph(messages: list[dict]):
     if not config.token_history:
         print(f"  {S.GRAY}No token usage data yet.{S.R}")
@@ -602,8 +626,26 @@ def display_usage_graph(messages: list[dict]):
     usage_pct = min(100, int(est_tokens / max(1, budget) * 100))
     usage_color = S.OK if usage_pct < 60 else (S.WARN if usage_pct < 85 else S.ERR)
     pairs = _get_conv_pairs(messages)
-    
+    overhead = _fixed_overhead(messages)
+
     print(f"\n  {S.BOLD}Session Context Usage{S.R}")
-    print(f"  {S.GRAY}turns{S.R}  {S.WHITE}{len(pairs)}{S.R}")
+    # NOT "turns". `_get_conv_pairs` starts a new block at every user message
+    # that is not a tool result, and the harness writes several of those
+    # itself: each of deepthink's six stage instructions, the nudge after an
+    # empty reply, the one after an unparseable call, a channel note, a `!`
+    # command. So one question can be seven blocks, and calling both numbers
+    # "turns" on one screen said the conversation was seven times what it was.
+    print(f"  {S.GRAY}blocks{S.R} {S.WHITE}{len(pairs)}{S.R} "
+          f"{S.MUTED}(what compression keeps or drops){S.R}")
     print(f"  {S.GRAY}ctx{S.R}    {S.WHITE}{len(messages)} messages{S.R}")
-    print(f"  {S.GRAY}tokens{S.R} {usage_color}~{est_tokens:,}{S.R} {S.MUTED}/ {budget:,} ({usage_pct}%){S.R}\n")
+    print(f"  {S.GRAY}tokens{S.R} {usage_color}~{est_tokens:,}{S.R} {S.MUTED}/ {budget:,} ({usage_pct}%){S.R}")
+    if overhead:
+        # Of the whole request, not of `messages`: over a native interface the
+        # tool schemas are counted in `overhead` but travel beside the message
+        # list, so dividing by the message list alone can exceed 100%.
+        beside = overhead - (_estimate_tokens(messages[:1]) if messages else 0)
+        share = min(100, int(overhead / max(1, est_tokens + beside) * 100))
+        print(f"  {S.GRAY}fixed{S.R}  {S.WHITE}~{overhead:,}{S.R} "
+              f"{S.MUTED}of that is the system prompt and tool list - "
+              f"{share}% of each request, and re-sent with every one{S.R}")
+    print()
