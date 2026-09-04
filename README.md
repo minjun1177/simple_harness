@@ -518,6 +518,51 @@ which is a place people commit from. On Linux and macOS the file is owner-only
 the file takes whatever ACL its directory gives it; `%USERPROFILE%` is
 per-user, but if that matters to you, keep the key in the environment instead.
 
+### Prompt caching
+
+Every request re-sends the same ~6,000 tokens of system prompt and tool
+schemas. Against Ollama that is re-counted but not re-computed - llama.cpp
+reuses the KV cache for an unchanged prefix, so a 6,000-token prefix costs
+about 0.05s to "process" the second time. Against a hosted API it is billed
+every time, and a turn that takes sixteen tool calls pays it sixteen times.
+
+The three hosted providers split two ways, and only one needed code:
+
+| Provider | Caching | What the harness does |
+| :--- | :--- | :--- |
+| Anthropic | Explicit - nothing is cached without a `cache_control` breakpoint | Marks two: the end of the system prompt, and the end of the conversation so far |
+| OpenAI | Automatic above a per-model minimum | Nothing to send; reads `cached_tokens` back |
+| Gemini | Automatic ("implicit caching") on 2.5 and newer | Nothing to send; reads `cachedContentTokenCount` back |
+
+Anthropic renders `tools`, then `system`, then `messages`, so the single
+breakpoint on the system block covers the tool schemas too - which is two
+thirds of the fixed cost. The second breakpoint sits on the last message, so
+the next request in a tool loop reads the whole conversation before it back
+out of the cache instead of paying for it again.
+
+**The reporting is the part that matters.** Caching is a prefix match: one byte
+that moves invalidates everything after it, and it fails *silently* - as a
+bill, not an error. So `/usage` prints what actually happened:
+
+```
+  cache 12,200 prompt tokens read from Anthropic's cache - 63% of all input, billed at a fraction
+```
+
+...and says so when it is not working:
+
+```
+  cache nothing read from Anthropic's cache in 4 requests. Either the prompt is
+        under that model's minimum, or something is rewriting the prefix
+```
+
+Nothing is claimed for Ollama, which reuses its prefix locally, charges nothing
+for it and reports nothing about it.
+
+Two things in this harness rewrite the prefix and cost one miss each when they
+happen: the `<SUMMARY>` that compression writes into the system message, and
+`context._trim_tool_results` the first time a tool result exceeds its ceiling.
+Both converge - a result is not trimmed twice - so neither is a permanent miss.
+
 `/connect forget <provider>` takes a saved key back out. `/connect` only ever
 asked for a key when there was none, so one pasted into the wrong provider, or
 one that has since been revoked, used to stay in that file with nothing in the

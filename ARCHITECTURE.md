@@ -103,6 +103,9 @@ Four shapes carry everything. Keep them exactly.
 {"tool_call": {"name": str, "id": str, "arguments": dict,
                "error": str}}    # "error" only when the arguments would not parse
 {"done": True, "prompt_tokens": int, "completion_tokens": int,
+ "cached_tokens": int,          # prompt tokens the provider served from its
+                                # own cache; 0 on Ollama, which reuses its KV
+                                # cache locally and reports nothing
  "total_seconds": float, "eval_seconds": float}
 ```
 
@@ -621,6 +624,7 @@ for t in tests/*.py; do python "$t" || echo "FAILED: $t"; done
 | `test_vm.py` | That `run_python` takes its code as a raw block, remembers between calls, and says the namespace is gone every way it can die (§8a) |
 | `test_usage.py` | That a turn's requests are counted as one turn, that a resumed session carries on past its own, and that a session recorded before turns existed still renders |
 | `test_settings.py` | That `/set` records only what changed, that a broken settings file still starts, that a saved API key can be deleted, and that the banner fits the terminal |
+| `test_caching.py` | That the cache breakpoints reach Anthropic, that all three hosted providers' cache counters are read back, and that the prefix this harness builds is byte-stable enough to cache |
 | `test_docs.py` | That this file and `README.md` still describe the program that exists |
 
 `test_docs.py` is why the two documents can be trusted: it fails if either names
@@ -663,6 +667,12 @@ it.
   unparseable call, a channel note, a `!` command. One question answered by
   deepthink is one turn and seven blocks. It is the right unit for what it is
   for, which is what compression keeps or drops.
+- **Only Anthropic needs code to cache a prompt.** OpenAI and Gemini cache
+  automatically above a per-model minimum; Anthropic caches nothing without a
+  `cache_control` breakpoint. Its render order is `tools` -> `system` ->
+  `messages`, so the one marker on the system block covers the tool schemas
+  too - `providers._cached_system`. What all three needed was the *reporting*:
+  a prefix match fails silently, as a bill rather than an error.
 - **The tool list costs the same wherever it travels.** Over the text protocol
   it is in the system prompt; over a native interface it is in the request's
   own `tools` field. Against gemma4:e4b the two prompts come to 6,013 and 5,958

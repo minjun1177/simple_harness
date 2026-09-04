@@ -531,10 +531,44 @@ def _fmt_tokens(prompt_t: int, comp_t: int, total_dur: float, eval_dur: float,
         f"{S.GRAY}TPS: {tps:.1f}{S.R}"
     )
     if turn and turn.get("requests", 0) > 1:
+        cached = turn.get("cached", 0) or 0
+        share = (f" · {S.GRAY}{cached:,}{S.MUTED} of it cached"
+                 if cached else "")
         print(f"  {S.MUTED}─ this turn: "
               f"{S.GRAY}{turn['requests']}{S.MUTED} requests · "
-              f"{S.GRAY}{turn['prompt'] + turn['completion']:,}{S.MUTED} tokens{S.R}")
+              f"{S.GRAY}{turn['prompt'] + turn['completion']:,}{S.MUTED} tokens{share}{S.R}")
     print()
+
+
+def _report_cache(prompt_tokens: int, cached: int, requests: int) -> None:
+    """Whether the provider's prompt cache is actually being read.
+
+    Caching is a prefix match, and a byte that moves invalidates everything
+    after it - silently, as a bill rather than an error. So the number is
+    printed rather than the intention: a hit rate near zero after several
+    requests means something upstream is rewriting the prefix, and saying
+    "caching is on" would be reporting success nobody verified (5.10).
+
+    Ollama is the quiet case and the right one: it reuses the prefix in its own
+    KV cache, charges nothing for it, and reports nothing about it. Nothing is
+    claimed on its behalf.
+    """
+    from simple_harness import providers
+    try:
+        provider = providers.current()
+    except Exception:
+        return
+    if not provider.needs_key:          # a local model; nothing is billed
+        return
+    if cached:
+        share = int(cached / max(1, prompt_tokens) * 100)
+        print(f"  {S.OK}cache{S.R} {S.WHITE}{cached:,}{S.R} "
+              f"{S.MUTED}prompt tokens read from {provider.label}'s cache "
+              f"- {share}% of all input, billed at a fraction{S.R}")
+    elif requests > 2:
+        print(f"  {S.WARN}cache{S.R} {S.MUTED}nothing read from {provider.label}'s "
+              f"cache in {requests} requests. Either the prompt is under that "
+              f"model's minimum, or something is rewriting the prefix{S.R}")
 
 
 def _fixed_overhead(messages: list[dict]) -> int:
@@ -606,6 +640,7 @@ def display_usage_graph(messages: list[dict]):
         total_comp = sum(t["completion"] for t in turns)
         total_all = total_prompt + total_comp
         requests = sum(t["requests"] for t in turns)
+        total_cached = sum(t.get("cached", 0) or 0 for t in turns)
 
         print(f"\n  {S.BOLD}Cumulative Token Usage{S.R}")
         print(f"  {S.GRAY}prompt{S.R} {S.WHITE}{total_prompt:,}{S.R}  "
@@ -620,6 +655,7 @@ def display_usage_graph(messages: list[dict]):
         if busiest["requests"] > 1:
             print(f"  {S.MUTED}busiest turn: {busiest['requests']} requests, "
                   f"{busiest['prompt'] + busiest['completion']:,} tokens{S.R}")
+        _report_cache(total_prompt, total_cached, requests)
 
     est_tokens = _estimate_tokens(messages)
     budget = _get_ctx_budget()

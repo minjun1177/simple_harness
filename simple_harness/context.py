@@ -166,10 +166,12 @@ def token_turns(history: list[dict] | None = None) -> list[dict]:
     for entry in history:
         turn = entry.get("turn")
         if turn is None or turn != previous or not turns:
-            turns.append({"turn": turn, "prompt": 0, "completion": 0, "requests": 0})
+            turns.append({"turn": turn, "prompt": 0, "completion": 0,
+                          "cached": 0, "requests": 0})
         previous = turn
         turns[-1]["prompt"] += entry.get("prompt", 0) or 0
         turns[-1]["completion"] += entry.get("completion", 0) or 0
+        turns[-1]["cached"] += entry.get("cached", 0) or 0
         turns[-1]["requests"] += 1
     return turns
 

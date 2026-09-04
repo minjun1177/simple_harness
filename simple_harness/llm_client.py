@@ -233,6 +233,7 @@ async def stream_reply(messages: list[dict], tools: list | None = None,
 
     prompt_tokens = 0
     completion_tokens = 0
+    cached_tokens = 0
     total_duration = 0.0
     eval_duration = 0.0
 
@@ -261,6 +262,10 @@ async def stream_reply(messages: list[dict], tools: list | None = None,
             if chunk.get('done'):
                 prompt_tokens = chunk.get("prompt_tokens", 0)
                 completion_tokens = chunk.get("completion_tokens", 0)
+                # How much of the prompt was served from the provider's cache.
+                # Ollama reports nothing here and does not need to: its prefix
+                # is reused locally, at no charge and no report.
+                cached_tokens = chunk.get("cached_tokens", 0) or 0
                 total_duration = chunk.get("total_seconds", 0.0)
                 eval_duration = chunk.get("eval_seconds", 0.0)
 
@@ -335,6 +340,7 @@ async def stream_reply(messages: list[dict], tools: list | None = None,
             
     config.token_history.append({"prompt": prompt_tokens,
                                  "completion": completion_tokens,
+                                 "cached": cached_tokens,
                                  "turn": config.turn_index})
     # `messages` is still exactly what was sent - the reply is appended by the
     # caller - so this is a clean sample to calibrate the estimator against.

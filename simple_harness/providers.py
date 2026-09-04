@@ -138,6 +138,80 @@ def merge_runs(messages: list) -> list:
     return merged
 
 
+# ---------------------------------------------------------------------------
+# prompt caching
+# ---------------------------------------------------------------------------
+#
+# Every request re-sends the whole conversation, and the front of it never
+# changes: about 6,000 tokens of system prompt and tool schemas, of which the
+# 33 tool descriptions are two thirds. A turn that takes sixteen requests sends
+# that sixteen times. Against Ollama it is re-counted but not re-computed -
+# llama.cpp reuses the KV cache for an unchanged prefix - so it costs context
+# budget and nothing else. Against a hosted API it is billed every time.
+#
+# The three hosted providers divide into two kinds, and only one needs code:
+#
+#   Anthropic  explicit. A `cache_control` breakpoint marks where the cacheable
+#              prefix ends. Nothing is cached without one. `_cached_system`.
+#   OpenAI     automatic, on by default above a per-model minimum. Nothing to
+#              send; the only gap was that nobody could see whether it worked.
+#   Gemini     automatic ("implicit caching") on 2.5 and newer, same story.
+#
+# So what all three needed was the *reporting*: `cached_tokens` on the `done`
+# event. Caching is a prefix match, and a single byte that moves invalidates
+# everything after it - which fails silently, as a bill rather than an error.
+# The number that says whether it is working is the only thing that separates
+# "cached" from "assumed to be cached" (invariant 5.10).
+#
+# What must stay true for any of it to work, in this codebase:
+#   * `systemprompt()` must be byte-identical between requests. No clock, no
+#     uuid, no set iterated into text. It is, and `test_caching.py` checks it.
+#   * the tool list must be sent in the same order every time. It is: both
+#     `toolspec.native_schema` and `mcp_client.native_tool_schemas` walk fixed
+#     lists.
+#   * rewriting history rewrites the prefix. `context._trim_tool_results` and
+#     the `<SUMMARY>` that compression puts into `messages[0]` both do, and
+#     both cost one cache miss when they happen. They converge - a result is
+#     not trimmed twice - so this is a miss, not a permanent one.
+
+_CACHE_BREAKPOINT = {"type": "ephemeral"}       # the 5-minute TTL; a read refreshes it
+
+
+def _cached_system(system: str) -> list:
+    """The system prompt as one cacheable block.
+
+    Anthropic renders `tools` -> `system` -> `messages`, so a breakpoint on the
+    last system block covers the tool schemas as well - which is where two
+    thirds of the fixed cost is. One breakpoint, both halves.
+    """
+    return [{"type": "text", "text": system, "cache_control": dict(_CACHE_BREAKPOINT)}]
+
+
+def _cache_tail(conversation: list) -> list:
+    """Mark the end of the conversation so far as a second read point.
+
+    The system prefix alone leaves the growing half uncached, and the growing
+    half is what a tool loop re-sends sixteen times. This is the documented
+    multi-turn placement: a breakpoint on the last block of the most recently
+    appended turn, so the next request reads everything before it.
+
+    The list is rebuilt rather than mutated - `merge_runs` hands back fresh
+    dicts, but the caller's `messages` must not grow an Anthropic-shaped
+    content block either way (invariant 5.3: history is plain text).
+    """
+    if not conversation:
+        return conversation
+    marked = list(conversation)
+    last = dict(marked[-1])
+    content = last.get("content")
+    if not isinstance(content, str) or not content:
+        return conversation          # not a shape this knows how to mark
+    last["content"] = [{"type": "text", "text": content,
+                        "cache_control": dict(_CACHE_BREAKPOINT)}]
+    marked[-1] = last
+    return marked
+
+
 def _as_stream(make_chunks):
     """Turn a blocking generator into an async one, off the event loop.
 
@@ -422,22 +496,26 @@ class AnthropicProvider(Provider):
     def stream(self, messages: list, max_tokens: int | None = None,
                tools: list | None = None):
         system, conversation = split_system(messages)
+        # Two of the four breakpoints: the end of the fixed prefix (tools and
+        # system together - see `_cached_system`), and the end of the
+        # conversation so far, which is what a tool loop re-sends every time.
         payload = {
             "model": self.model,
             # Anthropic requires max_tokens; it is a cap, not a target.
             "max_tokens": token_budget(max_tokens),
-            "messages": merge_runs(conversation) or [{"role": "user", "content": "."}],
+            "messages": _cache_tail(merge_runs(conversation))
+                        or [{"role": "user", "content": "."}],
             "stream": True,
         }
         if system:
-            payload["system"] = system
+            payload["system"] = _cached_system(system)
         if tools:
             payload["tools"] = self.encode_tools(tools)
 
         def chunks():
             response = self._post_sse(f"{self.base_url}/v1/messages",
                                       self._headers(), payload)
-            prompt_tokens = completion_tokens = 0
+            prompt_tokens = completion_tokens = cached_tokens = 0
             pending = _PartialCalls()
             started = time.time()
             for _event, data in iter_sse(response):
@@ -453,6 +531,13 @@ class AnthropicProvider(Provider):
                 if kind == "message_start":
                     usage = (event.get("message") or {}).get("usage") or {}
                     prompt_tokens = usage.get("input_tokens", 0) or 0
+                    # `input_tokens` counts only what was NOT served from the
+                    # cache, so the three are added up to get what the request
+                    # actually carried - otherwise a working cache reads as a
+                    # prompt that suddenly shrank.
+                    cached_tokens = usage.get("cache_read_input_tokens", 0) or 0
+                    prompt_tokens += cached_tokens + (
+                        usage.get("cache_creation_input_tokens", 0) or 0)
                 elif kind == "content_block_start":
                     block = event.get("content_block") or {}
                     if block.get("type") == "tool_use":
@@ -479,7 +564,7 @@ class AnthropicProvider(Provider):
             yield from pending.drain()      # a stream cut short still reports
             elapsed = time.time() - started
             yield {"done": True, "prompt_tokens": prompt_tokens,
-                   "completion_tokens": completion_tokens,
+                   "completion_tokens": completion_tokens, "cached_tokens": cached_tokens,
                    "total_seconds": elapsed, "eval_seconds": elapsed}
 
         return _as_stream(chunks)
@@ -533,7 +618,7 @@ class OpenAIProvider(Provider):
                 response = self._post_sse(f"{self.base_url}/chat/completions",
                                           self._headers(), retry)
 
-            prompt_tokens = completion_tokens = 0
+            prompt_tokens = completion_tokens = cached_tokens = 0
             pending = _PartialCalls()
             started = time.time()
             for _event, data in iter_sse(response):
@@ -553,6 +638,14 @@ class OpenAIProvider(Provider):
                     prompt_tokens = usage.get("prompt_tokens", prompt_tokens) or prompt_tokens
                     completion_tokens = usage.get("completion_tokens",
                                                   completion_tokens) or completion_tokens
+                    # Caching here is automatic above a per-model minimum -
+                    # there is nothing to send. Both spellings are read because
+                    # the field moved between API surfaces, and an
+                    # OpenAI-compatible server may report neither.
+                    details = (usage.get("prompt_tokens_details")
+                               or usage.get("input_tokens_details") or {})
+                    if isinstance(details, dict):
+                        cached_tokens = details.get("cached_tokens", cached_tokens) or cached_tokens
                 for choice in event.get("choices") or []:
                     delta = choice.get("delta") or {}
                     if delta.get("reasoning_content"):
@@ -571,7 +664,7 @@ class OpenAIProvider(Provider):
             yield from pending.drain()
             elapsed = time.time() - started
             yield {"done": True, "prompt_tokens": prompt_tokens,
-                   "completion_tokens": completion_tokens,
+                   "completion_tokens": completion_tokens, "cached_tokens": cached_tokens,
                    "total_seconds": elapsed, "eval_seconds": elapsed}
 
         return _as_stream(chunks)
@@ -640,7 +733,7 @@ class GeminiProvider(Provider):
 
         def chunks():
             response = self._post_sse(url, self._headers(), payload)
-            prompt_tokens = completion_tokens = 0
+            prompt_tokens = completion_tokens = cached_tokens = 0
             started = time.time()
             for _event, data in iter_sse(response):
                 if not data.strip():
@@ -657,6 +750,10 @@ class GeminiProvider(Provider):
                 prompt_tokens = usage.get("promptTokenCount", prompt_tokens) or prompt_tokens
                 completion_tokens = usage.get("candidatesTokenCount",
                                               completion_tokens) or completion_tokens
+                # Implicit caching, on by default from 2.5 onwards; unlike
+                # Anthropic, promptTokenCount already includes this.
+                cached_tokens = usage.get("cachedContentTokenCount",
+                                          cached_tokens) or cached_tokens
                 for candidate in event.get("candidates") or []:
                     for part in (candidate.get("content") or {}).get("parts") or []:
                         call = part.get("functionCall")
@@ -677,7 +774,7 @@ class GeminiProvider(Provider):
                             yield {"text": text}
             elapsed = time.time() - started
             yield {"done": True, "prompt_tokens": prompt_tokens,
-                   "completion_tokens": completion_tokens,
+                   "completion_tokens": completion_tokens, "cached_tokens": cached_tokens,
                    "total_seconds": elapsed, "eval_seconds": elapsed}
 
         return _as_stream(chunks)
