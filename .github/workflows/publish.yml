@@ -73,6 +73,13 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
+          # A version that is already on the index is not an error here. The
+          # normal path is a hand-run dispatch to testpypi, then one to pypi,
+          # and only then a GitHub Release for the humans - and `published`
+          # fires this workflow again over files that have already gone up.
+          # PyPI never lets an upload be replaced, so this can only skip a
+          # no-op; it cannot quietly ship something different.
+          skip-existing: true
 
   pypi:
     needs: build
@@ -87,3 +94,5 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true       # see the note on the testpypi job
