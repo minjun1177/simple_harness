@@ -333,13 +333,20 @@ async def stream_reply(messages: list[dict], tools: list | None = None,
             try: await spin_task
             except asyncio.CancelledError: pass
             
-    config.token_history.append({"prompt": prompt_tokens, "completion": completion_tokens})
+    config.token_history.append({"prompt": prompt_tokens,
+                                 "completion": completion_tokens,
+                                 "turn": config.turn_index})
     # `messages` is still exactly what was sent - the reply is appended by the
     # caller - so this is a clean sample to calibrate the estimator against.
     context.observe_usage(messages, prompt_tokens)
     
     if not stream.saw_tool_call:
-        _fmt_tokens(prompt_tokens, completion_tokens, total_duration, eval_duration)
+        # The turn this request ends, so what is reported is what the question
+        # cost rather than what its last request cost. `/usage` groups the same
+        # way; the two would otherwise disagree about the same conversation.
+        turns = context.token_turns()
+        _fmt_tokens(prompt_tokens, completion_tokens, total_duration, eval_duration,
+                    turns[-1] if turns else None)
         
     return full_text
 

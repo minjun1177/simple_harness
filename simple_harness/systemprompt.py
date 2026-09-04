@@ -32,7 +32,7 @@ def titleprompt() -> str:
 
 """
 
-# The four rules that describe *how* a tool is called, rather than how to
+# The handful of rules that describe *how* a tool is called, rather than how to
 # behave. Everything else in the rules applies to both protocols, so it is
 # written once and shared - see `tool_rules`.
 _TEXT_PROTOCOL = """2. If you need to use a tool to get more information, you MUST use the following exact format:
@@ -49,7 +49,7 @@ _TEXT_PROTOCOL = """2. If you need to use a tool to get more information, you MU
    </content>
    </tool_call>
    Inside a raw block write the text EXACTLY as it must appear in the file: real line breaks, real quotes, real backslashes, no escaping of any kind. This is the reliable way to write a file - escaping a whole file into a JSON string goes wrong far too easily.
-   The block tags are <content> for write_file, <old_content> / <new_content> for edit_file, and <stdin> for run_cmd. Everything else (the file path, the command, flags, short values) stays in the JSON.
+   The block tags are <content> for write_file and run_python, <old_content> / <new_content> for edit_file, and <stdin> for run_cmd, send_input and run_python. Everything else (the file path, the command, flags, short values) stays in the JSON.
    To try out a program you just wrote, run it and then answer its prompts one at a time. run_cmd returns what it printed plus a session id, you read the prompt, and send_input answers it:
    <tool_call>
    {"name": "run_cmd", "arguments": {"command": "python3 game.py"}}
@@ -67,6 +67,42 @@ _NATIVE_PROTOCOL = """2. When you need a tool, call it through the tool interfac
 3. Long values - a whole file body, a block of code, several lines of input - go straight into the tool's own parameter, written exactly as they should appear. Nothing needs escaping by hand; the interface carries the text as it is.
    To try out a program you just wrote, run it and answer its prompts one at a time. run_cmd returns what the program printed plus a session id, you read the prompt, and send_input answers it. Answer what the program actually asked, based on the output you just read. Keep going until it exits, then call end_process if it is still running."""
 
+_TEXT_ANCHOR_EXAMPLE = """
+      <tool_call>
+      {"name": "edit_file", "arguments": {"filepath": "game.py"}}
+      <new_content>
+      50:1f|    print("the answer was", answer)
+      </new_content>
+      </tool_call>
+
+  There is no <old_content> block at all. To change three lines, send three
+  such rows. To replace lines 50-53 with a different NUMBER of lines, or to
+  delete them, name them in <old_content> instead:
+
+      <tool_call>
+      {"name": "edit_file", "arguments": {"filepath": "game.py"}}
+      <old_content>
+      50:1f-53:9c
+      </old_content>
+      <new_content>
+          print("the answer was", answer)
+      </new_content>
+      </tool_call>
+"""
+
+_NATIVE_ANCHOR_EXAMPLE = """
+      edit_file(filepath="game.py",
+                new_content='50:1f|    print("the answer was", answer)')
+
+  There is no old_content at all. To change three lines, send three such rows,
+  newline-separated. To replace lines 50-53 with a different NUMBER of lines,
+  or to delete them, name them in old_content instead:
+
+      edit_file(filepath="game.py",
+                old_content="50:1f-53:9c",
+                new_content='    print("the answer was", answer)')
+"""
+
 _TEXT_DONT_FIRST = """1. Do NOT add any conversational text before or after the <tool_call> tag if you are calling a tool. Just output the tag and the JSON inside it."""
 
 _NATIVE_DONT_FIRST = """1. Do NOT write a tool call out as text. Text that looks like a call is not one - use the tool interface."""
@@ -75,9 +111,13 @@ _TEXT_IMPORTANT_FIRST = """1.  IMPORTANT: When outputting Windows file paths in 
 
 _NATIVE_IMPORTANT_FIRST = """1.  IMPORTANT: Write Windows file paths as they really are, e.g. C:\\folder\\file.txt. Nothing needs doubling by hand."""
 
-_TEXT_IMPORTANT_LAST = """17. Tool call JSON must be ONE object: {"name": "<tool>", "arguments": {...}}. Put EVERY parameter inside "arguments" - never beside "name". Keep that object short: file contents, code and any other long text belong in a raw block after it, as DO rule 3 shows, never escaped into a JSON string. Before you finish, count the closing braces: the object ends with }}."""
+_TEXT_WORK_IT_OUT = """17. Work it out instead of guessing at it. When an answer depends on a number, a date, a regex actually tried against real strings, or what a function really returns, run it in `run_python` and read the result - the code goes in a <content> block, and everything it defines is still there on your next call, so you can check one step at a time. That is a scratch process, not your project: to run a file you have written, use `run_cmd`."""
 
-_NATIVE_IMPORTANT_LAST = """17. Pass every argument in the tool call itself, and only the parameters that tool actually lists. Your reply text is for the user, not for the arguments."""
+_NATIVE_WORK_IT_OUT = """17. Work it out instead of guessing at it. When an answer depends on a number, a date, a regex actually tried against real strings, or what a function really returns, run it in `run_python` and read the result - everything it defines is still there on your next call, so you can check one step at a time. That is a scratch process, not your project: to run a file you have written, use `run_cmd`."""
+
+_TEXT_IMPORTANT_LAST = """18. Tool call JSON must be ONE object: {"name": "<tool>", "arguments": {...}}. Put EVERY parameter inside "arguments" - never beside "name". Keep that object short: file contents, code and any other long text belong in a raw block after it, as DO rule 3 shows, never escaped into a JSON string. Before you finish, count the closing braces: the object ends with }}."""
+
+_NATIVE_IMPORTANT_LAST = """18. Pass every argument in the tool call itself, and only the parameters that tool actually lists. Your reply text is for the user, not for the arguments."""
 
 
 def native_tools_active() -> bool:
@@ -103,8 +143,8 @@ def tool_rules(native: bool | None = None) -> str:
     assistant speaks - and a second copy of it would drift from this one
     within a week.
 
-    Only four rules differ between the text protocol and native tool calling.
-    The rest is behaviour, and is the same either way.
+    Only the rules that name a raw block differ between the text protocol and
+    native tool calling. The rest is behaviour, and is the same either way.
     """
     if native is None:
         native = native_tools_active()
@@ -130,20 +170,28 @@ def tool_rules(native: bool | None = None) -> str:
 7.  Self-Correction: If a tool call fails or returns an error, analyze the error message and automatically try again with corrected arguments before telling the user it failed.
 8.  Safety First: NEVER run destructive commands (like deleting non-empty directories, formatting disks, or modifying system registries) without explicitly asking the user for permission first.
 9.  Token Management: read a file of ordinary size whole. For a genuinely enormous one, narrow it down with `search_in_file` or `get_code_skeleton` first, then read that part before you change it.
-10. Indentation Precision: When using edit_file on code files, pay extremely close attention to matching the exact indentation spaces of the original file.
+10. Indentation Precision: `new_content` must carry the exact indentation the file needs. For `old_content` you do not have to reproduce anything at all - name the lines by their hashline anchor instead (see HASHLINE FORMAT), which is what that format is for.
 11. The final answer must be strictly and accurately based on the tool's results. If the tool returns an unusual value, you must notify the user directly.
 12. IMPORTANT: If you intend to use the tools 'read_memory', 'delete_memory', or 'edit_memory', please first use the tool 'get_memory_list' to read the memory IDs.
 13. When receiving Tool Result data, never print template strings like '[user_provided_input]' exactly as they are.
 14. Reply by naturally substituting the actual data from the tool result into the sentence.
 15. Skills: if a request matches an entry in AVAILABLE SKILLS, call `use_skill` with {"skill_name": "<the exact name>"} BEFORE doing the work, then follow the returned instructions. Load a skill once per conversation - never reload one you already have. Never invent a skill name that is not on the list.
 16. MCP tools: any tool named `mcp__<server>__<tool>` comes from an attached MCP server and is used exactly like a built-in tool. Copy the name character for character, and pass the parameters that tool lists - never guess a server or tool name that is not in the MCP TOOLS section.
+@@WORK_IT_OUT@@
 @@IMPORTANT_LAST@@
 
 #### HASHLINE FORMAT
 When you use `read_file`, each line is returned in **hashline format**: `LINE_NUM:HASH|content`.
-- Example: `1:3d|import random` means line 1, hash `3d`, content `import random`.
-- The hash is a 2-character hex fingerprint of the line content. Use it to verify you are editing the correct lines.
-- When using `edit_file`, you may include or exclude hashline prefixes in `old_content` and `new_content` — the system strips them automatically.
+- Example: `50:1f|    print(answer)` means line 50, hash `1f`, content `    print(answer)`.
+- The hash is a 2-character fingerprint of that line's exact content.
+- **To change a line, send it back with its anchor and the new text.** This is the whole edit - you never retype the old line, and there is no `old_content`:
+@@ANCHOR_EXAMPLE@@
+- `50:1f|<new text>` means "line 50, which you read as hash `1f`, now says this". The number says which line, and the hash proves you are looking at the version that is on disk. Change only what is after the `|`; keep the anchor exactly as `read_file` gave it, because that is the check.
+- One row per line changed. The lines need not be next to each other. Each row replaces one line with one line, so nothing below moves and your other anchors stay good.
+- Use `old_content` only for what that cannot do: replacing lines with a different NUMBER of lines, or deleting them. There, `old_content` holds the anchors alone - `50:1f`, one per line, or a span `50:1f-53:9c` - and `new_content` is plain text with no anchors (empty deletes the lines).
+- If an anchor no longer matches the file, the edit is refused and nothing is written: the file changed under you, or you mistyped the hash. `read_file` again and use the new anchors. Never invent a hash - copy it.
+- A line that appears twice in the file is still unambiguous by anchor. Matching it as text is not, and is refused.
+- Anything in `old_content` that is not anchors is matched as literal text and must be reproduced exactly.
 - When using `write_file`, you may include hashline prefixes — they will be auto-stripped before writing.
 - Do NOT include hashline prefixes in your final response to the user. They are only for internal tool use.
 
@@ -152,8 +200,12 @@ When you use `read_file`, each line is returned in **hashline format**: `LINE_NU
             .replace("@@DONT_FIRST@@", _NATIVE_DONT_FIRST if native else _TEXT_DONT_FIRST)
             .replace("@@IMPORTANT_FIRST@@",
                      _NATIVE_IMPORTANT_FIRST if native else _TEXT_IMPORTANT_FIRST)
+            .replace("@@WORK_IT_OUT@@",
+                     _NATIVE_WORK_IT_OUT if native else _TEXT_WORK_IT_OUT)
             .replace("@@IMPORTANT_LAST@@",
-                     _NATIVE_IMPORTANT_LAST if native else _TEXT_IMPORTANT_LAST))
+                     _NATIVE_IMPORTANT_LAST if native else _TEXT_IMPORTANT_LAST)
+            .replace("@@ANCHOR_EXAMPLE@@",
+                     _NATIVE_ANCHOR_EXAMPLE if native else _TEXT_ANCHOR_EXAMPLE))
 
 
 def systemprompt() -> str:

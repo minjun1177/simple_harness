@@ -143,6 +143,37 @@ def _trim_tool_results(messages: list[dict], max_chars: int = 3000) -> list[dict
     return result
 
 
+def token_turns(history: list[dict] | None = None) -> list[dict]:
+    """`config.token_history` folded into one entry per turn.
+
+    The raw history has one entry per *request to the model*, and answering one
+    thing the person asked for takes as many requests as it takes tools - plus
+    six under deepthink, plus a whole sub-agent conversation. Reporting those
+    separately said the person had asked five questions when they had asked one,
+    and put the cost of a turn in five places.
+
+    `requests` is kept because it is the part that was worth knowing: a turn
+    that took nine requests is a turn worth looking at.
+
+    An entry with no turn number comes from a session recorded before this
+    existed. There is nothing to group it by, so it stands alone, exactly as it
+    used to - and never merges with the entry beside it, which would invent a
+    grouping the file does not support.
+    """
+    history = config.token_history if history is None else history
+    turns: list[dict] = []
+    previous = None
+    for entry in history:
+        turn = entry.get("turn")
+        if turn is None or turn != previous or not turns:
+            turns.append({"turn": turn, "prompt": 0, "completion": 0, "requests": 0})
+        previous = turn
+        turns[-1]["prompt"] += entry.get("prompt", 0) or 0
+        turns[-1]["completion"] += entry.get("completion", 0) or 0
+        turns[-1]["requests"] += 1
+    return turns
+
+
 def _get_conv_pairs(messages: list[dict]) -> list[list[dict]]:
     pairs: list[list[dict]] = []
     current: list[dict] = []

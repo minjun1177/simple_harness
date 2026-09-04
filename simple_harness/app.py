@@ -8,6 +8,7 @@ from simple_harness import __version__
 from simple_harness import config
 from simple_harness import paths
 from simple_harness import terms
+from simple_harness import channel
 from simple_harness import deepthink
 from simple_harness import git_ops
 from simple_harness import skills
@@ -17,9 +18,12 @@ from simple_harness import providers
 from simple_harness import connect
 from simple_harness import mentions
 from simple_harness import tools
+from simple_harness import vm
 from simple_harness.config import S
 from simple_harness.systemprompt import systemprompt as _build_system_prompt
-from simple_harness.tui import _welcome, _show_help, _show_skills, _show_mcp, _show_perms, _fmt_tool_call, _fmt_tool_result, display_usage_graph, _hr
+from simple_harness.tui import (_welcome, _show_help, _show_skills, _show_mcp, _show_perms,
+                                _show_settings, _fmt_setting, _fmt_tool_call, _fmt_tool_result,
+                                display_usage_graph, _hr)
 from simple_harness.renderer import _render_full
 from simple_harness.session import (save_session, load_session, list_sessions, find_sessions,
                      latest_in_dir, rename_session, generate_session_title, clean_title)
@@ -58,12 +62,14 @@ def _adopt_session(loaded) -> list[dict]:
         messages = loaded.get("messages", [])
         config.token_history.clear()
         config.token_history.extend(loaded.get("token_history", []))
+        config.resume_turns()
         config.MODEL = loaded.get("model", config.MODEL)
         config.CUSTOM_PERSONA = loaded.get("persona", config.CUSTOM_PERSONA)
         config.SESSION_TITLE = loaded.get("title", "")
     else:                                   # a transcript from before version 2
         messages = loaded
         config.token_history.clear()
+        config.resume_turns()
         config.SESSION_TITLE = ""
     if not messages or messages[0].get("role") != "system":
         # Every later turn addresses messages[0] as the system message. A file
@@ -190,6 +196,233 @@ def _report_strays() -> None:
     print(f"  {S.GRAY}    mv {' '.join(strays)} {paths.home()}/{S.R}\n")
 
 
+def _agent_label() -> str:
+    """How this session appears to the other agents: its model, and its subject."""
+    if config.SESSION_TITLE:
+        return f"{config.MODEL} - {config.SESSION_TITLE}"
+    return config.MODEL
+
+
+def _report_agents(agent_id: str) -> None:
+    """Say who else is already working here. Silent when nobody is.
+
+    A solo session should not be told about a feature it has no use for, and a
+    second terminal opened on the same project should not have to go looking to
+    find out it is not alone.
+    """
+    if not agent_id:
+        return
+    others = channel.peers()
+    if not others:
+        return
+    print(f"  {S.INFO}◆ You are agent {S.BOLD}{agent_id}{S.R}{S.INFO} here. "
+          f"{len(others)} other agent(s) working in this project:{S.R}")
+    for record in others:
+        holds = ", ".join(record.get("holds") or [])
+        print(f"  {S.GRAY}•{S.R} {S.WHITE}{record['id']}{S.R} "
+              f"{S.MUTED}{record.get('label') or 'unknown model'}"
+              f"{'  holding ' + holds if holds else ''}{S.R}")
+    print(f"  {S.MUTED}  They can see you too. {S.GRAY}/agents{S.MUTED} for the "
+          f"board.{S.R}\n")
+
+
+def _show_arrivals() -> None:
+    """Print what other agents have said, as soon as the terminal is free.
+
+    The model gets the same messages at the start of its next turn - the two
+    have separate cursors on purpose, because a message the person has read on
+    screen has not yet been read by the model, and the other way round.
+    """
+    try:
+        for entry in channel.take_for_screen():
+            print(f"  {S.PURPLE}✉ {channel.describe(entry)}{S.R}")
+    except Exception:
+        pass          # the board is a convenience; it never stops the prompt
+
+
+async def _watch_channel() -> None:
+    """While a prompt is waiting for a line, watch for another agent's message.
+
+    Without this a reply only appears after the person presses Enter, which for
+    the agent that asked the question means the answer arrives at some point
+    after it stopped being useful. It runs only for as long as the prompt is
+    open, so nothing here can print over a streaming answer.
+    """
+    while True:
+        await asyncio.sleep(max(0.5, float(getattr(config, "CHANNEL_POLL_SECONDS", 2))))
+        try:
+            channel.heartbeat(_agent_label())
+            _show_arrivals()
+        except Exception:
+            return
+
+
+async def _read_line(session_pt) -> str:
+    """One line from the person, with the channel watched while they type."""
+    if session_pt is None:
+        _show_arrivals()
+        return input(f"  {S.USER_CLR}{S.BOLD}❯{S.R} ").strip()
+
+    _show_arrivals()
+    # `ANSI` lives behind the prompt_toolkit guard in `config`, so it is reached
+    # the same way `main` reaches it rather than imported at module level.
+    ANSI = config.ANSI
+    watcher = asyncio.ensure_future(_watch_channel())
+    # `patch_stdout` is what lets the watcher print *above* the prompt rather
+    # than through the middle of what is being typed.
+    keep_prompt_intact = getattr(config, "patch_stdout", None)
+    try:
+        if keep_prompt_intact is None:
+            return (await session_pt.prompt_async(
+                ANSI(f"  {S.USER_CLR}{S.BOLD}❯{S.R} "))).strip()
+        with keep_prompt_intact():
+            return (await session_pt.prompt_async(
+                ANSI(f"  {S.USER_CLR}{S.BOLD}❯{S.R} "))).strip()
+    finally:
+        watcher.cancel()
+
+
+def _agents_command(rest: str) -> None:
+    """`/agents`, and the three things a person can do to the board by hand."""
+    # Split on the first word rather than matched with `startswith`: otherwise
+    # `/agents saying hello` would be read as `say` and send "ing hello".
+    verb, _, argument = rest.strip().partition(" ")
+    verb, argument = verb.lower(), argument.strip()
+
+    if verb in ("on", "off") and not argument:
+        config.CHANNEL_ENABLED = verb == "on"
+        if config.CHANNEL_ENABLED:
+            agent_id = channel.join(_agent_label())
+            print(f"  {S.OK}✓ Agent channel is ON.{S.MUTED} This session is "
+                  f"{agent_id or 'unregistered'}.{S.R}\n")
+        else:
+            channel.leave()
+            print(f"  {S.INFO}✓ Agent channel is OFF.{S.MUTED} Other agents can "
+                  f"no longer see this session, and its claims are released.{S.R}\n")
+        return
+
+    if verb == "say":
+        if not argument:
+            print(f"  {S.ERR}✗ Usage: /agents say <message>{S.R}\n")
+            return
+        ok, said = channel.send(argument)
+        print(f"  {S.OK}✓ {said.capitalize()}.{S.R}\n" if ok
+              else f"  {S.ERR}✗ Not sent: {said}.{S.R}\n")
+        return
+
+    if verb == "release":
+        target = argument
+        if not target:
+            print(f"  {S.ERR}✗ Usage: /agents release <path>{S.R}\n")
+            return
+        # The one way past another agent's claim, and deliberately not something
+        # the model can reach: the person is the only one here who can see both
+        # terminals and decide which of them should be holding the file.
+        dropped = channel.force_release(target)
+        print(f"  {S.OK}✓ Released {', '.join(dropped)}.{S.R}\n" if dropped
+              else f"  {S.WARN}⚠ Nothing there is claimed: {target}{S.R}\n")
+        return
+
+    _show_agents()
+
+
+def _set_command(rest: str, messages: list[dict]) -> None:
+    """`/set`: read and change a setting without editing `config.py`.
+
+    `/set`              every setting, with the changed ones marked
+    `/set NAME`         one of them
+    `/set NAME value`   change it, for this session and the next
+    `/set NAME default` put it back to what `config.py` says
+    """
+    name, _, value = rest.strip().partition(" ")
+    if not name or not value.strip():
+        _show_settings(name)
+        return
+
+    ok, detail = config.set_setting(name, value)
+    if not ok:
+        print(f"  {S.ERR}✗ {detail}{S.R}\n")
+        return
+
+    name = name.strip().upper()
+    print(f"  {S.OK}✓ {name} = {_fmt_setting(getattr(config, name))}{S.R} "
+          f"{S.MUTED}({detail}){S.R}")
+    # Some of them are part of the system prompt - NATIVE_TOOLS decides whether
+    # the tool catalogue is in it at all - so it is rebuilt every time rather
+    # than only for the ones somebody remembered to list here.
+    _refresh_system_prompt(messages)
+    print()
+
+
+def _vm_command(rest: str) -> None:
+    """`/vm`: what the Python scratch process is holding, and how to clear it.
+
+    The VM keeps a namespace across a whole session and lives in a directory of
+    its own, so both are things a person may reasonably want to see or empty
+    without having to ask the model to do it for them.
+    """
+    verb = rest.strip().lower()
+    state = vm.state()
+
+    if verb in ("reset", "clear"):
+        result = vm.run("pass", reset=True)
+        print(f"  {S.OK}✓ The Python VM is empty again.{S.R}\n" if not result.get("crashed")
+              else f"  {S.ERR}✗ {result['crashed']}.{S.R}\n")
+        return
+
+    if verb in ("stop", "off"):
+        vm.shutdown()
+        print(f"  {S.INFO}✓ The Python VM was stopped.{S.MUTED} The next "
+              f"run_python starts a new one.{S.R}\n")
+        return
+
+    print()
+    print(f"  {S.BOLD}{S.ACCENT}Python VM{S.R}")
+    print(f"  {_hr(width=44)}")
+    if not state["alive"]:
+        print(f"  {S.MUTED}not running{S.R} {S.GRAY}- the next run_python starts it{S.R}")
+    else:
+        print(f"  {S.OK}running{S.R}  {S.GRAY}{state['calls']} call(s), "
+              f"up {state['age']:.0f}s{S.R}")
+    print(f"  {S.GRAY}scratch directory:{S.R} {state['directory']}")
+    print(f"  {S.GRAY}per call:{S.R} {config.VM_TIMEOUT}s, "
+          f"{config.VM_OUTPUT_CHARS} chars of output"
+          + (f", {config.VM_MEMORY_MB}MB" if os.name != "nt" else ""))
+    print(f"  {S.MUTED}/vm reset{S.R} {S.GRAY}empties it, {S.MUTED}/vm stop{S.GRAY} "
+          f"ends the process{S.R}\n")
+
+
+def _show_agents() -> None:
+    """The board: who is here, what they are holding, and what has been said."""
+    if not config.CHANNEL_ENABLED:
+        print(f"  {S.WARN}⚠ The agent channel is off.{S.MUTED} "
+              f"{S.GRAY}/agents on{S.MUTED} turns it back on.{S.R}\n")
+        return
+    here = channel.agents()
+    mine = channel.me()
+    print()
+    print(f"  {S.BOLD}{S.ACCENT}Agents in {channel.workspace()}{S.R}")
+    print(f"  {_hr(width=44)}")
+    if not here:
+        print(f"  {S.GRAY}nobody, not even this session{S.R}")
+    for record in here:
+        who = f"{record['id']} (you)" if record["id"] == mine else record["id"]
+        holds = ", ".join(record.get("holds") or []) or "nothing"
+        print(f"  {S.ACCENT}{who:12}{S.R} {S.WHITE}{record.get('label') or '?'}{S.R}")
+        print(f"  {' ' * 12} {S.MUTED}started {channel.ago(record.get('started'))}, "
+              f"holding {holds}{S.R}")
+    recent = channel.read_board()["messages"][-6:]
+    if recent:
+        print()
+        print(f"  {S.BOLD}{S.ACCENT}Recently said{S.R}")
+        print(f"  {_hr(width=44)}")
+        for entry in recent:
+            print(f"  {S.MUTED}{channel.ago(entry.get('at')):>8}{S.R} "
+                  f"{S.GRAY}{channel.describe(entry)}{S.R}")
+    print(f"\n  {S.MUTED}/agents say <text> to talk to them, /agents release "
+          f"<path> to take a file back.{S.R}\n")
+
+
 async def main(resume_id: str = "") -> None:
 
     if config.CURRENT_OS == "Windows":
@@ -214,6 +447,7 @@ async def main(resume_id: str = "") -> None:
     _welcome()
     _report_mcp_problems(failed_mcp)
     _report_strays()
+    _report_agents(channel.join(_agent_label()))
 
     if resume_id:
         if resumed:
@@ -227,9 +461,9 @@ async def main(resume_id: str = "") -> None:
     if config.PROMPT_TOOLKIT_AVAILABLE:
         paths.ensure_home()          # FileHistory opens its file straight away
         from simple_harness.config import (SlashCommandCompleter, PathMentionCompleter,
-                                      merge_completers, PromptSession, FileHistory, ANSI)
+                                      merge_completers, PromptSession, FileHistory)
         completer = merge_completers([
-            SlashCommandCompleter(['/help', '/clear', '/usage', '/model', '/models', '/exit', '/quit', '/sessions', '/load', '/title', '/autotitle', '/automode', '/fullcontent', '/record', '/export', '/system', '/planmode', '/skills', '/skill', '/mcp', '/perms', '/think', '/connect', '/undo', '/autocommit', '/deepthink']),
+            SlashCommandCompleter(['/help', '/clear', '/usage', '/model', '/models', '/exit', '/quit', '/sessions', '/load', '/title', '/autotitle', '/automode', '/fullcontent', '/record', '/export', '/system', '/planmode', '/skills', '/skill', '/mcp', '/perms', '/think', '/connect', '/undo', '/autocommit', '/deepthink', '/agents', '/vm', '/set']),
             PathMentionCompleter(),
         ])
         session_pt = PromptSession(
@@ -242,15 +476,13 @@ async def main(resume_id: str = "") -> None:
 
     while True:
         try:
-            if config.PROMPT_TOOLKIT_AVAILABLE:
-                user_input = await session_pt.prompt_async(ANSI(f"  {S.USER_CLR}{S.BOLD}❯{S.R} "))
-                user_input = user_input.strip()
-            else:
-                user_input = input(f"  {S.USER_CLR}{S.BOLD}❯{S.R} ").strip()
+            user_input = await _read_line(
+                session_pt if config.PROMPT_TOOLKIT_AVAILABLE else None)
             # A console that hands back surrogate escapes would otherwise poison
             # the history: every later save and request would raise.
             user_input = config.safe_text(user_input)
         except (EOFError, KeyboardInterrupt):
+            channel.leave()
             mcp_client.shutdown()
             print(f"\n\n  {S.GRAY}Goodbye!{S.R}\n")
             break
@@ -277,6 +509,7 @@ async def main(resume_id: str = "") -> None:
 
         cmd = user_input.lower()
         if cmd in ("/exit", "/quit"):
+            channel.leave()
             mcp_client.shutdown()
             print(f"\n  {S.GRAY}Goodbye!{S.R}\n")
             break
@@ -292,6 +525,7 @@ async def main(resume_id: str = "") -> None:
             current_session_id = None
             config.SESSION_TITLE = ""
             config.token_history.clear()
+            config.turn_index = 0
             config.LOADED_SKILLS.clear()
             print("\033[2J\033[H", end="")
             _welcome()
@@ -645,6 +879,20 @@ async def main(resume_id: str = "") -> None:
                       f"request.{S.R}\n")
             continue
 
+        if cmd == "/agents" or cmd.startswith("/agents "):
+            _agents_command(user_input[len("/agents"):])
+            continue
+
+        if cmd == "/vm" or cmd.startswith("/vm "):
+            _vm_command(user_input[len("/vm"):])
+            continue
+
+        if cmd == "/set" or cmd.startswith("/set "):
+            # The user's own casing, not `cmd`: a string setting keeps what
+            # they typed, and only the name is case-insensitive.
+            _set_command(user_input[len("/set"):], messages)
+            continue
+
         # Every slash command has had its turn and continued; what is left is a
         # message for the model, so this is where an `@path` becomes context.
         # Before the plan-mode note, so the attachment stays under the sentence
@@ -666,6 +914,21 @@ async def main(resume_id: str = "") -> None:
                 )
             user_input += plan_prompt
 
+        # What the other agents said reaches the model here, ahead of the user's
+        # own message so that the request stays the last thing in the history.
+        # The person has already seen these at the prompt - the two cursors are
+        # separate - so this only says that they were passed on.
+        channel.heartbeat(_agent_label())
+        arrived = channel.turn_note()
+        if arrived:
+            messages.append({"role": "user", "content": arrived})
+            print(f"  {S.MUTED}↪ passed the channel messages to the model{S.R}")
+
+        # One turn starts here and covers everything done to answer it - the
+        # tool loop's follow-up requests, deepthink's six stages, any sub-agent -
+        # so `/usage` reports what the question cost rather than what its last
+        # request cost.
+        config.next_turn()
         messages.append({"role": "user", "content": user_input})
         config.repair_messages(messages)
         current_session_id = save_session(messages, current_session_id)

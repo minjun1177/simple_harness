@@ -3,9 +3,10 @@ import sys
 import subprocess
 import textwrap
 from simple_harness import config
-from simple_harness.config import S, tw, _hr, _visible_len
+from simple_harness.config import S, tw, th, _hr, _visible_len
 from simple_harness.session import load_memory, list_sessions
-from simple_harness.context import _estimate_tokens, _get_ctx_budget, _get_conv_pairs
+from simple_harness.context import (_estimate_tokens, _get_ctx_budget, _get_conv_pairs,
+                                    token_turns)
 from simple_harness.skills import list_skills, skill_dirs
 from simple_harness import mcp_client
 from simple_harness import providers
@@ -70,9 +71,23 @@ _LOGO_NARROW = """\
     ╚═╝╩╩ ╩╩  ╩═╝╚═╝  ╩ ╩╩ ╩╩╚═╝╚╝╚═╝╚═╝╚═╝"""
 
 
+# What `_welcome` prints besides the logo: the eleven fact lines, the hint, the
+# rule under it, one blank line, and the prompt the person then types at.
+_WELCOME_CHROME = 15
+
+
 def _logo() -> str:
-    art = _LOGO_WIDE if config.tw() >= 66 else _LOGO_NARROW
-    return f"{S.ACCENT}{S.BOLD}\n{art}\n{S.R}"
+    """The face, sized to the terminal it is about to be printed into.
+
+    Both directions matter and only one of them used to. The wide face is
+    twelve rows and the rest of the welcome is fifteen more; on a terminal
+    shorter than that the whole banner scrolled off before the person could
+    read it - the art went first, being at the top, so the one thing they
+    were meant to see was the one thing they never did.
+    """
+    rows = len(_LOGO_WIDE.splitlines()) + 2        # a blank line above and below
+    fits = config.tw() >= 66 and th() >= rows + _WELCOME_CHROME
+    return f"{S.ACCENT}{S.BOLD}\n{_LOGO_WIDE if fits else _LOGO_NARROW}\n{S.R}"
 
 
 def _welcome():
@@ -101,11 +116,12 @@ def _welcome():
     print(f"  {S.GRAY}mcp{S.R}        {S.WHITE}{_get_mcp_info()}{S.R}")
     print(f"  {S.GRAY}memory{S.R}     {S.WHITE}{memory_count} item{'s' if memory_count != 1 else ''}{S.R}")
     print(f"  {S.GRAY}sessions{S.R}   {S.WHITE}{session_count} saved{S.R}")
-    print()
     print(f"  {S.GRAY}Type {S.ACCENT}/help{S.GRAY} for commands · {S.ACCENT}/exit{S.GRAY} to quit{S.R}")
     if not config.PROMPT_TOOLKIT_AVAILABLE:
         print(f"  {S.WARN}⚠ Tip: pip install prompt_toolkit for history & autocompletion.{S.R}")
     print(f"  {_hr()}")
+    # Exactly one blank line under it, and nothing else: every row spent here is
+    # a row of the banner that scrolls off the top before it is read.
     print()
 
 
@@ -144,6 +160,17 @@ def _show_help():
         ("/think <on/off>", "Show or hide a reasoning model's thinking"),
         ("/deepthink", "Show the plan-check-build-review-revise-verify chain and whether it is on"),
         ("/deepthink <on/off>", "Turn that chain on or off"),
+        ("/agents", "Show the other AI agents working in this project"),
+        ("/agents say <text>", "Say something to all of them yourself"),
+        ("/agents release <path>", "Take a file back from the agent holding it"),
+        ("/agents <on/off>", "Whether this session appears on the agent board"),
+        ("/vm", "Show the Python scratch process run_python uses, and where it runs"),
+        ("/vm reset", "Throw away every variable the model left in it"),
+        ("/vm stop", "End the process; the next run_python starts a new one"),
+        ("/set", "Show every setting, and which ones you have changed"),
+        ("/set <NAME> <value>", "Change one, e.g. /set NUM_CTX 32768. Saved for next time"),
+        ("/set <NAME> default", "Put it back to what config.py says"),
+        ("/connect forget <provider>", "Delete the API key saved for a provider"),
         ("/undo", "Take back the last file change the AI committed"),
         ("/autocommit", "Whether each AI edit gets its own git commit, and the recent ones"),
         ("/autocommit <on/off>", "Turn that on or off"),
@@ -369,6 +396,65 @@ def _fmt_tool_result(name: str, result: str):
         print(f"  {S.OK}╰─ done{S.R}")
 
 
+def _fmt_setting(value) -> str:
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value) or "(none)"
+    if isinstance(value, str):
+        return value or '""'
+    return f"{value:,}" if isinstance(value, int) else str(value)
+
+
+def _show_settings(only: str = "") -> None:
+    """`/set`: what can be changed, what it is, and what it started as.
+
+    Grouped by the prefix the names already carry, because sixty settings in
+    one alphabetical column is a list nobody reads to the end of. A value that
+    is no longer the default is marked and shows what it was - that line is the
+    whole reason a person opens this rather than reading `config.py`.
+    """
+    settings = config.settable()
+    if only:
+        only = only.strip().upper()
+        if only not in settings:
+            print(f"  {S.ERR}✗ '{only}' is not a setting.{S.R} "
+                  f"{S.GRAY}/set on its own lists them.{S.R}\n")
+            return
+        settings = {only: settings[only]}
+
+    changed = config.saved_settings()
+    defaults = config.defaults()
+    groups: dict = {}
+    for name, value in settings.items():
+        prefix = name.split("_")[0]
+        # A prefix shared by one setting is not a group, it is a name.
+        key = prefix if sum(1 for n in settings if n.startswith(prefix + "_")) > 1 else ""
+        groups.setdefault(key, []).append((name, value))
+
+    print(f"\n  {S.BOLD}{S.ACCENT}Settings{S.R}  "
+          f"{S.GRAY}/set <NAME> <value>  ·  /set <NAME> default{S.R}")
+    print(f"  {_hr(width=60)}")
+    width = max((len(n) for n in settings), default=10)
+    for key in sorted(groups, key=lambda k: (k == "", k)):
+        rows = groups[key]
+        if key and not only:
+            print(f"  {S.MUTED}{key.lower()}{S.R}")
+        for name, value in rows:
+            mark = f"{S.OK}•{S.R}" if name in changed else " "
+            was = (f"  {S.MUTED}(was {_fmt_setting(defaults.get(name))}){S.R}"
+                   if name in changed else "")
+            print(f"  {mark} {S.GRAY}{name:<{width}}{S.R}  "
+                  f"{S.WHITE}{_fmt_setting(value)}{S.R}{was}")
+    if changed:
+        print(f"\n  {S.MUTED}{len(changed)} changed, saved in "
+              f"{config.SETTINGS_FILE}{S.R}")
+    else:
+        print(f"\n  {S.MUTED}All at their defaults. Changes are saved in "
+              f"{config.SETTINGS_FILE}{S.R}")
+    print()
+
+
 def _approval_prompt(action_label: str, details: list[tuple[str, str]], rule: str = "") -> bool:
     from simple_harness.renderer import _disp_width
     from simple_harness import permissions
@@ -424,7 +510,16 @@ def _approval_prompt(action_label: str, details: list[tuple[str, str]], rule: st
     return answer == "y"
 
 
-def _fmt_tokens(prompt_t: int, comp_t: int, total_dur: float, eval_dur: float):
+def _fmt_tokens(prompt_t: int, comp_t: int, total_dur: float, eval_dur: float,
+                turn: dict | None = None):
+    """The cost of the request that just finished, and of the turn it ended.
+
+    The first line is one request: its TPS and its duration only mean anything
+    per request. The second is what the person actually spent on the thing they
+    asked for - the request above plus every follow-up the tool loop made to
+    get there - and it appears only when those are different numbers, so an
+    ordinary answer looks exactly as it always did.
+    """
     total = prompt_t + comp_t
     tps = (comp_t / eval_dur) if eval_dur > 0 else 0.0
     print(
@@ -433,15 +528,25 @@ def _fmt_tokens(prompt_t: int, comp_t: int, total_dur: float, eval_dur: float):
         f"{S.GRAY}{comp_t}{S.MUTED} out · "
         f"{S.GRAY}{total}{S.MUTED} total · "
         f"{S.GRAY}{total_dur:.1f}s{S.MUTED} · "
-        f"{S.GRAY}TPS: {tps:.1f}{S.R}\n"
+        f"{S.GRAY}TPS: {tps:.1f}{S.R}"
     )
+    if turn and turn.get("requests", 0) > 1:
+        print(f"  {S.MUTED}─ this turn: "
+              f"{S.GRAY}{turn['requests']}{S.MUTED} requests · "
+              f"{S.GRAY}{turn['prompt'] + turn['completion']:,}{S.MUTED} tokens{S.R}")
+    print()
 
 
 def display_usage_graph(messages: list[dict]):
     if not config.token_history:
         print(f"  {S.GRAY}No token usage data yet.{S.R}")
     else:
-        totals = [t["prompt"] + t["completion"] for t in config.token_history]
+        # One bar per turn, not per request to the model. Answering one thing
+        # the person asked takes another request after every tool result, and
+        # counting those separately drew a conversation five bars long that the
+        # person had spoken in once.
+        turns = token_turns()
+        totals = [t["prompt"] + t["completion"] for t in turns]
         max_val = max(totals) if totals else 0
 
         print(f"\n  {S.BOLD}{S.ACCENT}Token Usage History{S.R}")
@@ -473,14 +578,24 @@ def display_usage_graph(messages: list[dict]):
                 x_labels += f"{S.GRAY}{i:02d}{S.R} "
             print(x_labels)
 
-        total_prompt = sum(t["prompt"] for t in config.token_history)
-        total_comp = sum(t["completion"] for t in config.token_history)
+        total_prompt = sum(t["prompt"] for t in turns)
+        total_comp = sum(t["completion"] for t in turns)
         total_all = total_prompt + total_comp
-        
+        requests = sum(t["requests"] for t in turns)
+
         print(f"\n  {S.BOLD}Cumulative Token Usage{S.R}")
         print(f"  {S.GRAY}prompt{S.R} {S.WHITE}{total_prompt:,}{S.R}  "
               f"{S.GRAY}completion{S.R} {S.WHITE}{total_comp:,}{S.R}  "
               f"{S.GRAY}total{S.R} {S.BOLD}{S.WHITE}{total_all:,}{S.R}")
+        # The count the bars no longer show. A turn that took nine requests is
+        # a turn worth looking at, and it is the tool calls that make it nine.
+        print(f"  {S.GRAY}turns{S.R} {S.WHITE}{len(turns)}{S.R}  "
+              f"{S.GRAY}model requests{S.R} {S.WHITE}{requests:,}{S.R}  "
+              f"{S.GRAY}per turn{S.R} {S.WHITE}{requests / max(1, len(turns)):.1f}{S.R}")
+        busiest = max(turns, key=lambda t: t["requests"])
+        if busiest["requests"] > 1:
+            print(f"  {S.MUTED}busiest turn: {busiest['requests']} requests, "
+                  f"{busiest['prompt'] + busiest['completion']:,} tokens{S.R}")
 
     est_tokens = _estimate_tokens(messages)
     budget = _get_ctx_budget()

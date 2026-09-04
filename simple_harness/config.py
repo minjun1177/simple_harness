@@ -4,11 +4,13 @@
 # them missing stopped the whole program from starting - `config` is the base of
 # the import graph and builds SYSTEM_PROMPT at import time (ARCHITECTURE 5.2).
 # A machine with no `bs4` could not open a chat window, let alone search.
+import json
 import os
 import platform
 import re
 import shutil
 
+from simple_harness import atomic
 from simple_harness import paths
 
 # `Parser`, `Query` and `QueryCursor` look unused here and are not: `tools.py`
@@ -63,6 +65,9 @@ try:
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.completion import Completer, Completion
     from prompt_toolkit.formatted_text import ANSI
+    # What lets another agent's message be printed *above* a prompt that is
+    # already waiting for a line, instead of on top of what is being typed.
+    from prompt_toolkit.patch_stdout import patch_stdout
     PROMPT_TOOLKIT_AVAILABLE = True
 
     from prompt_toolkit.completion import merge_completers
@@ -226,6 +231,17 @@ CMD_OUTPUT_CHARS = 6000     # per-read output ceiling; the newest is kept
 CMD_MAX_SESSIONS = 3        # live commands kept at once; the oldest is dropped
 CMD_SESSION_LIFETIME = 900  # seconds a live command may sit idle before it is killed
 
+# run_python: one Python process kept alive beside the harness, so the model can
+# work something out - a calculation, a regex, what a function really returns -
+# instead of guessing at it, and keep what it defined for the next call. See
+# vm.py. It is isolation from mistakes, not from a hostile program: the code
+# runs as you, and that is why it still asks before running.
+VM_TIMEOUT = 20             # wall clock per call; over it the VM is killed and
+                            # restarted, and the model is told its variables are gone
+VM_OUTPUT_CHARS = 4000      # ceiling on printed output; the middle is dropped
+VM_MEMORY_MB = 512          # address space the code may take (POSIX only; 0 = no limit)
+VM_FILE_MB = 64             # largest file the code may write (POSIX only; 0 = no limit)
+
 MAX_TOOL_CALLS = 10
 
 # Sub-agents (spawn_agent). A sub-agent gets a hard turn budget instead of the
@@ -265,6 +281,18 @@ LOADED_SKILLS = []
 PERMISSIONS_ENABLED = True
 POLICY_AUTO_ALLOW = False       # set per call by dispatch_tool; not a user setting
 
+# --- the agent channel -------------------------------------------------------
+# Several harnesses run in one project at once, and without this none of them
+# knows the others exist - so two of them edit the same file and the second
+# write throws the first away. The board lives in ~/.localchat/channel/, one
+# file per workspace. See channel.py; /agents shows it.
+CHANNEL_ENABLED = True
+CHANNEL_CLAIMS = True           # refuse an edit to a file another agent is holding
+CHANNEL_CLAIM_TTL = 1800        # seconds a claim_files claim lasts
+CHANNEL_WRITE_TTL = 300         # ...and one taken automatically by writing a file
+CHANNEL_STALE = 120             # heartbeat age past which an agent is presumed gone
+CHANNEL_POLL_SECONDS = 2        # how often an idle prompt looks for a new message
+
 # --- reasoning ("thinking") models -------------------------------------------
 # Reasoning models wrap their scratch work in <think> tags, or return it in
 # Ollama's separate `thinking` field. It is never the answer, so by default it
@@ -283,7 +311,38 @@ MCP_MAX_TOOLS_PER_SERVER = 40   # keeps one chatty server from flooding the prom
 MCP_TRUSTED_SERVERS = []        # server names whose calls skip the approval prompt
 MCP_AUTO_APPROVE_READONLY = False  # trust a tool's own readOnlyHint annotation
 
+# One entry per request sent to the model, each carrying the turn it belongs to.
+#
+# A turn is one thing the person asked for, and answering it is very often
+# several requests: the first one, then one more after every tool result, six
+# of them under deepthink, and a sub-agent's whole conversation on top. `/usage`
+# used to draw a bar per request, so a single question that took four tool calls
+# read as five separate things the person had asked - and the graph said the
+# conversation was five times as long as it was. `turn` is what groups them back
+# together; `context.token_turns()` is the only place that does the grouping.
 token_history = []
+
+turn_index = 0
+
+
+def next_turn() -> int:
+    """Begin a turn. Everything sent to the model until the next call is in it."""
+    global turn_index
+    turn_index += 1
+    return turn_index
+
+
+def resume_turns() -> None:
+    """Carry on past the turns a loaded session already recorded.
+
+    Without this a resumed conversation restarts at 1 and its first request
+    lands in the same group as an old one, silently merging two questions that
+    were asked days apart. A history from before this existed has no turn
+    numbers at all, which reads as 0 and leaves the counter where it started.
+    """
+    global turn_index
+    turn_index = max((entry.get("turn") or 0) for entry in token_history) \
+        if token_history else 0
 
 
 class S:
@@ -310,6 +369,15 @@ def tw() -> int:
         return shutil.get_terminal_size().columns
     except Exception:
         return 80
+
+
+def th() -> int:
+    """Terminal rows. The companion to `tw`, and needed for the same reason:
+    anything printed taller than this scrolls off the top before it is read."""
+    try:
+        return shutil.get_terminal_size().lines
+    except Exception:
+        return 24
 
 
 def _visible_len(text: str) -> int:
@@ -400,3 +468,178 @@ def repair_messages(messages: list[dict]) -> list[dict]:
 def _hr(char: str = "─", width: int = 0, style: str = S.MUTED) -> str:
     w = width or max(1, tw() - 6)
     return f"{style}{char * w}{S.R}"
+
+
+# ---------------------------------------------------------------------------
+# settings you can change without editing this file
+# ---------------------------------------------------------------------------
+#
+# Everything above was a source edit away. That is fine for the person who
+# wrote it and useless for anybody else: an installed copy's `config.py` is
+# somewhere under site-packages, editing it is lost on the next upgrade, and
+# "change NUM_CTX" should not mean "find and edit a Python file".
+#
+# `/set` writes the ones that were changed to `~/.localchat/settings.json`, and
+# they are applied over the defaults above at import. Only the deviations are
+# recorded, so a default that improves in a later version still reaches anyone
+# who never overrode it - writing all of them out would freeze this file's
+# values forever the first time somebody changed one.
+#
+# What is settable is *derived*, not listed: an UPPER_CASE name here holding a
+# bool, number, string or list is a setting. So a setting added above is
+# settable the moment it exists, and there is no second table to drift out of
+# step (invariant 5.1, applied to settings rather than tools). The exceptions
+# are named instead, because they are far fewer and far more stable.
+
+SETTINGS_FILE = paths.state("settings.json")
+
+_NOT_A_SETTING = frozenset({
+    # Facts about the machine, not choices.
+    "CURRENT_OS", "PROMPT_TOOLKIT_AVAILABLE", "TREE_SITTER_AVAILABLE",
+    # Built, or owned by a command of their own.
+    "SYSTEM_PROMPT", "MODEL", "SESSION_TITLE", "CUSTOM_PERSONA",
+    # Live state that happens to be spelled in capitals.
+    "LOADED_SKILLS", "POLICY_AUTO_ALLOW", "DEEPTHINK_READONLY", "SUBAGENT_DEPTH",
+    # Where the person's own files live. `LOCALCHAT_HOME` moves all of them
+    # together; moving one by hand splits a memory or a session list in two.
+    "MEMORY_FILE", "HISTORY_FILE", "SESSION_DIR",
+    # Invariant 5.9: these two are anchors that `tools`, `llm_client` and `tui`
+    # each test with `startswith`. They are a protocol, not a preference.
+    "TOOL_ERROR_PREFIX", "TOOL_REFUSAL_PREFIX",
+    # This machinery's own bookkeeping. Listing the settings file among the
+    # settings would offer to move it with a command that writes to it.
+    "SETTINGS_FILE", "SETTINGS_APPLIED",
+})
+
+_TRUE = ("on", "true", "yes", "y", "1")
+_FALSE = ("off", "false", "no", "n", "0")
+
+
+def settable() -> dict:
+    """Every setting `/set` may change, with the value it has right now."""
+    return {name: value for name, value in sorted(globals().items())
+            if name.isupper() and not name.startswith("_")
+            and name not in _NOT_A_SETTING
+            and isinstance(value, (bool, int, float, str, list))}
+
+
+def parse_setting(name: str, raw) -> tuple:
+    """What was typed, in the type the setting already has. (value, problem).
+
+    The current value is the schema. There is nothing to declare and nothing to
+    keep in step: a number stays a number, `on` and `off` are the only spellings
+    of a switch, and a list is written with commas.
+    """
+    current = globals().get(name)
+    text = raw.strip() if isinstance(raw, str) else raw
+
+    if isinstance(current, bool):           # before int - a bool *is* an int
+        if isinstance(text, bool):
+            return text, ""
+        spelling = str(text).strip().lower()
+        if spelling in _TRUE:
+            return True, ""
+        if spelling in _FALSE:
+            return False, ""
+        return None, f"{name} is on or off, not '{raw}'"
+
+    if isinstance(current, (int, float)):
+        try:
+            value = int(str(text)) if isinstance(current, int) else float(str(text))
+        except (TypeError, ValueError):
+            kind = "a whole number" if isinstance(current, int) else "a number"
+            return None, f"{name} is {kind}, not '{raw}'"
+        # None of these mean anything below zero, and a negative one fails much
+        # later and somewhere else - a timeout that never waits, a ceiling that
+        # trims everything. Nothing above zero is second-guessed: this file was
+        # always editable by hand and the same latitude belongs here.
+        if value < 0:
+            return None, f"{name} cannot be negative"
+        return value, ""
+
+    if isinstance(current, list):
+        if isinstance(text, list):
+            return list(text), ""
+        return [part.strip() for part in str(text).split(",") if part.strip()], ""
+
+    return str(text), ""
+
+
+_saved: dict = {}           # what settings.json holds: only what was changed
+
+
+def saved_settings() -> dict:
+    """Only what was changed - which is all `settings.json` ever holds."""
+    return dict(_saved)
+
+
+def defaults() -> dict:
+    """What this file says, before `settings.json` had a say."""
+    return dict(_DEFAULTS)
+
+
+def set_setting(name: str, raw) -> tuple:
+    """Change a setting now and for the next session. Returns (ok, message)."""
+    name = (name or "").strip().upper()
+    if name not in settable():
+        return False, (f"'{name}' is not a setting that can be changed here - "
+                       "/set on its own lists the ones that can")
+
+    if isinstance(raw, str) and raw.strip().lower() in ("default", "reset"):
+        value = _DEFAULTS[name]
+    else:
+        value, problem = parse_setting(name, raw)
+        if problem:
+            return False, problem
+
+    globals()[name] = value
+    if value == _DEFAULTS.get(name):
+        _saved.pop(name, None)      # back to the default: stop recording it
+    else:
+        _saved[name] = value
+
+    try:
+        paths.ensure_home()
+        atomic.write_json(SETTINGS_FILE, _saved)
+    except Exception as error:
+        return True, (f"changed for this session only - {SETTINGS_FILE} could "
+                      f"not be written ({error})")
+    return True, SETTINGS_FILE
+
+
+def load_saved_settings() -> list:
+    """Apply `settings.json` over the defaults. Returns the names it changed.
+
+    It fails open, one entry at a time: a setting this version no longer has,
+    or a value of the wrong type, is skipped and the rest are applied. A file
+    that cannot be read at all leaves every default exactly as written above -
+    the harness must still start when its settings file is broken.
+    """
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8-sig") as handle:
+            data = json.load(handle)
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+
+    applied = []
+    allowed = settable()
+    for name, value in data.items():
+        name = str(name).strip().upper()
+        if name not in allowed:
+            continue
+        parsed, problem = parse_setting(name, value)
+        if problem:
+            continue
+        globals()[name] = parsed
+        _saved[name] = parsed
+        applied.append(name)
+    return applied
+
+
+# The defaults are whatever this file says, captured before the saved file gets
+# a say - so "back to the default" means this file's value, not the last one
+# that happened to be written down.
+_DEFAULTS = settable()
+SETTINGS_APPLIED = load_saved_settings()

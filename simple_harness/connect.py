@@ -8,6 +8,7 @@ takes arguments for the times you already know what you want:
     /connect anthropic            pick a model from Anthropic
     /connect openai gpt-4o        connect straight to a model
     /connect status               what is connected, and what could be
+    /connect forget anthropic     delete the API key saved for a provider
 """
 
 import os
@@ -64,7 +65,44 @@ def show_status() -> None:
         print(f"  {S.MUTED}╰─{S.R}")
     print(f"\n  {S.GRAY}Keys are read from the environment first, then "
           f"{S.MUTED}{providers.CONFIG_PATH}{S.GRAY}.{S.R}")
-    print(f"  {S.GRAY}Connect with {S.ACCENT}/connect <provider> [model]{S.GRAY}.{S.R}\n")
+    print(f"  {S.GRAY}Connect with {S.ACCENT}/connect <provider> [model]{S.GRAY}, "
+          f"delete a saved key with {S.ACCENT}/connect forget <provider>{S.GRAY}.{S.R}\n")
+
+
+def forget(name: str) -> None:
+    """`/connect forget <provider>` - take a saved API key back out."""
+    if not name:
+        saved = [n for n in providers.PROVIDERS
+                 if providers.settings_for(n).get("api_key")]
+        if not saved:
+            print(f"  {S.GRAY}No API key is saved for any provider.{S.R}\n")
+            return
+        print(f"  {S.ERR}✗ Usage: /connect forget <provider>{S.R}")
+        print(f"  {S.GRAY}Keys are saved for: {', '.join(saved)}{S.R}\n")
+        return
+
+    name = name.lower()
+    removed, detail = providers.forget_key(name)
+    if not removed:
+        if detail:
+            print(f"  {S.ERR}✗ {detail}{S.R}\n")
+        else:
+            print(f"  {S.GRAY}No API key was saved for {name}.{S.R}\n")
+        return
+
+    provider = providers.build(name)
+    print(f"  {S.OK}✓ Deleted the API key saved for {provider.label}.{S.R} "
+          f"{S.MUTED}({detail}){S.R}")
+    if provider.key_source:
+        # An environment variable still supplies one, and unsetting it is not
+        # something this program can do for them. Better said than implied.
+        print(f"  {S.WARN}⚠ {provider.label} still has a key from "
+              f"{provider.key_source}{S.MUTED} - unset it in your shell to "
+              f"remove that one.{S.R}")
+    elif providers.current().name == name:
+        print(f"  {S.WARN}⚠ That is the provider you are connected to, so it "
+              f"cannot answer until you {S.ACCENT}/connect{S.WARN} again.{S.R}")
+    print()
 
 
 def _pick_provider() -> str:
@@ -126,6 +164,9 @@ def run(argument: str) -> None:
     parts = argument.split()
     if parts and parts[0].lower() in ("status", "list", "-l"):
         show_status()
+        return
+    if parts and parts[0].lower() in ("forget", "logout"):
+        forget(parts[1] if len(parts) > 1 else "")
         return
 
     name = parts[0].lower() if parts else ""

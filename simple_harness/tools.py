@@ -13,10 +13,12 @@ from simple_harness.config import S, TREE_SITTER_AVAILABLE, _TS_LANGUAGES, _EXT_
 from simple_harness.tui import _fmt_tool_call, _approval_prompt
 from simple_harness.skills import handle_use_skill
 from simple_harness import mcp_client
+from simple_harness import channel
 from simple_harness import git_ops
 from simple_harness import permissions
 from simple_harness import shell_session
 from simple_harness import toolspec
+from simple_harness import vm
 from simple_harness.websearch import search_web as search_pipeline, strip_html
 
 if TREE_SITTER_AVAILABLE:
@@ -191,6 +193,363 @@ def _strip_hashlines(content: str) -> str:
     return "\n".join(stripped)
 
 
+# ---------------------------------------------------------------------------
+# run_python: the scratch VM (see vm.py for why it is not just `run_cmd python`)
+# ---------------------------------------------------------------------------
+
+_VM_NAMES_SHOWN = 12
+
+
+def _trim_both_ends(text: str, limit: int) -> str:
+    """Trim from the middle. The first lines and the last lines both matter.
+
+    `_trim_output` keeps the tail, which is right for a command still printing.
+    Here the whole run is over, and a loop that printed ten thousand lines is
+    understood from how it started and how it ended - invariant 5.6b, applied
+    to a tool result rather than to the context budget.
+    """
+    if len(text) <= limit:
+        return text
+    head = limit * 2 // 3
+    tail = limit - head
+    return (text[:head] + f"\n...[{len(text) - limit} characters trimmed]...\n"
+            + text[-tail:])
+
+
+def _truthy(value) -> bool:
+    """`reset` arrives as a real boolean, or as the word for one.
+
+    It has to be read carefully rather than with `bool()`: a model that sends
+    `"reset": "false"` means the opposite of what the string is worth, and
+    getting that wrong throws away every variable the model was working with.
+    """
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "1", "on")
+    return bool(value)
+
+
+def _vm_footer(reply: dict) -> str:
+    """What the model most needs to know afterwards: what it still has."""
+    new_names = [name for name in (reply.get("new") or []) if name]
+    if not new_names:
+        return ""
+    shown = ", ".join(new_names[:_VM_NAMES_SHOWN])
+    if len(new_names) > _VM_NAMES_SHOWN:
+        shown += f", and {len(new_names) - _VM_NAMES_SHOWN} more"
+    return f"\n\n(kept for your next run_python call: {shown})"
+
+
+def handle_run_python(content: str, stdin: str = "", reset: bool = False) -> str:
+    """Run a snippet in the scratch VM and say what came back."""
+    code = _strip_hashlines(content if isinstance(content, str) else "")
+    stdin_text = stdin if isinstance(stdin, str) else ""
+
+    if not code.strip():
+        return ("[Error] The call carried no code, so nothing was run. Send "
+                "run_python again with the Python in a <content> block right "
+                "after the JSON object.")
+
+    lines = code.strip().splitlines()
+    preview = "\n".join(lines[:6]) + ("\n..." if len(lines) > 6 else "")
+    details = [("code", preview), ("in", vm.scratch_dir())]
+    if stdin_text.strip():
+        details.append(("input", stdin_text.replace("\n", " ⏎ ").strip()))
+    if not _approval_prompt("Run Python", details, rule="run_python"):
+        return "[System] User denied running the code."
+
+    reply = vm.run(code, stdin_text, _truthy(reset))
+    printed = _trim_both_ends(reply.get("output") or "", config.VM_OUTPUT_CHARS)
+
+    # The VM was stopped, so the namespace is gone. Say that outright: a model
+    # told only "it failed" goes on referring to a variable that no longer
+    # exists, and the next error is a NameError that explains nothing.
+    if reply.get("timeout"):
+        return (f"[Error] The code was still running after {reply['timeout']:g}s, so the "
+                "Python VM was stopped and restarted - every variable from earlier "
+                "calls is gone. Look for a loop that never ends, or split the work up."
+                + (f"\n\nIt printed this first:\n{printed}" if printed.strip() else ""))
+    if reply.get("crashed"):
+        detail = reply.get("detail") or ""
+        return (f"[Error] {reply['crashed']}. It has been restarted, so every variable "
+                "from earlier calls is gone."
+                + (f"\n{detail}" if detail else "")
+                + (f"\n\nIt printed this first:\n{printed}" if printed.strip() else ""))
+
+    if reply.get("error"):
+        head = f"It printed this before it failed:\n{printed}\n\n" if printed.strip() else ""
+        return f"[Error] {head}{reply['error']}"
+
+    parts = [f"[Success] ran in {reply.get('seconds', 0.0):.2f}s."]
+    if printed.strip():
+        parts.append(printed.rstrip())
+    if reply.get("value") is not None:
+        parts.append(f"=> {reply['value']}")
+    if len(parts) == 1 and not reply.get("new"):
+        parts.append("The code ran and produced nothing. To see a value, print() it "
+                     "or end the snippet with the expression on its own line.")
+    return "\n\n".join(parts) + _vm_footer(reply)
+
+
+
+
+# ---------------------------------------------------------------------------
+# editing by hashline anchor
+# ---------------------------------------------------------------------------
+#
+# `read_file` returns every line as `50:1f|print(answer)`, and until now that
+# prefix was only a display aid: `edit_file` stripped it off and matched what
+# was left as text. So the model still had to reproduce the line exactly - every
+# space of indentation, every quote, every backslash - which is the single thing
+# a small model gets wrong most often. And a line that appears twice anywhere in
+# the file could not be edited at all: the snippet was ambiguous, and the edit
+# was refused rather than guessed at.
+#
+# The prefix is enough on its own. `50` says which line to replace, and `1f`
+# proves the model is looking at the version of it that is on disk right now.
+# So an `old_content` made only of prefixes names its lines directly and the
+# text is never retyped - and because a line number is unique, "found twice"
+# stops being a possible answer.
+#
+# The hash is what makes this safe rather than merely convenient. A line number
+# on its own would happily point at whatever has since moved into that position;
+# with the hash, an edit against a stale reading of the file is refused and the
+# model is told what is actually there now.
+
+# `50:1f`, or the whole row as read_file printed it: `50:1f|print(answer)`.
+_ANCHOR = re.compile(r'^\s*(\d+)\s*:\s*([0-9a-fA-F]{2})\s*(?:\|(.*))?$')
+# A span, both ends verified: `50:1f-53:9c`.
+_ANCHOR_SPAN = re.compile(r'^\s*(\d+)\s*:\s*([0-9a-fA-F]{2})\s*-\s*'
+                          r'(\d+)\s*:\s*([0-9a-fA-F]{2})\s*$')
+
+
+def _parse_anchors(old_content: str):
+    """The lines an `old_content` *names*, or None if it quotes them instead.
+
+    Returns `(first, last, checks, spanned)`. `checks` is the (line, hash, text)
+    triples to verify - for a span only the two ends, since nobody can be asked
+    to list every line between them.
+
+    One ordinary line anywhere in the snippet makes the whole thing text: this
+    has to be certain before it takes over, because falling through to the old
+    behaviour is always safe and taking over wrongly is not.
+    """
+    rows = [row for row in (old_content or "").split("\n") if row.strip()]
+    if not rows:
+        return None
+
+    if len(rows) == 1:
+        span = _ANCHOR_SPAN.match(rows[0])
+        if span:
+            first, first_hash, last, last_hash = span.groups()
+            return (int(first), int(last),
+                    [(int(first), first_hash.lower(), None),
+                     (int(last), last_hash.lower(), None)], True)
+
+    checks = []
+    for row in rows:
+        one = _ANCHOR.match(row)
+        if not one:
+            return None
+        number, digest, text = one.groups()
+        checks.append((int(number), digest.lower(), text))
+    return (checks[0][0], checks[-1][0], checks, False)
+
+
+def _anchor_target(filepath: str, file_content: str, old_content: str) -> tuple:
+    """Resolve `old_content` to a span of lines.
+
+    Three outcomes, and the caller needs to tell them apart:
+
+        (None, None, "")       not anchors at all - match it as text, as before
+        (None, None, <error>)  anchors, but they do not describe the file
+        (start, end, "")       these lines, verified against what is on disk
+    """
+    parsed = _parse_anchors(old_content)
+    if parsed is None:
+        return None, None, ""
+    first, last, checks, spanned = parsed
+    lines = file_content.split("\n")
+
+    if last < first:
+        return None, None, (f"[Error] The anchors run backwards: {first} comes after "
+                            f"{last}. Name the first line of the span first.")
+    out_of_range = next((n for n, _, _ in checks if n < 1 or n > len(lines)), 0)
+    if out_of_range:
+        return None, None, (f"[Error] There is no line {out_of_range} in {filepath} - "
+                            f"it has {len(lines)} lines. read_file it again and take "
+                            f"the anchors from that listing.")
+    if not spanned:
+        numbers = [n for n, _, _ in checks]
+        if numbers != list(range(first, last + 1)):
+            return None, None, (
+                f"[Error] The anchors {', '.join(str(n) for n in numbers)} are not one "
+                f"unbroken run of lines. Either list every line from {first} to {last}, "
+                f"or write the span as {first}:{checks[0][1]}-{last}:{checks[-1][1]}.")
+
+    for number, digest, text in checks:
+        line = lines[number - 1]
+        if _line_hash(line) == digest:
+            continue
+        # The hash is two hand-copied characters and the text beside it is not,
+        # so a line that reads exactly right is taken as the stronger evidence.
+        # Trailing whitespace is invisible and routinely dropped in copying;
+        # leading whitespace is the indentation and has to match.
+        if text is not None and text.rstrip() == line.rstrip():
+            continue
+        return None, None, (
+            f"[Error] Line {number} of {filepath} is not what {number}:{digest} says it "
+            f"is. It now reads {number}:{_line_hash(line)}|{line[:120]}\n"
+            f"The file has changed since you read it, or the anchor was mistyped. "
+            f"read_file it again and use the anchors from the new listing.")
+
+    return first, last, ""
+
+
+# The same row `read_file` printed, handed back with different text after the
+# `|`: `38:ff|print()` means "line 38, which currently hashes to ff, becomes
+# print()". One row says which line, proves it is the line that was read, and
+# carries the replacement - so the shortest possible edit is one line long and
+# the old text is never repeated anywhere.
+#
+# Leading whitespace is allowed and dropped. `read_file` never indents a row, so
+# an indented one is a model that reformatted the block - and writing its literal
+# text into the file, which is what would otherwise happen, is a silent wrong
+# edit. A real source line that looks like `50:1f|...` is imaginable; one that
+# still looks like it after this much of a coincidence is not.
+_ANCHORED_LINE = re.compile(r'^\s*(\d+)\s*:\s*([0-9a-fA-F]{2})\|(.*)$')
+
+
+def _parse_patch(new_content: str):
+    """`new_content` read as rows that each replace the line they name, or None.
+
+    Every row has to be one, blank rows included - a `new_content` that is only
+    partly anchored is ordinary replacement text and is left alone.
+    """
+    rows = (new_content or "").split("\n")
+    if not any(row.strip() for row in rows):
+        return None
+    patch = []
+    for row in rows:
+        matched = _ANCHORED_LINE.match(row)
+        if not matched:
+            return None
+        number, digest, text = matched.groups()
+        patch.append((int(number), digest.lower(), text))
+    return patch
+
+
+def _patch_disagrees(old_content: str, patch: list) -> str:
+    """Whether an `old_content` was given that says something else.
+
+    A patch already names its lines, so `old_content` has nothing left to add:
+    empty is the expected case and the same anchors are accepted. Anything else
+    is two different instructions in one call, and picking one of them silently
+    is how the wrong line gets edited.
+    """
+    if not (old_content or "").strip():
+        return ""
+    parsed = _parse_anchors(old_content)
+    if parsed is not None:
+        first, last, checks, spanned = parsed
+        named = list(range(first, last + 1)) if spanned else [n for n, _, _ in checks]
+        if sorted(named) == sorted(number for number, _, _ in patch):
+            return ""
+    lines = ", ".join(str(number) for number, _, _ in patch)
+    return (f"[Error] old_content and new_content do not name the same lines. When "
+            f"each new line carries its own anchor, new_content already says "
+            f"everything - it is replacing line(s) {lines}. Send it with old_content "
+            f"empty, or with exactly those anchors in it.")
+
+
+def _edit_by_patch(filepath: str, file_content: str, patch: list,
+                   old_content: str) -> str:
+    """Apply `38:ff|print()` rows: each replaces the one line it names."""
+    problem = _patch_disagrees(old_content, patch)
+    if problem:
+        return problem
+
+    lines = file_content.split("\n")
+    seen = set()
+    for number, digest, _ in patch:
+        if number in seen:
+            return (f"[Error] Line {number} is given twice in new_content. A line can "
+                    f"only become one thing. To replace one line with several, put "
+                    f"the anchor in old_content and the new lines, unanchored, in "
+                    f"new_content.")
+        seen.add(number)
+        if number < 1 or number > len(lines):
+            return (f"[Error] There is no line {number} in {filepath} - it has "
+                    f"{len(lines)} lines. read_file it again and take the anchors "
+                    f"from that listing.")
+        current = lines[number - 1]
+        if _line_hash(current) != digest:
+            # There is no second piece of evidence here: the text beside the
+            # anchor is what the line is to become, not what it is now. So the
+            # hash is the whole check, and it is not waived.
+            return (f"[Error] Line {number} of {filepath} is not what {number}:{digest} "
+                    f"says it is. It now reads {number}:{_line_hash(current)}|"
+                    f"{current[:120]}\nWriting a new line over it would overwrite "
+                    f"something you have not read. Nothing was written - read_file "
+                    f"again and take the anchors from the new listing.")
+
+    details = [("path", filepath)]
+    for number, _, text in patch[:8]:
+        details.append((f"line {number}",
+                        f"{_preview(lines[number - 1], 60)}  →  {_preview(text, 60)}"))
+    if len(patch) > 8:
+        details.append(("", f"...and {len(patch) - 8} more"))
+    if not _approval_prompt("Edit File", details, rule=f"edit_file({filepath})"):
+        return "[System] User denied file edit."
+
+    for number, _, text in patch:
+        lines[number - 1] = text
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+    except Exception as e:
+        return f"[Error] Cannot write file: {e}"
+
+    which = ", ".join(str(number) for number, _, _ in patch)
+    return (f"[Success] File edited: {filepath} (line{'s' if len(patch) > 1 else ''} "
+            f"{which} replaced). One line became one line, so nothing below moved "
+            f"and the rest of your anchors are still good.")
+
+
+def _preview(text: str, limit: int = 150) -> str:
+    return text[:limit] + ("..." if len(text) > limit else "")
+
+
+def _edit_by_anchor(filepath: str, file_content: str, start: int, end: int,
+                    new_content: str) -> str:
+    """Replace lines `start`..`end` outright. Every anchor has been verified."""
+    lines = file_content.split("\n")
+    replaced = "\n".join(lines[start - 1:end])
+    count = end - start + 1
+    where = f"line {start}" if count == 1 else f"lines {start}-{end} ({count} lines)"
+
+    # An empty replacement removes the lines rather than leaving them blank,
+    # which is the same thing `edit_file` has always done when asked to replace
+    # a snippet with nothing.
+    replacement = new_content.split("\n") if new_content else []
+
+    details = [("path", filepath), ("replacing", where),
+               ("from", _preview(replaced)),
+               ("to", _preview(new_content) if replacement else "(the lines are removed)")]
+    if not _approval_prompt("Edit File", details, rule=f"edit_file({filepath})"):
+        return "[System] User denied file edit."
+
+    lines[start - 1:end] = replacement
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+    except Exception as e:
+        return f"[Error] Cannot write file: {e}"
+
+    moved = ("" if len(replacement) == count else
+             " Every line below it has moved, so read_file again before anchoring "
+             "another edit to this file.")
+    return f"[Success] File edited: {filepath} ({where} replaced).{moved}"
+
 
 def handle_read_file(filepath: str) -> str:
     try:
@@ -231,22 +590,56 @@ def handle_write_file(filepath: str, content: str) -> str:
         return f"[Error] Cannot write file: {e}"
 
 def handle_edit_file(filepath: str, old_content: str, new_content: str) -> str:
-    old_content = _strip_hashlines(old_content)
-    new_content = _strip_hashlines(new_content)
+    """Replace part of a file. Three ways of saying which part, in this order.
+
+    1. `new_content` rows that each carry their own anchor - `38:ff|print()` -
+       replace the line each one names, and `old_content` is not needed at all.
+       The shortest form there is, and the one that never repeats the old text.
+    2. `old_content` made of anchors - `50:1f`, the whole row
+       `50:1f|print(answer)`, several rows, or a span `50:1f-53:9c` - names the
+       lines, and `new_content` is what replaces them. This is the form to use
+       when the number of lines changes, or when they are to be deleted.
+    3. Anything else in `old_content` is matched as literal text, exactly as it
+       always was.
+    """
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             file_content = f.read()
     except Exception as e:
         return f"[Error] Cannot read file: {e}"
 
+    # Before `_strip_hashlines`, which would eat the very anchors this reads.
+    patch = _parse_patch(new_content)
+    if patch is not None:
+        return _edit_by_patch(filepath, file_content, patch, old_content)
+
+    new_content = _strip_hashlines(new_content)
+
+    if not (old_content or "").strip():
+        return ("[Error] old_content was empty, so nothing was named to replace. "
+                "Either put the hashline anchors of the lines in old_content "
+                "(e.g. 50:1f), or put the anchor in front of each new line "
+                "(50:1f|<the new line>) and leave old_content out.")
+
+    start, end, problem = _anchor_target(filepath, file_content, old_content)
+    if problem:
+        return problem
+    if start is not None:
+        return _edit_by_anchor(filepath, file_content, start, end, new_content)
+
+    old_content = _strip_hashlines(old_content)
     if old_content not in file_content:
-        return "[Error] The specified old_content was not found in the file."
+        return ("[Error] The specified old_content was not found in the file. If the "
+                "exact text is hard to reproduce, read_file the file and put the "
+                "line's hashline anchor (e.g. 50:1f) in old_content instead.")
     count = file_content.count(old_content)
     if count > 1:
-        return f"[Error] old_content found {count} times. Please provide a more specific snippet."
+        return (f"[Error] old_content found {count} times. Give a longer snippet, or "
+                f"put the line's hashline anchor (e.g. 50:1f, from read_file) in "
+                f"old_content instead - a line number is never ambiguous.")
 
-    old_preview = old_content[:150] + ('...' if len(old_content) > 150 else '')
-    new_preview = new_content[:150] + ('...' if len(new_content) > 150 else '')
+    old_preview = _preview(old_content)
+    new_preview = _preview(new_content)
     approved = _approval_prompt("Edit File", [("path", filepath), ("from", old_preview), ("to", new_preview)],
                                 rule=f"edit_file({filepath})")
     if not approved: return "[System] User denied file edit."
@@ -960,6 +1353,88 @@ def handle_spawn_agent(task: str, context: str = "", model: str = "") -> str:
     return subagent.run(task, context, model)
 
 
+# ---------------------------------------------------------------------------
+# talking to the other agents working here - see channel.py
+# ---------------------------------------------------------------------------
+
+def _channel_off() -> str:
+    return ("[System] The agent channel is off, so this session cannot see or "
+            "reach other agents. Tell the user; /agents on turns it back on.")
+
+
+def handle_list_agents() -> str:
+    """Who else is working in this project, and on what."""
+    if not channel.enabled():
+        return _channel_off()
+    here = channel.agents()
+    mine = channel.me()
+    if len(here) <= 1:
+        return (f"[Agents] You ({mine or 'this session'}) are the only agent working "
+                f"in {channel.workspace()} right now. Nothing to coordinate.")
+    lines = []
+    for record in here:
+        holds = ", ".join(record.get("holds") or []) or "nothing"
+        who = f"{record['id']} (you)" if record["id"] == mine else record["id"]
+        lines.append(f"  {who} - {record.get('label') or 'unknown model'} - "
+                     f"started {channel.ago(record.get('started'))} - "
+                     f"holding: {holds}")
+    return (f"[Agents] {len(here)} agents are working in {channel.workspace()}:\n"
+            + "\n".join(lines)
+            + "\nA file another agent is holding cannot be edited from here until "
+              "they release it. Ask them with send_agent_message.")
+
+
+def handle_send_agent_message(message: str, to: str = "") -> str:
+    """Say something to another agent. Nothing is queued for one that is not here."""
+    if not channel.enabled():
+        return _channel_off()
+    ok, said = channel.send(message, to)
+    if not ok:
+        # `[System]`, not `[Error]`: there is nobody to deliver to, so this is a
+        # closed door rather than a call that went wrong, and the turn should end
+        # if the model keeps knocking on it (ARCHITECTURE 5.9).
+        return (f"[System] The message was not sent: {said}. Use list_agents to see "
+                f"who is actually here, and do not retry the same message.")
+    print(f"  {S.MUTED}\u2192 {channel.me()} to {to or 'everyone'}: "
+          f"{' '.join(str(message).split())[:70]}{S.R}")
+    return (f"[Success] Message {said}. They will read it on their next turn - "
+            f"an answer, if one comes, will reach you the same way. Carry on with "
+            f"something else in the meantime.")
+
+
+def handle_claim_files(paths: str, reason: str = "") -> str:
+    """Take the files, or report who already has them. Never takes some of them."""
+    if not channel.enabled():
+        return _channel_off()
+    if not channel.me():
+        return ("[System] This session is not on the agent board, so it cannot claim "
+                "files. Nothing else is claiming them either - carry on.")
+    wanted = channel.split_paths(paths)
+    if not wanted:
+        return "[Error] No file path was given to claim."
+    taken, refused = channel.claim(paths, reason)
+    if refused:
+        held = "; ".join(f"{c['path']} is held by {c['agent']} ({c.get('reason') or 'no reason given'})"
+                         for c in refused)
+        return (f"[System] Nothing was claimed - {held}. Nothing is claimed at all "
+                f"when any one file is taken, so you are not half-holding the rest. "
+                f"Ask them with send_agent_message, or work on something else.")
+    print(f"  {S.MUTED}\u25c6 claimed {', '.join(taken)}{S.R}")
+    return (f"[Success] Claimed {', '.join(taken)}. No other agent can edit them "
+            f"until you call release_files, so release them as soon as you are done.")
+
+
+def handle_release_files(paths: str) -> str:
+    """Give files back. Only this agent's own claims are dropped."""
+    if not channel.enabled():
+        return _channel_off()
+    dropped = channel.release(paths)
+    if not dropped:
+        return ("[System] Nothing was released - none of those files are claimed by "
+                "you. Use list_agents to see what you are holding.")
+    return f"[Success] Released {', '.join(dropped)}."
+
+
 # Which argument of which tool names a file that ends up changed. `create_dir`
 # is absent on purpose: git does not track an empty directory, so there would
 # be nothing to commit.
@@ -975,24 +1450,48 @@ _WRITES_FILES = {
 # `send_input` are here because a command can write as easily as it can read,
 # and a stage that is meant to be read-only cannot check which.
 _CHANGES_THINGS = frozenset(_WRITES_FILES) | {
-    "create_dir", "run_cmd", "send_input", "end_process",
+    "create_dir", "run_cmd", "send_input", "end_process", "run_python",
     "write_memory", "edit_memory", "delete_memory", "call_api",
 }
 
 
-def _commit_if_changed(function_name: str, arguments: dict, result) -> None:
-    """Commit what a tool just wrote, so it can be taken back later.
+def _claimed_by_another(function_name: str, arguments: dict) -> tuple:
+    """The other agent's claim standing in front of this call, or ("", {}).
 
-    Only runs for a tool that reports success: a write the user declined at the
-    approval prompt, or one that failed, has changed nothing to commit.
+    Read from `_WRITES_FILES`, so a tool that changes a file is covered here the
+    moment it is added there - there is no second list of file tools to keep in
+    step. `run_cmd` is not covered and cannot be: what a shell command touches
+    is not knowable from the call.
+    """
+    for key in _WRITES_FILES.get(function_name, ()):
+        path = arguments.get(key)
+        if isinstance(path, str) and path:
+            conflict = channel.holder(path)
+            if conflict:
+                return path, conflict
+    return "", {}
+
+
+def _paths_written(function_name: str, arguments: dict, result) -> list:
+    """The files a call actually changed. Empty unless the tool reported success.
+
+    A write the user declined at the approval prompt, or one that failed, has
+    changed nothing - nothing to commit, and nothing to tell the other agents
+    about. Both of the things that happen after a write read this, so they
+    cannot disagree about what was written.
     """
     keys = _WRITES_FILES.get(function_name)
-    if not keys or not git_ops.enabled():
+    if not keys or not isinstance(result, str) or not result.startswith("[Success"):
+        return []
+    return [arguments[key] for key in keys
+            if isinstance(arguments.get(key), str) and arguments[key]]
+
+
+def _commit_if_changed(function_name: str, arguments: dict, result) -> None:
+    """Commit what a tool just wrote, so it can be taken back later."""
+    if not git_ops.enabled():
         return
-    if not isinstance(result, str) or not result.startswith("[Success"):
-        return
-    paths = [arguments[key] for key in keys
-             if isinstance(arguments.get(key), str) and arguments[key]]
+    paths = _paths_written(function_name, arguments, result)
     if not paths:
         return
     sha = git_ops.auto_commit(paths, function_name)
@@ -1063,6 +1562,15 @@ def dispatch_tool(function_name: str, arguments: dict) -> str | None:
                 "change and why. You will be asked to make the change in a later "
                 "stage, and everything you write now carries over to it.")
 
+    blocked, conflict = _claimed_by_another(function_name, arguments)
+    if conflict:
+        # Another harness, in another terminal, is in the middle of this file.
+        # Letting the write through would throw their work away silently, which
+        # is the whole reason the board exists.
+        print(f"  {S.WARN}\u2717 {conflict['agent']} is working on "
+              f"{conflict['path']}{S.R}  {S.GRAY}/agents to see who{S.R}")
+        return channel.refusal(function_name, blocked, conflict)
+
     verdict, rule = permissions.decide(function_name, arguments)
     if verdict == "deny":
         print(f"  {S.ERR}✗ Blocked by permission rule: {rule}{S.R}")
@@ -1075,6 +1583,7 @@ def dispatch_tool(function_name: str, arguments: dict) -> str | None:
     finally:
         config.POLICY_AUTO_ALLOW = False
     _commit_if_changed(function_name, arguments, result)
+    channel.note_write(_paths_written(function_name, arguments, result))
     return _name_the_failure(function_name, arguments, result)
 
 
@@ -1095,6 +1604,7 @@ def _handlers() -> dict:
             "run_cmd": safe_run_cmd,
             "send_input": handle_send_input,
             "end_process": handle_end_process,
+            "run_python": handle_run_python,
             "list_dir": handle_list_dir,
             "read_file": handle_read_file,
             "write_file": handle_write_file,
@@ -1118,6 +1628,10 @@ def _handlers() -> dict:
             "submit_plan_for_approval": handle_submit_plan_for_approval,
             "use_skill": handle_use_skill,
             "spawn_agent": handle_spawn_agent,
+            "list_agents": handle_list_agents,
+            "send_agent_message": handle_send_agent_message,
+            "claim_files": handle_claim_files,
+            "release_files": handle_release_files,
         }
         _check_registry(_HANDLERS)
     return _HANDLERS

@@ -131,6 +131,16 @@ TOOLS = (
         ),
     ),
     Tool(
+        name='run_python',
+        description="Run Python in a scratch process and get back what it printed, plus the value of the last line - so `2 ** 10` on its own answers 1024. Use it to work something out before you commit to it: check a calculation, try a regex against real strings, see what a function really returns. Everything it defines - variables, functions, imports - stays for your next run_python call, so you can build up one step at a time. The code is NOT a JSON parameter: put it in a <content> block directly after the JSON object, inside the same <tool_call> (see DO rule 3). It starts in a scratch directory of its own, so whatever it writes lands there and not in your project - to run a file you have written, use run_cmd.",
+        native_description="Run Python in a scratch process and get back what it printed, plus the value of the last line - so `2 ** 10` on its own answers 1024. Use it to work something out before you commit to it: check a calculation, try a regex against real strings, see what a function really returns. Everything it defines - variables, functions, imports - stays for your next run_python call, so you can build up one step at a time. It starts in a scratch directory of its own, so whatever it writes lands there and not in your project - to run a file you have written, use run_cmd.",
+        params=(
+            Param(name='content', description='The Python code, in a <content> raw block. Write it exactly as it should be typed - real line breaks, real quotes, no escaping.', aliases=('code', 'source'), block=True, native_description='The Python code to run, exactly as it should be typed.'),
+            Param(name='stdin', description='(Optional) Answers for anything the code reads with input(), in a <stdin> raw block, one per line.', aliases=('input',), block=True, optional=True, native_description='(Optional) Answers for anything the code reads with input(), one per line.'),
+            Param(name='reset', description='(Optional) true to throw away every variable from your earlier calls and start with an empty namespace. Leave it out to keep them.', default=False, optional=True),
+        ),
+    ),
+    Tool(
         name='list_dir',
         description='List the contents of a directory.',
         params=(
@@ -155,12 +165,12 @@ TOOLS = (
     ),
     Tool(
         name='edit_file',
-        description='Edit part of an existing file by replacing old content with new. Use this instead of write_file when you only need to change part of a file. The two snippets are NOT JSON parameters: put them in <old_content> and <new_content> blocks after the JSON object, inside the same <tool_call> (see DO rule 3). Hashline prefixes are stripped automatically.',
-        native_description='Edit part of an existing file by replacing old content with new. Use this instead of write_file when you only need to change part of a file. Hashline prefixes are stripped automatically.',
+        description='Edit part of an existing file. Use this instead of write_file when you only need to change part of a file. The snippets are NOT JSON parameters: put them in <old_content> and <new_content> blocks after the JSON object, inside the same <tool_call> (see DO rule 3). SHORTEST WAY, and the one to reach for first: send ONLY a <new_content> block holding the changed line with the anchor read_file gave it - "38:ff|print()" means line 38 becomes print(). No <old_content> at all, and the old text is never retyped. Use <old_content> only when the number of lines changes or they are being deleted. See HASHLINE FORMAT.',
+        native_description='Edit part of an existing file. Use this instead of write_file when you only need to change part of a file. SHORTEST WAY, and the one to reach for first: pass ONLY new_content, holding the changed line with the anchor read_file gave it - "38:ff|print()" means line 38 becomes print(). No old_content at all, and the old text is never retyped. Use old_content only when the number of lines changes or they are being deleted. See HASHLINE FORMAT.',
         params=(
             Param(name='filepath', description='The absolute path to the file. This one DOES go in the JSON.', native_description='The absolute path to the file.'),
-            Param(name='old_content', description='The snippet to replace, in an <old_content> raw block.', block=True, native_description='The exact snippet to replace, as it currently appears in the file.'),
-            Param(name='new_content', description='What to put in its place, in a <new_content> raw block.', block=True, native_description='What to put in its place.'),
+            Param(name='old_content', description='(Leave this out when the new lines carry their own anchors.) Which lines to replace, in an <old_content> raw block: their hashline anchors - "50:1f" for one line, one anchor per line for several, "50:1f-53:9c" for a span - or the exact text of the snippet.', block=True, optional=True, native_description='(Leave this out when the new lines carry their own anchors.) Which lines to replace: their hashline anchors - "50:1f" for one line, one anchor per line for several, "50:1f-53:9c" for a span - or the exact snippet as it currently appears in the file.'),
+            Param(name='new_content', description='The new lines, in a <new_content> raw block. Give each one the anchor of the line it replaces - "38:ff|print()" - and old_content is not needed. Without anchors it is plain replacement text for whatever old_content named, and empty deletes those lines.', block=True, native_description='The new lines. Give each one the anchor of the line it replaces - "38:ff|print()" - and old_content is not needed. Without anchors it is plain replacement text for whatever old_content named, and empty deletes those lines.'),
         ),
     ),
     Tool(
@@ -290,6 +300,33 @@ TOOLS = (
             Param(name='task', description="The brief, written for someone who cannot see this conversation and cannot ask you anything. State what to do, which files or paths to start from, and exactly what to report back. A vague brief comes back as a vague report."),
             Param(name='context', description="(Optional) Facts it needs that it could not find on its own - what has already been tried, a decision you have made, the shape of an answer you want.", optional=True),
             Param(name='model', description="(Optional) A different model to run it on, e.g. a smaller one for a long mechanical search. Defaults to the model you are running on.", optional=True),
+        ),
+    ),
+    Tool(
+        name='list_agents',
+        description="List the other AI agents working in this same project right now, what each one is doing, and which files each has claimed. Other agents are separate assistants in their own terminals, editing the same files you are. Call this before starting work that touches shared files, and whenever you need to know who to ask about one.",
+    ),
+    Tool(
+        name='send_agent_message',
+        description="Say something to another AI agent working in this same project. Use it to ask who is changing a file before you change it, to say what you are about to do, or to answer a question another agent asked you. The message is delivered to that agent on its next turn - it is not a reply you can wait for, so say what you need and carry on with something else until an answer arrives.",
+        params=(
+            Param(name='message', description='What to say. One or two sentences, naming the files you mean.'),
+            Param(name='to', description="(Optional) The agent id from list_agents, e.g. 'a2'. Leave it out to tell everyone here.", optional=True),
+        ),
+    ),
+    Tool(
+        name='claim_files',
+        description="Announce that you are about to change these files, so no other agent changes them at the same time. While you hold a claim, other agents are refused any edit to those files and are told to ask you. Claim before you start a multi-step change to a shared file, and call release_files as soon as you are done with it. If another agent already holds one of the files, nothing is claimed and you are told who has it.",
+        params=(
+            Param(name='paths', description='The file path to claim. Several may be given, separated by commas.'),
+            Param(name='reason', description='What you are doing to them, in a few words. The other agents see this.'),
+        ),
+    ),
+    Tool(
+        name='release_files',
+        description='Hand back files you claimed with claim_files, so another agent can work on them. Call this as soon as you have finished changing them - do not leave a claim open across the rest of the conversation.',
+        params=(
+            Param(name='paths', description='The file path to release. Several may be given, separated by commas.'),
         ),
     ),
     Tool(

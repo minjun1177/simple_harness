@@ -23,6 +23,7 @@ exists to make small models genuinely usable rather than nearly usable.
 - **Two Tool Protocols, One Tool Table**: A model with a real function-calling interface gets the tools through it; one without gets them as `<tool_call>` text with a JSON repair engine behind it. For Ollama this is decided per model. Both come from the same table, and both end up as the same call.
 - **Deepthink**: `/deepthink on` turns one request into plan → argue with the plan → build → review the real diff → run it. The planning stages *cannot* edit, and the harness reports what the final check actually ran.
 - **Undo**: every file an AI tool changes is committed on its own, so `/undo` takes it back. It commits only what the tool named, and refuses to undo over work it did not create.
+- **Several harnesses in one project**: people run three of these at once and, until now, none of them knew the others existed - two would read the same file and the second write would silently throw the first away. The instances working in one project now share a board: they can see each other, message each other, and a file one of them is in the middle of changing is refused to the others by name. See *The Agent Channel*.
 - **Sub-agents**: `spawn_agent` hires a second model for one self-contained job. It works in its own context and hands back only its report, so a twenty-tool-call search never enters the conversation.
 - **Crash-safe writes**: sessions, memory, permission rules and saved API keys are written to a temporary file and renamed into place, so being killed mid-write cannot empty one.
 - **ANSI Terminal User Interface**: Provides an ANSI-colored TUI with streaming text responses, live token-per-second (TPS) calculation, custom spinner animations, markdown rendering, syntax code blocks, and ASCII tables.
@@ -35,7 +36,7 @@ exists to make small models genuinely usable rather than nearly usable.
 - **`@` file attachments**: Typing `@` opens a list of what is in the directory you are standing in - arrow keys to move, Tab to insert, `/` to descend into a folder. `@src/main.py` sends that file with your message instead of spending a round trip on the model asking for it. Directories arrive as their listing, a path that does not exist is reported without stopping the turn, and one mention cannot swallow the context window (`MENTION_MAX_CHARS`).
 - **`!` shell escape**: A line starting with `!` runs as a shell command - yours, not the model's, so no approval prompt - and its output joins the conversation, so the next question can be about what it printed.
 - **Enhanced Terminal Shell**: Input autocompletion for slash commands and persistent input history across restarts powered by `prompt_toolkit`.
-- **Hashline Line-Level Hashing**: File reading appends 2-character MD5 hashes to line numbers (`LINE_NUM:HASH|`) allowing the agent to target precise code locations when making edits.
+- **Hashline Line-Level Hashing**: File reading returns every line as `LINE_NUM:HASH|content`, and `edit_file` takes that row *back* as the whole edit: `38:ff|print()` means line 38 becomes `print()`. No second block, no retyping the old line, no matching. The hash is checked against the file first, so an edit made against a stale reading is refused rather than landing a few lines off.
 - **Multi-Source Web Search**: Queries several keyless sources (DuckDuckGo, Wikipedia, Stack Exchange, GitHub, optional self-hosted SearXNG), reads the actual pages, ranks passages locally with BM25, and reports "no relevant results" rather than returning off-topic pages.
 - **Agent Skills**: Folder-based instruction packs (`skills/<name>/SKILL.md`) that the model loads on demand. Only each skill's name and description sit in the system prompt, so a large library stays cheap until a skill is actually needed.
 - **Tool Permissions**: Rules in `.permissions.json` decide what runs without asking and what never runs at all, filling the gap between prompting for everything and `/automode` allowing everything. Answering `a` at any approval prompt saves a rule.
@@ -94,7 +95,7 @@ is.
 1. **Install it**:
    ```bash
    git clone https://github.com/minjun1177/simple_harness
-   cd chat
+   cd simple_harness
    pip install -e .
    ```
    Or, to run it straight from the checkout without installing:
@@ -137,13 +138,15 @@ for t in tests/*.py; do python "$t" || echo "FAILED: $t"; done
 
 `tests/test_platform.py` is the one worth running on any new machine, and
 especially on Windows: it checks what that machine can tell you about a command
-waiting for input.
+waiting for input. `tests/test_vm.py` starts and kills real Python processes,
+so it is the slowest of them - about ten seconds, most of it waiting out a
+deliberate `VM_TIMEOUT`.
 
 ---
 
 ## 4. Tool Capabilities
 
-The client equips the model with 28 tools. They are listed in one table in
+The client equips the model with 33 tools. They are listed in one table in
 `toolspec.py`, from which both the system prompt and the dispatcher are
 generated - so this list cannot quietly drift from what actually runs.
 
@@ -172,7 +175,95 @@ models get wrong most often - a bare quote inside `print("hi")`, a lost
 backslash before a line continuation, one uncounted brace - and any of them used
 to throw the entire generation away. A raw block removes the requirement: the
 text is written exactly as it belongs on disk, with no escaping at all. `<content>`
-feeds `write_file`; `<old_content>` and `<new_content>` feed `edit_file`.
+feeds `write_file` and `run_python`; `<old_content>` and `<new_content>` feed
+`edit_file`; `<stdin>` feeds `run_cmd`, `send_input` and `run_python`.
+
+### Editing by hashline anchor
+
+`read_file` returns every line with a prefix:
+
+```
+50:1f|    print(answer)
+```
+
+`50` is the line number and `1f` is a two-character fingerprint of that line's
+exact content. Both used to be decoration - `edit_file` stripped the prefix off
+and matched what was left as literal text, so to change one line the model still
+had to reproduce it perfectly: every space of indentation, every quote, every
+backslash. That is what a small model gets wrong most often. And a line that
+appears twice anywhere in the file could not be edited at all, because the
+snippet was ambiguous and the edit was refused.
+
+The prefix is enough on its own. Hand the row back with different text after
+the `|`, and that is the entire edit - there is no `old_content` block:
+
+````
+<tool_call>
+{"name": "edit_file", "arguments": {"filepath": "game.py"}}
+<new_content>
+50:1f|    print("the answer was", answer)
+</new_content>
+</tool_call>
+````
+
+`50:1f` says *which* line and proves it is the line that was read; everything
+after the `|` is what it becomes. One row per line changed, and the lines need
+not be next to each other:
+
+````
+<new_content>
+12:a4|import sys
+50:1f|    print("the answer was", answer)
+</new_content>
+````
+
+Each row replaces one line with one line, so nothing below moves and every other
+anchor the model is holding stays valid - which is what makes several edits in
+one call safe.
+
+**When the number of lines changes**, or they are being deleted, that form
+cannot say it: then `old_content` names the lines and `new_content` is ordinary
+text.
+
+| `old_content` | Means |
+| :--- | :--- |
+| `50:1f` | Replace line 50 |
+| `50:1f\|    print(answer)` | The whole row copied out of the listing - the text beside it is the *old* line, and is only used to confirm it |
+| `50:1f` / `51:9c` / `52:aa`, one per line | Replace that run of lines |
+| `50:1f-53:9c` | Replace the span, both ends checked |
+
+An empty `new_content` there deletes the lines outright.
+
+**The hash is what makes it safe rather than merely convenient.** A line number
+on its own would happily point at whatever has since moved into that position. So
+every anchor is checked against the file before anything is written, and a
+mismatch is refused with what is actually there:
+
+```
+[Error] Line 50 of game.py is not what 50:1f says it is. It now reads
+50:9c|    print(result)
+The file has changed since you read it, or the anchor was mistyped. read_file it
+again and use the anchors from the new listing.
+```
+
+That is the case worth having: another agent edited the file, or the model's own
+earlier edit moved everything below it, and the edit lands in the wrong place
+with nothing to say so. It is refused instead. When the number of lines changes,
+the result says so too, so the next edit starts from a fresh `read_file`.
+
+In the one-row form the hash is the *only* check there is - the text beside it
+is what the line is to become, not what it is now - so it is never waived. In
+the `old_content` form there is a second piece of evidence, and it is used: a
+hash that disagrees with an exactly-correct line beside it
+(`50:ab|    print(answer)`) is treated as a slip of two hand-copied characters,
+and the line itself is believed.
+
+An `old_content` that is not made *entirely* of anchors is matched as text
+exactly as before, and so is a `new_content` whose rows are not all anchored.
+Anchors have to be certain before they take over, because falling back is always
+safe and taking over wrongly is not. For the same reason, an `old_content` that
+names different lines from the ones `new_content` anchors is refused rather than
+half-obeyed.
 
 Plain JSON still works. When it arrives damaged, the parser repairs what is
 unambiguously safe - unclosed brackets, parameters the model put beside `name`
@@ -242,7 +333,7 @@ that says what went wrong.
 ### File System & Workspace Tools
 - `read_file`: Read contents of a local file formatted with line numbers and line MD5 hashes.
 - `write_file`: Create new files or overwrite existing file content. The body comes in a `<content>` raw block.
-- `edit_file`: Find and replace specific content snippets within an existing file, via `<old_content>` / `<new_content>` raw blocks.
+- `edit_file`: Replace part of a file, via `<old_content>` / `<new_content>` raw blocks. `old_content` either names the lines by hashline anchor (`50:1f`) or quotes them as text - see *Editing by hashline anchor*.
 - `delete_file`: Remove a file from disk.
 - `copy_file`: Copy a file to a new location.
 - `create_dir`: Create a new directory path.
@@ -253,6 +344,7 @@ that says what went wrong.
 - `run_cmd`: Execute system shell commands (requires approval). Stays connected to the command and reports when it is waiting for input.
 - `send_input`: Answer a running command's prompt and read what it prints next.
 - `end_process`: Stop a command left running by `run_cmd`.
+- `run_python`: Run Python in a scratch process that keeps what it defines between calls, and get back what it printed plus the value of the last line. See *The Python VM* below.
 - `get_system_info`: Retrieve system CPU, memory usage, disk statistics, and top memory-consuming processes.
 - `git_status`: Check current git repository status.
 - `git_diff`: View current git working directory modifications.
@@ -270,6 +362,13 @@ Present only when an MCP server is attached (see MCP Servers below).
 - `mcp__<server>__<tool>`: Every tool each connected server exposes, listed in the system prompt with its own parameters.
 - `list_mcp_resources`: List the resources the connected servers expose, with the URI needed to read each one.
 - `read_mcp_resource`: Read one resource by URI.
+
+### Agent Channel Tools
+Present whenever more than one harness is running in the same project (see The Agent Channel below).
+- `list_agents`: Who else is working here right now, on what, and which files each is holding.
+- `send_agent_message`: Say something to one of them, or to all of them.
+- `claim_files`: Announce files you are about to change, so nobody else changes them meanwhile.
+- `release_files`: Hand them back.
 
 ### Workflow Tools
 - `use_skill`: Load the full instructions of a skill listed in the system prompt.
@@ -312,6 +411,80 @@ Starting one asks for approval, like running a command does - it costs a stretch
 of time, and on a hosted model real money, before it reaches its first tool.
 Allow it permanently with an `allow` rule for `spawn_agent`.
 
+### The Agent Channel
+
+A sub-agent is one you hired. This is about the ones you did not: the other
+terminals you have open on the same project, each running its own harness, each
+with its own conversation and no idea the others exist.
+
+That is how people actually use this - one window planning, one writing tests,
+one chasing a bug - and it has a failure mode nobody sees happen. Two agents
+read the same file. Each writes back its own idea of it. The second write
+throws the first one's work away, and neither transcript contains anything to
+say so.
+
+So every harness started in a project joins one board:
+
+```
+❯ /agents
+
+  Agents in /home/you/proj
+  ────────────────────────
+  a1 (you)     gemma4:e4b - Fixing the CSV parser
+               started 20m ago, holding parser.py
+  a2           claude-opus-5 - Writing tests for the parser
+               started 4m ago, holding nothing
+
+  Recently said
+     2m ago    a2 → everyone: I am only touching tests/, parser.py is yours
+```
+
+**Where the board is.** `~/.localchat/channel/<project>-<digest>.json`, one file
+per workspace, never in the project itself - it is a note about who is running
+right now, not something to commit. The workspace is the git working tree, so a
+terminal opened in `src/` and one opened at the top are the same workspace and
+see each other.
+
+**Talking.** `send_agent_message` posts to one agent or to all of them. The
+message reaches the other agent at the start of its next turn, and reaches the
+person in front of that terminal as soon as their prompt is free - it is printed
+above whatever they are typing, so a question asked while they are idle does not
+sit unread until they press Enter. You can join in yourself with
+`/agents say <text>`.
+
+It is a message, not a call: nothing blocks waiting for a reply. Say what you
+need, carry on with something else, and the answer arrives on a later turn.
+
+**Not conflicting.** Talking is not enough, for the same reason nothing else in
+this harness relies on the model behaving: a model asked to coordinate will
+sometimes just edit the file. So the board is enforced.
+
+- `claim_files` takes the files you are about to change. While you hold them,
+  any `write_file`, `edit_file`, `delete_file` or `copy_file` onto them **from
+  another session** is refused before it runs, with your id and your stated
+  reason in the refusal. `release_files` hands them back.
+- A claim is taken **automatically** by whichever agent writes a file, so the
+  protection does not depend on anybody having remembered to ask for one. Those
+  last `CHANNEL_WRITE_TTL` seconds (5 minutes); an explicit claim lasts
+  `CHANNEL_CLAIM_TTL` (30).
+- Claims die with the agent. Leaving normally releases them; a terminal that is
+  killed outright is noticed by its pid, and the claim expires regardless.
+- The refusal is a `[System]` result, so an agent that keeps knocking on the
+  same closed door ends its turn after three attempts rather than spending the
+  whole budget on it.
+
+`run_cmd` is deliberately not covered. What a shell command touches cannot be
+known from the call, and pretending otherwise would be a lock that reads as
+protection while protecting nothing.
+
+**Overruling it.** The person is the only one here who can see both terminals,
+so they are the only one who can take a claim off somebody: `/agents release
+<path>`. No tool does it. `/agents off` takes this session off the board
+entirely, and `CHANNEL_ENABLED = False` in `config.py` never puts it on.
+
+Working alone, none of this happens: the board is empty, nothing is claimed,
+nothing is delivered, and the only cost is four extra tools in the prompt.
+
 ---
 
 ## 5. Providers
@@ -324,6 +497,7 @@ moves it:
 /connect anthropic           pick a model from Anthropic
 /connect openai gpt-4o       connect straight to a model
 /connect status              every provider, and what each one still needs
+/connect forget anthropic    delete the API key saved for a provider
 ```
 
 | Provider | Endpoint | Key from |
@@ -343,6 +517,14 @@ which is a place people commit from. On Linux and macOS the file is owner-only
 (0600) from the moment it is created. Windows has no POSIX mode bits, so there
 the file takes whatever ACL its directory gives it; `%USERPROFILE%` is
 per-user, but if that matters to you, keep the key in the environment instead.
+
+`/connect forget <provider>` takes a saved key back out. `/connect` only ever
+asked for a key when there was none, so one pasted into the wrong provider, or
+one that has since been revoked, used to stay in that file with nothing in the
+program able to remove it. Only the key goes - the model beside it is not a
+secret, and keeping it makes reconnecting one step. A key coming from an
+environment variable is not touched, because this program cannot unset your
+shell's variables, and it says so rather than appearing to have done something.
 
 ### How tools are asked for
 
@@ -626,6 +808,72 @@ Python older than 3.15 printing to a pipe on Korean Windows produces, the
 console code page takes over for the rest of that command - both for what it
 prints and for what `send_input` sends back to it.
 
+### The Python VM
+
+`run_python` is a Python process kept alive beside the harness, for working
+something out before committing to it. It is aimed squarely at the small local
+model this harness is built around: `gemma4:e4b` cannot hold an intermediate
+result in its head, cannot reliably do arithmetic in prose, and will state what
+a regex matches rather than find out.
+
+```
+<tool_call>
+{"name": "run_python", "arguments": {}}
+<content>
+import statistics
+scores = [88, 92, 79, 95, 61]
+print("mean", statistics.mean(scores))
+sorted(scores)[-2]
+</content>
+</tool_call>
+```
+
+```
+[Success] ran in 0.04s.
+
+mean 83
+
+=> 92
+
+(kept for your next run_python call: scores, statistics)
+```
+
+Four things it does that `run_cmd python3 -c "..."` does not:
+
+- **The code does not have to survive a JSON string.** It arrives in a
+  `<content>` block, byte for byte, exactly as a file body does. Escaping a
+  snippet into a shell argument inside a JSON value is two levels of quoting,
+  and it is the single thing a 4B model gets wrong most often.
+- **It remembers.** One process holds its globals across calls, so the model
+  can compute, look at the answer, and compute again. The result names what it
+  just defined, so the model knows what it still has. `reset` empties it.
+- **The last expression is answered.** `2 ** 10` on its own prints nothing
+  under `python -c`; here it comes back as `=> 1024`. A model reaches for a
+  calculator far more readily when the calculator answers.
+- **It is a scratchpad, not the project.** The process runs in
+  `~/.localchat/vm`, so a stray `open(..., "w")` lands there rather than in the
+  repository - and never in an auto-commit. The project is still on its
+  `PYTHONPATH`, so a function that has just been written can be imported and
+  tried; nothing is written back to it, not even a `__pycache__`.
+
+Answers for anything the code reads with `input()` go in a `<stdin>` block, one
+per line, so a prompt can be tried without the `run_cmd` / `send_input` dance.
+
+**It is isolation from mistakes, not from a hostile program.** The code runs as
+you, with your files and your network, and there is no pretence otherwise -
+which is why `run_python` still goes through the approval prompt, and why it
+counts as changing the world, so a read-only deepthink stage refuses it exactly
+as it refuses `run_cmd`. What the separate process does buy is that a runaway
+loop, a 40GB allocation or a hard crash takes down the scratch process and not
+the harness. On POSIX it is additionally capped at `VM_MEMORY_MB` of address
+space and `VM_FILE_MB` per file written; Windows has no `resource` module and
+gets the wall-clock kill alone.
+
+Any of the three ways it can die - the `VM_TIMEOUT` kill, a crash, an
+`os._exit()` - loses the namespace, and the result says so in as many words.
+Silence there would leave the model referring to variables that no longer
+exist, and the next error would be a `NameError` explaining nothing.
+
 ---
 
 ## 10. Deepthink
@@ -782,6 +1030,14 @@ an adversary.
 and would have meant the opposite, so it is refused at load time and named in
 `/perms`. Write the bare tool name, `write_file`, when you mean every call.
 
+**`run_python` takes no pattern at all.** A rule matches one argument as text,
+and the argument here is a program - `run_python(import *)` would mean nothing
+useful and would read as though it meant something. So the only rule is the
+bare `run_python`, which allows every snippet, and the prompt shows the code
+before it runs. Allowing it is worth roughly what allowing `run_cmd` outright
+is worth; the difference is that the prompt is showing you exactly what will
+run.
+
 At an approval prompt the choices are now `[y/n/a]`, where `a` allows this
 exact call from now on and appends the rule to `.permissions.json`. `/perms`
 lists the active rules, `/perms allow <rule>` and `/perms deny <rule>` add one
@@ -811,8 +1067,36 @@ itself and *then* calls a tool shows only the explanation.
 ## 14. Configuration
 
 Most behaviour is reachable from a slash command, and those changes last for the
-session. `config.py` is where you change what it starts as. The settings worth
-knowing:
+session. **`/set` changes what it starts as, without editing any source.**
+
+```
+/set                      every setting, with the changed ones marked
+/set NUM_CTX 32768        change one - for this session and the next
+/set NUM_CTX default      put it back to what config.py says
+```
+
+What was changed is written to `~/.localchat/settings.json` and applied over
+`config.py` at startup. **Only the deviations are recorded**, so a default that
+improves in a later version still reaches you if you never overrode it - writing
+all sixty out would freeze this release's values the first time you changed one.
+
+A setting is any `UPPER_CASE` name in `config.py` holding a number, a switch, a
+string or a list, so a setting added there is settable the moment it exists.
+What is *not* settable is named rather than listed, and it is a short list: the
+system prompt and the model (they have commands of their own), live state such
+as the session title, facts about the machine, the two tool-result markers
+(invariant 5.9 - a protocol, not a preference), and the paths under
+`~/.localchat`, which `LOCALCHAT_HOME` moves together.
+
+Values are checked against the type the setting already has - `on`/`off` for a
+switch, a number for a number, commas for a list - and a negative number is
+refused, because none of them mean anything below zero and one fails much later
+and somewhere else. Nothing above zero is second-guessed: this file was always
+editable by hand, and the same latitude belongs here. A `settings.json` that
+will not parse is ignored entirely and the harness starts on the defaults.
+
+`config.py` is still where the defaults live, and where each one is commented.
+The settings worth knowing:
 
 | Setting | Default | What it does |
 | :--- | :--- | :--- |
@@ -829,16 +1113,27 @@ knowing:
 | `SUBAGENT_MAX_DEPTH` | 1 | 1 means sub-agents cannot hire sub-agents |
 | `SHOW_THINKING` | `False` | Show a reasoning model's scratch work |
 | `STORE_THINKING` | `False` | Keep it in the history too. Expensive on a local model |
+| `CHANNEL_ENABLED` | `True` | Join the board other harnesses in this project share |
+| `CHANNEL_CLAIMS` | `True` | Refuse an edit to a file another agent is holding |
+| `CHANNEL_CLAIM_TTL` | 1800 | Seconds a `claim_files` claim lasts |
+| `CHANNEL_WRITE_TTL` | 300 | ...and one taken automatically by writing a file |
+| `CHANNEL_STALE` | 120 | Heartbeat age past which an agent is presumed gone |
+| `CHANNEL_POLL_SECONDS` | 2 | How often an idle prompt looks for a new message |
 | `MENTION_MAX_CHARS` | `40000` | Ceiling on what one `@path` may add to the context |
 | `AUTO_TITLE` | `True` | Let the model name each new session |
 | `SAVE_CHAT_HISTORY` | `True` | Write session files at all |
 | `CMD_TIMEOUT` | 120 | Seconds before a runaway command is killed |
 | `CMD_WAIT_TIMEOUT` | 8 | Silence before a command is called "probably waiting" |
+| `VM_TIMEOUT` | 20 | Seconds a `run_python` snippet gets before the VM is killed and restarted |
+| `VM_OUTPUT_CHARS` | 4000 | Ceiling on what one snippet may print back; the middle is dropped |
+| `VM_MEMORY_MB` | 512 | Address space the VM may take. POSIX only; 0 for no limit |
+| `VM_FILE_MB` | 64 | Largest file the VM may write. POSIX only; 0 for no limit |
 | `MCP_ENABLED` | `True` | Attach MCP servers on startup |
 | `SEARXNG_URL` | `""` | A self-hosted search instance to prefer over the public sources |
 
 The rest are tuning knobs for search, MCP and command sessions; they are
-documented in the sections above and commented where they are defined.
+documented in the sections above, commented where they are defined, and all of
+them are listed by `/set`.
 
 State that outlives a session lives outside `config.py`:
 
@@ -855,6 +1150,9 @@ skills, and they win.
 | `~/.localchat/sessions/*.json` | Conversation transcripts, named after the session title, each recording the directory it was last worked in so `-c` can find it |
 | `~/.localchat/memory.json` | The long-term key-value memory |
 | `~/.localchat/history` | Input history for the prompt |
+| `~/.localchat/channel/*.json` | One board per project: which harnesses are running in it, what they have said to each other, and which files each is holding |
+| `~/.localchat/vm/` | The `run_python` scratch directory - where the VM runs, and where anything it writes ends up |
+| `~/.localchat/settings.json` | The settings `/set` changed - only those, never the whole table |
 | `./.permissions.json`, then `~/.localchat/permissions.json` | Allow and deny rules |
 | `./.mcp.json`, then `~/.localchat/mcp.json` | MCP server declarations |
 | `./skills/`, then `~/.localchat/skills/` | Skills |
@@ -876,7 +1174,7 @@ The interactive terminal supports special slash commands to control options and 
 | Command | Description |
 | :--- | :--- |
 | `/help` | Display the list of available commands |
-| `/usage` | Render an ASCII chart of historical token consumption |
+| `/usage` | Token cost per turn, as an ASCII chart, plus the cumulative total. One bar is one thing you asked for, tool calls included |
 | `/model` | Show the connected provider and pick another of its models |
 | `/models` | List the models the connected provider offers |
 | `/clear` | Clear the terminal display and reset conversation history |
@@ -910,6 +1208,7 @@ Two prefixes act on the message itself rather than being commands:
 | `!<command>` | Run a shell command yourself. It skips the approval prompt, because you typed it, and its output is added to the conversation |
 | `/connect [provider] [model]` | Connect a provider, or pick one interactively |
 | `/connect status` | Show every provider and whether it is usable |
+| `/connect forget <provider>` | Delete the API key saved for a provider. An environment variable is left alone, and said so |
 | `/perms` | Show the active tool permission rules |
 | `/perms reload` | Re-read the permission rule files |
 | `/perms allow <rule>` | Add an allow rule, e.g. `/perms allow run_cmd(git *)` |
@@ -917,6 +1216,16 @@ Two prefixes act on the message itself rather than being commands:
 | `/think <on/off>` | Show or hide a reasoning model's thinking |
 | `/deepthink` | The plan-check-build-review-verify chain, and whether it is on |
 | `/deepthink <on/off>` | Turn that chain on or off |
+| `/agents` | Show the other harnesses running in this project, what they hold, and what has been said |
+| `/agents say <text>` | Say something to all of them yourself |
+| `/agents release <path>` | Take a file back from the agent holding it |
+| `/agents <on/off>` | Whether this session appears on the board at all |
+| `/vm` | Show the `run_python` scratch process: whether it is up, what it has run, and the directory it runs in |
+| `/vm reset` | Throw away every variable the model left in it |
+| `/vm stop` | End the process; the next `run_python` starts a fresh one |
+| `/set` | Every setting that can be changed, and which ones you have changed |
+| `/set <NAME> <value>` | Change one, e.g. `/set NUM_CTX 32768`. Saved for next time |
+| `/set <NAME> default` | Put it back to what `config.py` says |
 | `/undo` | Take back the last file change the AI committed |
 | `/autocommit` | Whether AI edits are committed, and the recent AI commits |
 | `/autocommit <on/off>` | Turn that on or off |
@@ -933,6 +1242,7 @@ The codebase is organized cleanly around the following components:
 - **`llm_client.py`**: The conversation loop - streaming a reply, parsing the tool calls out of it, running them. Knows nothing about which provider answered.
 - **`tools.py`**: Tool implementations, and the table binding each one to its entry in `toolspec.py`.
 - **`toolspec.py`**: What every built-in tool is - name, description, parameters. The system prompt is rendered from it and dispatch binds arguments through it, so the two cannot drift apart.
+- **`channel.py`**: The board the harnesses running in one project share - who is here, what they have said, and which files each is in the middle of changing.
 - **`subagent.py`**: `spawn_agent` - a second model, hired for one self-contained job, working in its own context and handing back only its report.
 - **`skills.py`**: Skill discovery, frontmatter parsing, and on-demand loading.
 - **`providers.py`**: The provider abstraction - Ollama, Anthropic, OpenAI, Gemini - and the saved connection.
@@ -958,6 +1268,8 @@ The codebase is organized cleanly around the following components:
 - **`tests/test_tool_parsing.py`**: Every shape a model wraps a tool call in, and every shape that must not be read as one.
 - **`tests/test_resume.py`**: That `--resume` and `-c` open the conversation they name - and that neither hands back a blank one, or guesses, when they cannot.
 - **`tests/test_tool_reporting.py`**: That a tool result is judged by the marker it *starts* with, not one it happens to contain, and that no library writes an unasked-for paragraph to stderr while a tool is running.
+- **`tests/test_hashline_edit.py`**: That `38:ff|print()` reaches the line it names, that a stale or mistyped anchor is refused rather than applied a few lines off, and that everything which is not an anchor still behaves as it did.
+- **`tests/test_channel.py`**: That a file one harness is changing cannot be written from another, that the refusal names who to ask, that a claim dies with the terminal that took it, and that several processes writing to the board at once lose nothing.
 - **`tests/test_mentions.py`**: What `@` attaches and what it must leave alone - an email address is not a file - and that the completion menu reads the real directory.
 - **`requirements-lock.txt`**: The exact dependency set the harness was tested against. `requirements.txt` gives the tested floors and a ceiling before the next breaking release.
 - **`mcp_client.py`**: MCP transports (stdio / streamable HTTP / SSE), the JSON-RPC session, tool and resource calls, and the prompt section they are advertised in.

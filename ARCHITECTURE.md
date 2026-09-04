@@ -12,9 +12,9 @@ mistakes are.
 
 ## 1. What this is
 
-A terminal AI assistant, ~9,500 lines of Python, no framework. It talks to
+A terminal AI assistant, ~12,350 lines of Python, no framework. It talks to
 Ollama, Anthropic, OpenAI and Gemini over plain HTTP (no vendor SDKs), gives the
-model 28 tools, and runs them with the user's approval.
+model 33 tools, and runs them with the user's approval.
 
 The design constraint that explains most of the odd decisions: **it has to work
 with a 4-billion-parameter local model.** Such a model cannot reliably escape a
@@ -35,6 +35,8 @@ app.main()                                      app.py
 ├─ read a line from the user
 ├─ if it starts with "/" → slash command, continue the loop
 │
+├─ channel.turn_note()  → what the other agents here said   channel.py → §8
+│  appended as its own user message, ahead of the next line
 ├─ messages.append({"role": "user", "content": <what they typed>})
 ├─ save_session(messages, id)                   session.py
 │
@@ -126,22 +128,28 @@ to *all* tools belongs here and nowhere else.
 2. **Display** — `_fmt_tool_call`.
 3. **Deepthink read-only gate** — refuses a world-changing tool during a
    planning stage (§7).
-4. **Permission rules** — `deny` returns without reaching the handler; `allow`
+4. **Another agent's claim** — `_claimed_by_another` refuses a write to a file
+   a different harness in this project is in the middle of changing (§8).
+5. **Permission rules** — `deny` returns without reaching the handler; `allow`
    sets `config.POLICY_AUTO_ALLOW` so the handler's approval prompt passes.
-5. **Run** — `_run_tool` looks the name up in `toolspec`, binds the arguments
+6. **Run** — `_run_tool` looks the name up in `toolspec`, binds the arguments
    through it, calls the handler. MCP tools and the two MCP resource tools are
    handled after that lookup fails.
-6. **Auto-commit** — `_commit_if_changed` commits a file the tool changed, if
+7. **Auto-commit** — `_commit_if_changed` commits a file the tool changed, if
    the tool reported `[Success`.
-7. **Name the failure** — `_name_the_failure` puts the call in front of an
+8. **Claim what changed** — `channel.note_write` holds those same files for a
+   few minutes, so the next agent to walk into one is stopped and told who to
+   ask. Both this and the commit read `_paths_written`, so they cannot disagree
+   about what a call actually wrote.
+9. **Name the failure** — `_name_the_failure` puts the call in front of an
    `[Error]` result: `[Error] run_cmd(command='python3 boom.py'): Command
    failed (exit code 1).` Arguments are truncated so a file body cannot push
    the error off the top. `[System]` is left alone - see below.
 
-A refusal from step 3 or 4 returns a string starting with `[System]`. That
+A refusal from step 3, 4 or 5 returns a string starting with `[System]`. That
 prefix is a contract: `chat_turn` counts consecutive `[System]` results and ends
 the turn after three, so a model cannot spend its whole budget on a closed door.
-Step 7 rewrites `[Error]` and never `[System]`, because rewriting the prefix
+Step 9 rewrites `[Error]` and never `[System]`, because rewriting the prefix
 would break that counter.
 
 ---
@@ -283,6 +291,41 @@ stage actually ran, from the tool results, and prints that *after* the model's
 prose - because the model will claim success it did not earn, and the reader
 believes the last line.
 
+**5.12 An anchor is verified or it is not used.** `read_file` returns
+`50:1f|    print(answer)`, and `edit_file` reads that row back two ways:
+`tools._parse_patch` takes `38:ff|print()` in `new_content` as a whole edit -
+which line, and what it becomes - and `_parse_anchors` takes `50:1f` in
+`old_content` as the target for a replacement that changes the number of lines.
+
+The line number alone would be a loaded gun: it points at whatever has since
+moved into that position, and the model's own previous edit is enough to move
+it. So every anchor's hash is checked against the file first and a mismatch is
+an `[Error]` naming what is actually on that line, never a write. The one-row
+form is the strict one - the text beside the anchor is the *new* line, so the
+hash is the only evidence there is and it is never waived.
+
+The parse fails *closed into the old behaviour*: one ordinary line anywhere in
+`old_content` and the whole snippet is matched as text, exactly as before.
+Falling back is always safe; taking over wrongly is not. That is also why the
+one forgiving case is the one where the evidence is stronger, not weaker - a
+wrong hash beside a line whose text matches exactly is accepted, because two
+hand-copied hex characters are far easier to get wrong than the line itself.
+
+**5.11 Two harnesses in one project must not silently overwrite each other.**
+Every instance is its own process, so nothing about the conversation can tell
+you another one exists. `channel.py` is the only place that knows, and the only
+thing that makes it real is the refusal in `dispatch_tool` step 4 - a board
+that agents can read and ignore prevents nothing.
+
+The claim is taken automatically by whoever writes a file, not only by
+`claim_files`, for the reason that runs through this whole codebase: the
+protection cannot depend on the model having thought to ask for it.
+
+It fails open, everywhere. A board that will not parse, a lock that cannot be
+taken, a home directory that cannot be written - each of those lets the write
+through. Coordination is worth a refusal; it is not worth a harness that cannot
+edit a file because a JSON file in `~/.localchat` is malformed.
+
 ---
 
 ## 6. Module map
@@ -301,10 +344,13 @@ app.py            the loop, slash commands, session lifecycle
       └ context.py token budget, trimming, compression
   └ deepthink.py  the five-stage chain
   └ subagent.py   spawn_agent's own conversation loop
+  └ channel.py    the board the harnesses in one project share
+      └ vm.py     the Python scratch process behind run_python
       └ providers.py  four wire formats → one event shape
           └ sse.py    server-sent events, read as they arrive
           └ atomic.py crash-safe writes
-  └ config.py     every setting, plus SYSTEM_PROMPT built at import
+  └ config.py     every setting and its default, the saved overrides read
+                  over them, plus SYSTEM_PROMPT built at import
       └ systemprompt.py  the prompt text, both protocol variants
           └ toolspec.py  the tool table (stdlib only, imports nothing local)
 ```
@@ -315,16 +361,18 @@ app.py            the loop, slash commands, session lifecycle
 | `llm_client.py` | The turn loop, stream filtering, tool-call parsing and repair | Provider wire formats |
 | `providers.py` | HTTP, streaming, per-vendor tool encoding, saved connection | Anything about *which* tools exist |
 | `toolspec.py` | Names, descriptions, parameters, both schema renderings | Handlers, imports of other modules |
-| `tools.py` | Handlers, dispatch, approval prompts | Tool descriptions - those are in `toolspec` |
+| `tools.py` | Handlers, dispatch, approval prompts, the hashline anchor (5.12) | Tool descriptions - those are in `toolspec` |
 | `systemprompt.py` | Prompt text; `tool_rules(native)` shared with `subagent` | A second copy of anything |
 | `deepthink.py` | Stage list, stage instructions, stage gating | Tool logic |
 | `subagent.py` | The sub-agent's own loop and prompt | A second protocol |
 | `git_ops.py` | Commit, undo, diff. Never raises | Anything not about git |
-| `context.py` | Token estimate, trimming, compression | |
+| `channel.py` | Who else is running here, what they said, what they hold | Anything about one conversation |
+| `context.py` | Token estimate, trimming, compression, and folding the token history into turns | |
 | `session.py` | Session files, the directory each was worked in, and long-term memory | |
 | `mentions.py` | `@path` in a typed message: what it names, and what it attaches | Printing - the caller does that |
 | `permissions.py` | Rule loading and the allow/deny/ask decision | |
 | `shell_session.py` | Live commands, waiting-vs-busy detection | |
+| `vm.py` | The scratch Python process: its wire protocol, its ceilings, and restarting it after it dies | How the result is worded - that is `tools.handle_run_python` |
 | `mcp_client.py` | MCP transports, JSON-RPC, MCP tool schemas | |
 | `websearch.py` | Retrieval, extraction, BM25 reranking | |
 | `skills.py` | Skill discovery and loading | |
@@ -376,7 +424,133 @@ nothing ends it at stage 4 rather than reviewing work that never happened.
 
 ---
 
-## 8. Recipes
+## 8. The agent channel
+
+`channel.py`. Several harnesses run in one project at once - that is how people
+use this - and every one of them is its own process, so nothing in a
+conversation can tell you the others exist. Two of them read the same file, both
+write, and the second write throws the first one's work away with nothing on
+either screen to say so.
+
+One JSON file per workspace, in `~/.localchat/channel/`, holds three things:
+
+```
+agents    who is running here: id (a1, a2, ...), pid, model, what they are on
+messages  what they have said, and two read cursors per agent
+claims    which file each of them is in the middle of changing
+```
+
+**The workspace is the git working tree**, falling back to the working
+directory. A terminal opened in `src/` and one opened at the top are working on
+the same thing and have to see each other, and `git rev-parse` is the only thing
+on the machine that already knows where a project ends.
+
+**The board is not in the project.** It is a note about who is running right
+now, not something to commit, and a directory appearing inside somebody's
+repository the first time they open two terminals would be a rude surprise.
+Invariant 5.7a is not broken by this: what lives with a project is its
+*configuration*, and this is not that.
+
+**Two cursors per agent, because a message has two audiences.** `read` is the
+model's: `app.py` calls `turn_note()` before each turn and appends what came
+back as a user message, ahead of the line the person typed, so the request stays
+last. `shown` is the person's: `_watch_channel` polls while the prompt is
+waiting and prints arrivals *above* it through `patch_stdout`. Without that
+second one, a question asked of an idle terminal sits unread until somebody
+presses Enter - which is exactly the terminal you most need to reach.
+
+Nothing is pushed on a quiet turn. A roster repeated every turn would cost
+context in every solo session; what is pushed is what changed - an arrival, a
+departure, something said - and `list_agents` is there for the model that wants
+to look.
+
+**Claims are the part that actually works.** See 5.11. `dispatch_tool` reads
+`_WRITES_FILES` - the same table auto-commit reads - so a file tool is covered
+here the moment it is added there. `run_cmd` is not covered and cannot be: what
+a shell command touches is not knowable from the call, and a lock that reads as
+protection while protecting nothing is worse than none.
+
+Four things keep a claim from becoming a deadlock:
+
+- it dies with the process (`leave`, and a pid check for the ones that are
+  killed outright);
+- it expires - `CHANNEL_CLAIM_TTL` for an explicit one, the much shorter
+  `CHANNEL_WRITE_TTL` for one taken automatically by writing;
+- the refusal is `[System]`, so an agent that keeps retrying ends its turn after
+  three attempts (§4) instead of spending the whole budget on a closed door;
+- `/agents release <path>` overrules it. That is `force_release`, and no tool
+  reaches it: the person is the only one here who can see both terminals.
+
+**Concurrency.** Every change is a locked read-modify-write, and the write goes
+through `atomic.py`. The lock is an `O_EXCL` file, broken when its holder has
+clearly died, and *given up on* after `_LOCK_WAIT` - a lost message is a bad
+afternoon; a harness that stops responding at the prompt because another one
+died holding a lock is a worse one. `tests/test_channel.py` runs six real
+processes at the board to check that giving up that easily still loses nothing.
+
+---
+
+## 8a. The Python VM
+
+`vm.py`, behind the `run_python` tool. One `python` process is kept alive beside
+the harness with its globals intact, so the model can work something out in
+steps instead of guessing at it - which is the whole point for a 4B model, and
+the reason this is not simply `run_cmd python3 -c "..."`. `README.md` §9 has the
+four differences that matter; this is how it is wired.
+
+```
+parent (vm.Kernel)                   kernel (vm._DRIVER, written to disk and run)
+------------------                   -------------------------------------------
+stdin pipe   -- one JSON line -->    read from a dup of fd 0
+                                     fd 0 itself is /dev/null
+stdout pipe  <- one JSON line ---    written to a dup of fd 1
+                                     fd 1 and fd 2 are the capture file
+capture file <-------------------    everything the code prints
+read from the offset we left at
+```
+
+**The dups are the design.** Redirecting the capture at the file-descriptor
+level rather than swapping `sys.stdout` means output from a C extension or a
+subprocess is caught too, and - the part that actually broke first - code that
+reads stdin cannot eat the next request, and a `print` cannot be mistaken for a
+reply. The protocol and the output travel on channels that cannot touch.
+
+**A trailing expression is answered.** `2 ** 10` alone prints nothing under
+`python -c`, and a model told it has a calculator stops believing it after one
+try. `_run` splits the last `ast.Expr` off the module, `exec`s the rest and
+`eval`s that, and the kernel's own frames are stripped off any traceback -
+`_below_kernel` - so the model sees only lines it wrote.
+
+**Dying is a reported outcome, not an error.** `run()` returns `timeout` or
+`crashed` as separate keys from `error`, because those two mean the namespace is
+gone. The handler turns each into a result that says so; a model told only "that
+failed" goes on referring to variables that no longer exist.
+
+**It is isolation from mistakes, not a sandbox**, and nothing in the code or the
+prose pretends otherwise. The code runs as the user. That is why `run_python` is
+in `tools._CHANGES_THINGS` alongside `run_cmd` - what a snippet touches is no
+more knowable from the call than what a shell command touches - and why it still
+asks. What the separate process buys is that a runaway loop or a 40GB allocation
+takes down the scratch process and not the harness.
+
+**`_limiter` captures its values in the parent.** A `preexec_fn` runs between
+fork and exec, in a process holding the parent's threads' locks and none of its
+threads; importing a module or reading `config` there can deadlock. RLIMIT_CPU
+is deliberately absent: it counts CPU seconds over the whole life of a process
+that is meant to live for the whole session, so a limit sized for one call would
+kill a healthy kernel after twenty of them. A loop that will not end is a
+wall-clock problem and `Kernel.run` handles it as one.
+
+**The scratch directory is the person's, not the project's** (5.7a):
+`~/.localchat/vm`, and the process runs there, so a stray write lands in the
+scratchpad instead of the repository and never in an auto-commit. The working
+directory is on the child's `PYTHONPATH` so project code can be imported and
+tried, with `PYTHONDONTWRITEBYTECODE` set so importing it leaves no
+`__pycache__` behind in somebody's `git status`.
+
+---
+
+## 9. Recipes
 
 ### Add a tool
 
@@ -387,8 +561,10 @@ nothing ends it at stage 4 rather than reviewing work that never happened.
 2. `tools.py` — write `handle_<name>(...)` and add one line to `_handlers()`.
 3. Nothing else. The prompt, the native schemas and dispatch all follow.
    If they do not agree, `_check_registry` raises on the first tool call.
-4. If it changes files, add it to `_WRITES_FILES` (auto-commit) and
-   `_CHANGES_THINGS` (deepthink's read-only stages).
+4. If it changes files, add it to `_WRITES_FILES` and `_CHANGES_THINGS`.
+   `_WRITES_FILES` is read three times over - auto-commit, the claim check that
+   refuses another agent's file, and the claim taken after a write - so one
+   line there is all three.
 
 ### Add a provider
 
@@ -415,7 +591,7 @@ write a second copy - `subagent.py` reads the same function.
 
 ---
 
-## 9. Tests
+## 10. Tests
 
 No framework. Each file is a script that prints `[ok]` / `[FAIL]` lines and
 exits non-zero on failure. Run them all:
@@ -440,6 +616,11 @@ for t in tests/*.py; do python "$t" || echo "FAILED: $t"; done
 | `test_resume.py` | That `--resume` and `-c` resolve on the command line, and refuse rather than guess |
 | `test_tool_reporting.py` | That the result markers are read as anchors (5.9), and that nothing warns onto stderr mid-tool |
 | `test_mentions.py` | What `@` attaches, what it refuses to, and that the menu reads the real directory |
+| `test_channel.py` | That another harness's file cannot be written from here, that a claim dies with its terminal, and that concurrent writes to the board lose nothing (5.11, §8) |
+| `test_hashline_edit.py` | That an anchor reaches the line it names, and that a stale one is refused rather than applied a few lines off (5.12) |
+| `test_vm.py` | That `run_python` takes its code as a raw block, remembers between calls, and says the namespace is gone every way it can die (§8a) |
+| `test_usage.py` | That a turn's requests are counted as one turn, that a resumed session carries on past its own, and that a session recorded before turns existed still renders |
+| `test_settings.py` | That `/set` records only what changed, that a broken settings file still starts, that a saved API key can be deleted, and that the banner fits the terminal |
 | `test_docs.py` | That this file and `README.md` still describe the program that exists |
 
 `test_docs.py` is why the two documents can be trusted: it fails if either names
@@ -453,7 +634,7 @@ it.
 
 ---
 
-## 10. Things that surprise people
+## 11. Things that surprise people
 
 - **`config.py` imports `systemprompt`**, not the other way round. See 5.2.
 - **There is no `tool` message role.** Tool results are user messages.
@@ -469,3 +650,20 @@ it.
 - **Sub-agents and deepthink both run through `dispatch_tool`**, so permission
   rules apply to them exactly as to the assistant. Neither is a way around a
   `deny`.
+- **What `/set` may change is derived, not listed.** Any `UPPER_CASE` name in
+  `config.py` holding a number, switch, string or list is a setting; the
+  exceptions are named in `config._NOT_A_SETTING`, because they are far fewer
+  and far more stable than an inclusion list would be. `settings.json` records
+  only the values that differ from this file's, so a default improved in a
+  later release still reaches anybody who never overrode it.
+- **`config.token_history` has one entry per request to the model, not per
+  turn.** A question answered with four tool calls leaves five entries. They
+  carry the turn they belong to, and `context.token_turns` is the only thing
+  that groups them - `/usage` and the end-of-turn token line both read it, so
+  they cannot disagree about what one question cost.
+- **`run_python` keeps a process alive between calls**, and it is the same
+  process for the whole session. A `reset` is the model's way to empty it; a
+  timeout or a crash empties it whether anyone wanted that or not.
+- **A `reset` argument is read with `tools._truthy`, not `bool`.** A model that
+  sends `"reset": "false"` means the opposite of what a non-empty string is
+  worth, and getting that backwards throws away everything it was working with.

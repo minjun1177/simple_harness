@@ -37,7 +37,8 @@ USER_CONFIG_FILE = paths.state("permissions.json")
 VERDICTS = ("deny", "allow")
 
 # The argument that identifies *what* a call touches, in the order tools use.
-_TARGET_KEYS = ("command", "filepath", "dirpath", "src", "url", "uri", "query", "name", "id")
+_TARGET_KEYS = ("command", "filepath", "dirpath", "src", "url", "uri", "query",
+                "paths", "name", "id")
 
 _rules: dict[str, list[tuple[str, str]]] = {}
 _sources: list[str] = []

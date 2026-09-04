@@ -765,6 +765,31 @@ def build(name: str) -> Provider | None:
     return factory(settings_for(name)) if factory else None
 
 
+def forget_key(name: str) -> tuple:
+    """Delete a provider's saved API key. Returns (removed, detail).
+
+    A key could be typed in and never taken back out: `_ensure_key` only asks
+    when there is none, so a key pasted into the wrong provider, or one that
+    has since been revoked, stayed in `providers.json` with nothing in the
+    program able to remove it.
+
+    Only the key goes. The model and base_url beside it are not secrets and
+    are what makes reconnecting one step instead of three. An environment
+    variable is not touched either - it is not ours to unset, and saying so is
+    more use than quietly appearing to have done something.
+    """
+    if name not in PROVIDERS:
+        return False, f"unknown provider '{name}' - try {', '.join(PROVIDERS)}"
+    settings = settings_for(name)
+    if not settings.pop("api_key", None):
+        return False, ""
+    save_state()
+    # The live provider was built around the dict that just changed, but a
+    # rebuild is what guarantees it rather than what happens to be true.
+    _active_cache_clear()
+    return True, CONFIG_PATH
+
+
 def current() -> Provider:
     """The provider in use. Falls back to Ollama, which needs no account."""
     global _active
