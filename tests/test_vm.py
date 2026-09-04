@@ -153,8 +153,16 @@ check("and it comes back", "=> 8" in run("8"))
 # ---------------------------------------------------------------------------
 print("\n--- it is a scratchpad, not the project ---")
 here = os.getcwd()
+# Printed and compared as a path rather than matched inside the result text:
+# the result carries `repr(os.getcwd())`, and on Windows a repr doubles every
+# backslash, so the directory the VM is genuinely running in never matched the
+# one this asked about. Through `realpath` and `normcase`, the way
+# `session.latest_in_dir` compares two spellings of one directory.
+answer = run("import os\nprint(os.path.realpath(os.getcwd()))")
+wanted = os.path.normcase(os.path.realpath(vm.scratch_dir()))
 check("the code runs in the VM's own directory",
-      vm.scratch_dir() in run("import os\nos.getcwd()"), run("import os\nos.getcwd()"))
+      any(os.path.normcase(line.strip()) == wanted for line in answer.splitlines()),
+      answer.strip()[:120])
 run("open('scribble.txt', 'w').write('x')")
 check("so a file it writes lands there",
       os.path.isfile(os.path.join(vm.scratch_dir(), "scribble.txt")))
@@ -175,13 +183,22 @@ check("a flood of output is trimmed", "characters trimmed" in long_output,
 check("but both ends of it are kept",
       "line 0" in long_output and "line 19999" in long_output)
 
-if os.name != "nt":
-    hungry = run(f"bytearray({config.VM_MEMORY_MB * 4} * 1024 * 1024)")
+# `VM_MEMORY_MB` is a real ceiling on Linux and a request everywhere else.
+# Darwin accepts `setrlimit(RLIMIT_AS)` and does not enforce it, so the same
+# allocation there runs until the wall clock stops it - which is why the
+# wall-clock kill is the guarantee and the rlimit is the optimisation. What is
+# asserted is what each platform actually provides; claiming the cap holds
+# everywhere is the kind of unearned promise this harness exists to avoid.
+hungry = run(f"bytearray({config.VM_MEMORY_MB * 4} * 1024 * 1024)")
+if sys.platform.startswith("linux"):
     check("an allocation past VM_MEMORY_MB is a MemoryError",
           "MemoryError" in hungry, hungry[:120])
-    check("and the VM is still alive after it", "=> 9" in run("9"))
 else:
-    print("  [skip] resource limits are POSIX only")
+    check("a runaway allocation is stopped one way or another",
+          hungry.startswith("[Error]"), hungry[:120])
+    print(f"  [note] {sys.platform} does not enforce RLIMIT_AS; the "
+          f"{config.VM_TIMEOUT}s wall clock is what stopped it")
+check("and the VM answers again afterwards", "=> 9" in run("9"))
 
 # ---------------------------------------------------------------------------
 print("\n--- and it counts as changing the world ---")

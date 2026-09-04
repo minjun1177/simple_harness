@@ -221,9 +221,14 @@ except ImportError:
 def _limiter(memory_mb: int, file_mb: int):
     """A `preexec_fn` that puts ceilings on the child the child cannot lift.
 
-    POSIX only. Windows has no `resource` module and gets the wall-clock kill
-    and nothing else, which `run_python` says out loud rather than implying
-    otherwise.
+    A ceiling where the platform provides one, and never the thing keeping a
+    runaway contained - `Kernel.run`'s wall clock is. Linux enforces
+    RLIMIT_AS, so an over-large allocation becomes a MemoryError the model can
+    read and the kernel survives it. Darwin accepts the same call and does not
+    enforce it, and Windows has no `resource` module at all; on both the
+    allocation runs until the wall clock stops it. `test_vm.py` asserts what
+    each platform actually provides rather than what was asked for - CI on
+    macOS is what turned that from an assumption into a measurement.
 
     Everything it needs is captured here, in the parent, on purpose: a
     `preexec_fn` runs between fork and exec in a process that has the parent's

@@ -910,9 +910,16 @@ which is why `run_python` still goes through the approval prompt, and why it
 counts as changing the world, so a read-only deepthink stage refuses it exactly
 as it refuses `run_cmd`. What the separate process does buy is that a runaway
 loop, a 40GB allocation or a hard crash takes down the scratch process and not
-the harness. On POSIX it is additionally capped at `VM_MEMORY_MB` of address
-space and `VM_FILE_MB` per file written; Windows has no `resource` module and
-gets the wall-clock kill alone.
+the harness.
+
+**The wall-clock kill is the guarantee; the memory cap is an optimisation on
+top of it.** On Linux the process is additionally held to `VM_MEMORY_MB` of
+address space, so an over-large allocation comes back as a `MemoryError` the
+model can read and the VM survives. macOS accepts that `setrlimit` call and
+does not enforce it, and Windows has no `resource` module at all - on both, the
+same allocation runs until `VM_TIMEOUT` stops it and the VM is restarted. The
+runaway is contained everywhere; only Linux turns it into a tidy error.
+`VM_FILE_MB` is enforced wherever `RLIMIT_FSIZE` is.
 
 Any of the three ways it can die - the `VM_TIMEOUT` kill, a crash, an
 `os._exit()` - loses the namespace, and the result says so in as many words.
@@ -1171,7 +1178,7 @@ The settings worth knowing:
 | `CMD_WAIT_TIMEOUT` | 8 | Silence before a command is called "probably waiting" |
 | `VM_TIMEOUT` | 20 | Seconds a `run_python` snippet gets before the VM is killed and restarted |
 | `VM_OUTPUT_CHARS` | 4000 | Ceiling on what one snippet may print back; the middle is dropped |
-| `VM_MEMORY_MB` | 512 | Address space the VM may take. POSIX only; 0 for no limit |
+| `VM_MEMORY_MB` | 512 | Address space the VM may take. Enforced on Linux; accepted and ignored on macOS, absent on Windows. 0 for no limit |
 | `VM_FILE_MB` | 64 | Largest file the VM may write. POSIX only; 0 for no limit |
 | `MCP_ENABLED` | `True` | Attach MCP servers on startup |
 | `SEARXNG_URL` | `""` | A self-hosted search instance to prefer over the public sources |

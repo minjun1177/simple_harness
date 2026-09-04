@@ -544,6 +544,15 @@ that is meant to live for the whole session, so a limit sized for one call would
 kill a healthy kernel after twenty of them. A loop that will not end is a
 wall-clock problem and `Kernel.run` handles it as one.
 
+**And the rlimits are the optimisation, not the guarantee.** The wall clock is
+what contains a runaway; RLIMIT_AS is what turns an over-large allocation into
+a `MemoryError` the model can read instead of a killed process. Only Linux
+gives it: Darwin accepts the same `setrlimit` call and does not enforce it, and
+Windows has no `resource` module at all. This was written as "POSIX only",
+which is what `resource` being importable means and not what the platform then
+does with it - macOS CI is what told the difference, and `test_vm.py` now
+asserts what each platform actually provides rather than what was asked for.
+
 **The scratch directory is the person's, not the project's** (5.7a):
 `~/.localchat/vm`, and the process runs there, so a stray write lands in the
 scratchpad instead of the repository and never in an auto-commit. The working
