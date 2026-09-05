@@ -1339,7 +1339,115 @@ The codebase is organized cleanly around the following components:
 
 ---
 
-## 17. License
+## 17. How This Differs From Other Harnesses
+
+Most terminal AI harnesses - Claude Code, Cursor, Aider, Continue, OpenHands -
+are built against one or two hosted, native-tool-calling models and treat
+anything smaller as an afterthought, if they support it at all. Simple Harness
+was built the other way: for a model too small to be trusted, with the hosted
+providers added on top of the same code path rather than the other way round.
+That ordering is where most of the differences below come from.
+
+| Feature | Simple Harness | Claude Code | Cursor | Aider |
+| :--- | :--- | :--- | :--- | :--- |
+| Text-protocol fallback for models with no native tool-calling | ✅ per-model, automatic | ❌ | ❌ | ❌ (assumes JSON tool-calls) |
+| Raw content blocks instead of JSON-escaped file bodies | ✅ | ❌ | ❌ | ❌ |
+| Anchor-based edits (line + fingerprint) instead of exact-text matching | ✅ hashline | ❌ (old/new text block) | ❌ (old/new text block) | ❌ (unified diff / search-replace) |
+| Multiple instances in one project aware of each other | ✅ shared board, file claims | ❌ | ❌ | ❌ |
+| Cross-instance messaging between running sessions | ✅ | ❌ | ❌ | ❌ |
+| Planning stage with tools *disabled*, not just discouraged | ✅ dispatcher-level | ❌ (plan mode still has tools) | ❌ | ❌ |
+| Review stage fed the real `git diff` rather than the model's memory | ✅ | ❌ | ❌ | ❌ |
+| Undo scoped to one AI edit, refuses if the file changed since | ✅ per-commit | ❌ (no built-in undo) | ⚠️ full checkpoint/reset only | ❌ (relies on your own git discipline) |
+| Crash-safe atomic writes for *all* state (sessions, memory, permissions, keys) | ✅ | ⚠️ unclear/partial | ⚠️ unclear/partial | ❌ |
+| Single source of truth tying prompt, schema and dispatcher together (tested) | ✅ `toolspec.py` + CI test | ⚠️ unclear (closed source) | ⚠️ unclear (closed source) | ⚠️ unclear |
+| Designed and benchmarked around small (4B-12B) local models | ✅ primary use case | ❌ hosted models only | ❌ hosted models only | ⚠️ connects, not tuned for it |
+
+*"❌" means the feature was not found in that harness's documented behavior as
+of this writing, not that it is provably absent - Claude Code and Cursor are
+closed source, so this is based on published docs and observed behavior, and
+either could add any of these later.*
+
+**It is the only one of these that makes a 4B local model genuinely usable,
+not just connectable.** Aider and Continue can point at an Ollama endpoint,
+but they hand it the same prompt and the same JSON tool-call contract a hosted
+model gets, and a 4B model fails that contract constantly - a bare quote inside
+`print("hi")`, an uncounted brace, and the whole generation is thrown away.
+Simple Harness detects per-model whether Ollama actually reports a native
+`tools` interface and, when it does not, switches to a text protocol where a
+file body is a raw block (`<content>...</content>`) instead of a JSON string -
+the one thing small models get wrong most often stops being asked of them at
+all. No other harness in this space carries a second tool-call protocol just
+to keep weak models working; most only have the one.
+
+**Hashline editing removes the failure mode every other diff/patch format
+has.** Claude Code, Aider and Cursor all ask the model to reproduce the exact
+old text it wants to change, then match that text back into the file - and a
+line that appears twice, or one reproduced with a stray space, makes the edit
+ambiguous or wrong. `read_file` here returns `50:1f|<content>`, a line number
+plus a fingerprint of that exact line, and an edit is just that row handed
+back with different text after the `|`. There is no old-text block to get
+subtly wrong, a stale anchor is refused rather than landing a few lines off,
+and a duplicated line is no longer ambiguous because its number disambiguates
+it. This is a correctness property, not a convenience one - it is what makes
+hashline edits reliable coming from a model too small to retype a line
+perfectly.
+
+**Multiple instances in one project actually know about each other.** Run
+Claude Code, Cursor, and Aider in three terminals against the same working
+tree and none of them knows the others exist - two agents editing the same
+file is a silent last-write-wins. Simple Harness keeps a shared board per
+workspace (`channel.py`): every instance sees who else is running and what
+they are doing, can message them, and a file one instance is mid-edit on is
+refused to the others *by name*, with the holder named back. The claim is
+taken automatically on write, so protection does not depend on any model
+having thought to ask for one - and it expires with the process that took it,
+so a crashed terminal cannot lock a file for the afternoon.
+
+**Deepthink enforces the separation other "plan mode" features only ask for.**
+Several harnesses offer a plan-then-execute mode, but the planning stage is
+still handed the tools and simply told not to use them - which a small model
+does not reliably respect (a local 4B model tried to edit fifteen times in
+planning before this was enforced here). Simple Harness's six-stage chain
+switches the editing tools off at the dispatcher level during plan, check and
+review stages, so "cannot" rather than "was asked not to." It also gives the
+review stage the real `git diff` of what changed rather than asking the model
+to recall its own edit, and finding problems (review) is a separate,
+read-only stage from fixing them (revise) - so review's list is not cut short
+by the model stopping to patch the first thing it finds.
+
+**Undo is per-tool-call and safe to use blindly, not a repo-wide reset.**
+Cursor and Copilot's rollback (and a bare `git reset`) take back everything in
+the working tree since some point, which also erases whatever you changed by
+hand in between. Every AI edit here lands in its own commit named for the tool
+that made it, so `/undo` reverts exactly the last one - and it refuses outright
+if a file in that commit has since been touched by anything else, rather than
+taking that other change down with it.
+
+**State survives being killed mid-write, everywhere, not just in the editor
+buffer.** Sessions, memory, permission rules and saved API keys are all
+written to a temp file and renamed into place (`atomic.py`). A crash never
+leaves a half-written `memory.json` or a corrupt session transcript - a
+guarantee most terminal harnesses only apply, if at all, to the file the model
+is actively editing.
+
+**The tool table cannot drift from the prompt or the dispatcher, because
+there is only one table.** `toolspec.py` is the single source both the system
+prompt and the dispatch logic are generated from, and `test_registry.py` and
+`test_docs.py` fail the build if a tool, a doc section, or a handler falls out
+of sync with it. Harnesses that hand-maintain a prompt description alongside a
+separate dispatch table can silently drift; this one cannot pass its own
+tests while doing so.
+
+None of this makes the underlying model smarter - a 4B model is still a 4B
+model. What it changes is how much of that model's unreliability the harness
+absorbs before it reaches you: fewer thrown-away generations, edits that land
+where they were meant to, multiple terminals that do not overwrite each
+other, and a wrong edit that is always one `/undo` away rather than a reason
+to `git stash` before every session.
+
+---
+
+## 18. License
 
 Apache License 2.0 - see [LICENSE](LICENSE). It is provided **"AS IS", without
 warranties or conditions of any kind**, and its authors and contributors are
