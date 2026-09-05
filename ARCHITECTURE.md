@@ -144,7 +144,11 @@ to *all* tools belongs here and nowhere else.
    few minutes, so the next agent to walk into one is stopped and told who to
    ask. Both this and the commit read `_paths_written`, so they cannot disagree
    about what a call actually wrote.
-9. **Name the failure** — `_name_the_failure` puts the call in front of an
+9. **Note it for auto-verify** — `verify.note_written`, reading the same
+   `_paths_written`. Noted, not run: the project's check belongs after the
+   whole reply's tool calls, not between two of them, so `chat_turn` runs it
+   (§7a).
+10. **Name the failure** — `_name_the_failure` puts the call in front of an
    `[Error]` result: `[Error] run_cmd(command='python3 boom.py'): Command
    failed (exit code 1).` Arguments are truncated so a file body cannot push
    the error off the top. `[System]` is left alone - see below.
@@ -152,8 +156,11 @@ to *all* tools belongs here and nowhere else.
 A refusal from step 3, 4 or 5 returns a string starting with `[System]`. That
 prefix is a contract: `chat_turn` counts consecutive `[System]` results and ends
 the turn after three, so a model cannot spend its whole budget on a closed door.
-Step 9 rewrites `[Error]` and never `[System]`, because rewriting the prefix
-would break that counter.
+Step 10 rewrites `[Error]` and never `[System]`, because rewriting the prefix
+would break that counter. It is also why an auto-verify failure is appended as
+a *message* rather than returned as a tool result: it starts with `[System]`
+too, and three of them in a row would end the turn at exactly the point the
+model was being asked to keep working.
 
 ---
 
@@ -345,6 +352,7 @@ app.py            the loop, slash commands, session lifecycle
   └ llm_client.py chat_turn / stream_reply / the JSON repair engine
       └ tools.py  dispatch_tool + every tool handler
       └ context.py token budget, trimming, compression
+      └ verify.py the project's own check, run after a turn that wrote a file
   └ deepthink.py  the five-stage chain
   └ subagent.py   spawn_agent's own conversation loop
   └ channel.py    the board the harnesses in one project share
@@ -369,6 +377,7 @@ app.py            the loop, slash commands, session lifecycle
 | `deepthink.py` | Stage list, stage instructions, stage gating | Tool logic |
 | `subagent.py` | The sub-agent's own loop and prompt | A second protocol |
 | `git_ops.py` | Commit, undo, diff. Never raises | Anything not about git |
+| `verify.py` | Which check a project declares, running it, and the wording of a failure | When to run it or how many times - that is `chat_turn` |
 | `channel.py` | Who else is running here, what they said, what they hold | Anything about one conversation |
 | `context.py` | Token estimate, trimming, compression, and folding the token history into turns | |
 | `session.py` | Session files, the directory each was worked in, and long-term memory | |
@@ -424,6 +433,49 @@ Two early exits: a plan with nothing to build ends the chain after stage 1
 (`_needs_building`, which believes the `NO_PLAN_NEEDED` marker for free and
 otherwise asks one short question about the plan text); a build that changed
 nothing ends it at stage 4 rather than reviewing work that never happened.
+
+---
+
+## 7a. Auto-verify
+
+`verify.py` decides *what* the check is and runs it; `chat_turn` decides *when*
+and *how often*. That split is the whole design, and each half is uninteresting
+on its own.
+
+```
+dispatch_tool  →  verify.note_written(paths)     # a set, per turn
+chat_turn      →  verify.run_pending()           # once, after the whole reply
+                  ok      → nothing, unless it had been failing
+                  not ok  → verify.failure_message(report) appended as a message
+                  3 in a row → verify.gave_up_message(), and off for this turn
+```
+
+- **The check is chosen by the written file's extension**, not by the first
+  marker found. A repository with both a `pyproject.toml` and a `package.json`
+  runs pytest for a `.py` file and npm for a `.ts` one, with no precedence rule
+  to get wrong.
+- **Nothing is invented.** A marker file has to exist, the runner has to be
+  installed, and `npm test` has to be a real script rather than the placeholder
+  `npm init` writes. `_why_not` is asked once per project and the answer cached
+  in `_off` - it is a fact about the machine, and probing costs a subprocess.
+- **The marker search stops at the git working tree.** A `package.json` in a
+  parent directory belongs to somebody else's project.
+- **`ok is None` is not a failure.** A timeout or a runner that would not start
+  is never shown to the model - it says nothing about the code that was just
+  written - and it puts that project in `_off` rather than costing the same
+  wait after every edit. `/autoverify on` calls `verify.reset()` to try again.
+- **`clear()` runs at the top of `chat_turn`, and only at depth 0.** A
+  sub-agent runs inside one of its parent's tool calls; clearing there would
+  throw away the parent's pending check.
+
+`MAX_VERIFY_FAILURES` lives in `llm_client` beside `MAX_REFUSALS_IN_A_ROW`, for
+the same reason: past three, another round is not converging.
+
+This does not replace deepthink's stage 6, and the overlap is deliberate. Stage
+6 asks a different question - whether what runs is what was *planned* - and it
+runs the suite itself through `run_cmd`, which is what `_report_checks` counts
+(5.10). Auto-verify only ever answers "does it still pass", which is worth
+knowing at stage 3 rather than three stages later.
 
 ---
 
@@ -634,6 +686,7 @@ for t in tests/*.py; do python "$t" || echo "FAILED: $t"; done
 | `test_usage.py` | That a turn's requests are counted as one turn, that a resumed session carries on past its own, and that a session recorded before turns existed still renders |
 | `test_settings.py` | That `/set` records only what changed, that a broken settings file still starts, that a saved API key can be deleted, and that the banner fits the terminal |
 | `test_caching.py` | That the cache breakpoints reach Anthropic, that all three hosted providers' cache counters are read back, and that the prefix this harness builds is byte-stable enough to cache |
+| `test_verify.py` | That auto-verify picks the right check, runs it once per turn, refuses one it cannot run, and turns off a suite that will not finish (§7a) |
 | `test_docs.py` | That this file and `README.md` still describe the program that exists |
 
 `test_docs.py` is why the two documents can be trusted: it fails if either names

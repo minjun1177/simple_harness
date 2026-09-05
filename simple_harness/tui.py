@@ -174,6 +174,8 @@ def _show_help():
         ("/undo", "Take back the last file change the AI committed"),
         ("/autocommit", "Whether each AI edit gets its own git commit, and the recent ones"),
         ("/autocommit <on/off>", "Turn that on or off"),
+        ("/autoverify", "Whether an edit is checked against the project's own tests"),
+        ("/autoverify <on/off>", "Turn that on or off"),
     ]
     # Not slash commands: these two act on the line itself, so they are listed
     # apart from the table rather than pretending to belong to it.

@@ -18,6 +18,7 @@ from simple_harness import providers
 from simple_harness import connect
 from simple_harness import mentions
 from simple_harness import tools
+from simple_harness import verify
 from simple_harness import vm
 from simple_harness.config import S
 from simple_harness.systemprompt import systemprompt as _build_system_prompt
@@ -28,6 +29,7 @@ from simple_harness.renderer import _render_full
 from simple_harness.session import (save_session, load_session, list_sessions, find_sessions,
                      latest_in_dir, rename_session, generate_session_title, clean_title)
 from simple_harness.context import manage_context
+from simple_harness import llm_client
 from simple_harness.llm_client import chat_turn, parse_tool_calls, strip_thinking
 
 
@@ -463,7 +465,7 @@ async def main(resume_id: str = "") -> None:
         from simple_harness.config import (SlashCommandCompleter, PathMentionCompleter,
                                       merge_completers, PromptSession, FileHistory)
         completer = merge_completers([
-            SlashCommandCompleter(['/help', '/clear', '/usage', '/model', '/models', '/exit', '/quit', '/sessions', '/load', '/title', '/autotitle', '/automode', '/fullcontent', '/record', '/export', '/system', '/planmode', '/skills', '/skill', '/mcp', '/perms', '/think', '/connect', '/undo', '/autocommit', '/deepthink', '/agents', '/vm', '/set']),
+            SlashCommandCompleter(['/help', '/clear', '/usage', '/model', '/models', '/exit', '/quit', '/sessions', '/load', '/title', '/autotitle', '/automode', '/fullcontent', '/record', '/export', '/system', '/planmode', '/skills', '/skill', '/mcp', '/perms', '/think', '/connect', '/undo', '/autocommit', '/autoverify', '/deepthink', '/agents', '/vm', '/set']),
             PathMentionCompleter(),
         ])
         session_pt = PromptSession(
@@ -853,6 +855,35 @@ async def main(resume_id: str = "") -> None:
             print(f"  {S.INFO}✓ Auto-commit is "
                   f"{'ON' if config.GIT_AUTO_COMMIT else 'OFF'}."
                   f"{S.MUTED} {'Each AI edit gets its own commit; /undo takes one back.' if config.GIT_AUTO_COMMIT else 'AI edits are no longer committed for you.'}{S.R}\n")
+            continue
+
+        if cmd == "/autoverify" or cmd.startswith("/autoverify "):
+            parts = cmd.split(" ", 1)
+            setting = parts[1].strip() if len(parts) > 1 else ""
+            if setting not in ("on", "off"):
+                state = "ON" if config.AUTO_VERIFY else "OFF"
+                print(f"  {S.INFO}Auto-verify is {S.BOLD}{state}{S.R}"
+                      f"{S.MUTED} - after a turn changes a file, this project's "
+                      f"own check is run and a failure goes back to the model.{S.R}")
+                for (name, root), reason in verify.turned_off().items():
+                    print(f"  {S.MUTED}│{S.R} {S.GRAY}{name}{S.R} in "
+                          f"{os.path.basename(root) or root}: {reason}")
+                print(f"  {S.MUTED}It runs only a check the project already "
+                      f"declares - {', '.join(c.name for c in verify.CHECKS)} - "
+                      f"and never invents one.{S.R}")
+                print(f"  {S.MUTED}Usage: /autoverify <on/off>{S.R}\n")
+                continue
+            config.AUTO_VERIFY = setting == "on"
+            if config.AUTO_VERIFY:
+                # `on` after one turned itself off has to mean "try it again",
+                # or the command would report ON and still run nothing.
+                verify.reset()
+                print(f"  {S.INFO}✓ Auto-verify is ON.{S.MUTED} An edit that breaks "
+                      f"the project's check comes back to the model with the error, "
+                      f"up to {llm_client.MAX_VERIFY_FAILURES} times.{S.R}\n")
+            else:
+                print(f"  {S.INFO}✓ Auto-verify is OFF.{S.MUTED} Nothing is run "
+                      f"after an edit; checking the work is yours again.{S.R}\n")
             continue
 
         if cmd == "/deepthink" or cmd.startswith("/deepthink "):

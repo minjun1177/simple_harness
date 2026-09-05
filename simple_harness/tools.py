@@ -18,6 +18,7 @@ from simple_harness import git_ops
 from simple_harness import permissions
 from simple_harness import shell_session
 from simple_harness import toolspec
+from simple_harness import verify
 from simple_harness import vm
 from simple_harness.websearch import search_web as search_pipeline, strip_html
 
@@ -1582,8 +1583,14 @@ def dispatch_tool(function_name: str, arguments: dict) -> str | None:
         result = _run_tool(function_name, arguments)
     finally:
         config.POLICY_AUTO_ALLOW = False
+    written = _paths_written(function_name, arguments, result)
     _commit_if_changed(function_name, arguments, result)
-    channel.note_write(_paths_written(function_name, arguments, result))
+    channel.note_write(written)
+    # Noted, not run: the check belongs after the whole turn's tool calls, not
+    # between two of them. A model that writes three files in one reply should
+    # pay for one run of the suite against the finished state, not three
+    # against states it was halfway through. `llm_client` runs what is noted.
+    verify.note_written(written)
     return _name_the_failure(function_name, arguments, result)
 
 

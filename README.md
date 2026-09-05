@@ -23,6 +23,7 @@ exists to make small models genuinely usable rather than nearly usable.
 - **Two Tool Protocols, One Tool Table**: A model with a real function-calling interface gets the tools through it; one without gets them as `<tool_call>` text with a JSON repair engine behind it. For Ollama this is decided per model. Both come from the same table, and both end up as the same call.
 - **Deepthink**: `/deepthink on` turns one request into plan → argue with the plan → build → review the real diff → run it. The planning stages *cannot* edit, and the harness reports what the final check actually ran.
 - **Undo**: every file an AI tool changes is committed on its own, so `/undo` takes it back. It commits only what the tool named, and refuses to undo over work it did not create.
+- **Auto-verify**: a turn that changes a file has the project's own check run against it - `pytest`, `npm test`, `cargo test`, `go test` - and a failure goes straight back to the model as the error it has to fix. Only a check the project already declares is ever run, four edits in one reply are one run of the suite, and after three failures in a row the harness stops guessing and asks the model to explain. This is most of the difference between a small model that needs checking and one that tells you when it is wrong.
 - **Several harnesses in one project**: people run three of these at once and, until now, none of them knew the others existed - two would read the same file and the second write would silently throw the first away. The instances working in one project now share a board: they can see each other, message each other, and a file one of them is in the middle of changing is refused to the others by name. See *The Agent Channel*.
 - **Sub-agents**: `spawn_agent` hires a second model for one self-contained job. It works in its own context and hands back only its report, so a twenty-tool-call search never enters the conversation.
 - **Crash-safe writes**: sessions, memory, permission rules and saved API keys are written to a temporary file and renamed into place, so being killed mid-write cannot empty one.
@@ -1030,7 +1031,92 @@ default it off.
 
 ---
 
-## 12. Tool Permissions
+## 12. Checking the Work
+
+A model that has just written a file tells you it is done. It has not run
+anything. On a local 4B model this is not laziness - it genuinely does not
+occur to it, and telling it to check its work in the system prompt is forgotten
+by the third tool call. So the file is wrong, the turn ends, and you find out
+by running the program yourself, copying the traceback, and pasting it back in.
+
+That round trip is now the harness's job.
+
+When a turn changes a file, the harness works out what kind of project the file
+belongs to, runs that project's own check once the turn's tool calls are all
+done, and if it fails, puts the failure in front of the model:
+
+```
+› fix the off-by-one in slice_window
+
+  ▸ edit_file(filepath='context.py')
+  ⎇ committed 4f1c2ae   /undo to take it back
+  ⟳ auto-verify: python -m pytest -x -q   in chat
+  ✗ python -m pytest -x -q failed   2.4s
+
+  ▸ read_file(filepath='context.py', start=180, end=205)
+  ▸ edit_file(filepath='context.py')
+  ⎇ committed 9b70dd1   /undo to take it back
+  ⟳ auto-verify: python -m pytest -x -q   in chat
+  ✓ python -m pytest -x -q passed   2.6s
+
+Fixed. `slice_window` was dropping the last message when the budget landed
+exactly on a turn boundary; the bound is now inclusive.
+```
+
+Reacting to a concrete traceback is the kind of work a small model is good at -
+much easier than noticing unprompted that something might be wrong. This is
+the feature that moves a 4B model from "usually needs checking" to "tells you
+when it is wrong".
+
+**It only runs a check the project already declares.** No check is invented:
+
+| The project has | It runs | Not a failure |
+| :--- | :--- | :--- |
+| `pyproject.toml`, `pytest.ini`, `tox.ini` or `setup.cfg` | `python -m pytest -x -q` | exit 5 - a project with no tests yet |
+| `package.json` with a real `test` script | `npm test --silent` | |
+| `Cargo.toml` | `cargo test --quiet` | |
+| `go.mod` | `go test ./...` | |
+
+The check is picked by the *extension of the file that changed*, not by
+whichever marker turns up first, so a `.py` file and a `.ts` file in the same
+repository get the right one each. A file none of them cover - a `README.md`, a
+config file - runs nothing at all. Neither does a project whose runner is not
+installed, or one whose `package.json` still has the placeholder `test` script
+`npm init` writes.
+
+**It runs once per turn, not once per edit.** Four files written in one reply
+are one run of the suite, against the state the model meant to leave them in
+rather than three states it was halfway through.
+
+**It is bounded, and it gives up.** The check gets `VERIFY_TIMEOUT` seconds
+with no stdin, and only the tail of the output - which is where a failure is
+written down - is shown to the model. A suite that runs past the timeout turns
+itself off for the rest of the session rather than costing that after every
+edit; `/autoverify on` tries it again. And after three failures in a row the
+harness stops feeding them back:
+
+```
+Auto-verify has failed 3 times in a row, so it is off for the rest of this
+turn. Stop editing. Tell the user which check is failing, what you changed,
+and what you think is wrong - a fourth guess is worth less to them than an
+honest description. They can take your changes back with /undo.
+```
+
+That last sentence is why this ships after `/undo` (§11) rather than before it.
+Every retry is its own commit, so a loop that went the wrong way is undone one
+step at a time.
+
+```
+/autoverify        whether it is on, which checks exist, and any turned off here
+/autoverify off    stop running anything after an edit
+```
+
+Set `AUTO_VERIFY = False` in `config.py`, or `/set AUTO_VERIFY off`, to default
+it off.
+
+---
+
+## 13. Tool Permissions
 
 Until now the only gate was the approval prompt, and `/automode on` turned it
 off for everything at once - including `run_cmd` and `delete_file`. Rules give
@@ -1097,7 +1183,7 @@ by hand, and `/perms reload` re-reads the files.
 
 ---
 
-## 13. Reasoning Models
+## 14. Reasoning Models
 
 Reasoning models (qwen3, deepseek-r1, gpt-oss) emit their scratch work before
 the answer - either wrapped in `<think>` tags in the content stream, or in
@@ -1116,7 +1202,7 @@ itself and *then* calls a tool shows only the explanation.
 
 ---
 
-## 14. Configuration
+## 15. Configuration
 
 Most behaviour is reachable from a slash command, and those changes last for the
 session. **`/set` changes what it starts as, without editing any source.**
@@ -1160,6 +1246,9 @@ The settings worth knowing:
 | `AUTO_ALLOW` | `False` | `True` is `/automode on` from startup - no approval prompts |
 | `PERMISSIONS_ENABLED` | `True` | Whether `.permissions.json` rules are consulted at all |
 | `GIT_AUTO_COMMIT` | `True` | A commit per AI edit, so `/undo` has something to take back |
+| `AUTO_VERIFY` | `True` | Run the project's own check after a turn changes a file |
+| `VERIFY_TIMEOUT` | 90 | Seconds one check gets before it is killed and turned off |
+| `VERIFY_OUTPUT_CHARS` | 2000 | Of a failing check, how much of the tail the model is shown |
 | `DEEPTHINK` | `False` | Start with the five-stage chain on |
 | `SUBAGENT_MAX_TURNS` | 12 | Turns a sub-agent gets before it must report |
 | `SUBAGENT_MAX_DEPTH` | 1 | 1 means sub-agents cannot hire sub-agents |
@@ -1219,7 +1308,7 @@ prints the one line that moves them across.
 
 ---
 
-## 15. Slash Commands
+## 16. Slash Commands
 
 The interactive terminal supports special slash commands to control options and inspect state:
 
@@ -1281,11 +1370,13 @@ Two prefixes act on the message itself rather than being commands:
 | `/undo` | Take back the last file change the AI committed |
 | `/autocommit` | Whether AI edits are committed, and the recent AI commits |
 | `/autocommit <on/off>` | Turn that on or off |
+| `/autoverify` | Whether an edit is checked against the project's own tests, and any check turned off here |
+| `/autoverify <on/off>` | Turn that on or off |
 | `/exit` or `/quit` | Exit the application |
 
 ---
 
-## 16. Architecture
+## 17. Architecture
 
 The codebase is organized cleanly around the following components:
 
@@ -1339,7 +1430,7 @@ The codebase is organized cleanly around the following components:
 
 ---
 
-## 17. How This Differs From Other Harnesses
+## 18. How This Differs From Other Harnesses
 
 Most terminal AI harnesses - Claude Code, Cursor, Aider, Continue, OpenHands -
 are built against one or two hosted, native-tool-calling models and treat
@@ -1358,6 +1449,8 @@ That ordering is where most of the differences below come from.
 | Planning stage with tools *disabled*, not just discouraged | ✅ dispatcher-level | ❌ (plan mode still has tools) | ❌ | ❌ |
 | Review stage fed the real `git diff` rather than the model's memory | ✅ | ❌ | ❌ | ❌ |
 | Undo scoped to one AI edit, refuses if the file changed since | ✅ per-commit | ❌ (no built-in undo) | ⚠️ full checkpoint/reset only | ❌ (relies on your own git discipline) |
+| The project's own tests run after an edit, with no setup and no flag | ✅ detected from the project | ❌ (only if you write a hook) | ❌ | ⚠️ `--auto-test` + you supply the command |
+| A failing check fed back as the next thing the model reads, capped | ✅ 3 tries, then it must explain | ❌ | ❌ | ⚠️ retries, no cap of its own |
 | Crash-safe atomic writes for *all* state (sessions, memory, permissions, keys) | ✅ | ⚠️ unclear/partial | ⚠️ unclear/partial | ❌ |
 | Single source of truth tying prompt, schema and dispatcher together (tested) | ✅ `toolspec.py` + CI test | ⚠️ unclear (closed source) | ⚠️ unclear (closed source) | ⚠️ unclear |
 | Designed and benchmarked around small (4B-12B) local models | ✅ primary use case | ❌ hosted models only | ❌ hosted models only | ⚠️ connects, not tuned for it |
@@ -1423,6 +1516,21 @@ that made it, so `/undo` reverts exactly the last one - and it refuses outright
 if a file in that commit has since been touched by anything else, rather than
 taking that other change down with it.
 
+**The project's own tests run themselves, with nothing to configure.** Aider
+has `--auto-test`, but you supply the command and turn the flag on; everywhere
+else, checking the work is a hook you write or a thing you remember to do.
+Here the check is *detected* - a `pyproject.toml` means pytest, a `Cargo.toml`
+means cargo, a `package.json` means npm if its `test` script is a real one -
+and it runs on its own after any turn that changed a file, once for the whole
+turn rather than once per edit. A failure becomes the next thing the model
+reads, which is the form small models handle best: fixing a traceback is
+pattern-matching, while noticing unprompted that something might be wrong is
+not. And it is capped where nothing else caps it - three failures in a row and
+the harness stops feeding them back and tells the model to explain what is
+broken instead, because a fourth guess is worth less to you than an honest
+description. It is safe to leave on precisely because `/undo` is per-edit:
+each retry is its own commit.
+
 **State survives being killed mid-write, everywhere, not just in the editor
 buffer.** Sessions, memory, permission rules and saved API keys are all
 written to a temp file and renamed into place (`atomic.py`). A crash never
@@ -1442,12 +1550,13 @@ None of this makes the underlying model smarter - a 4B model is still a 4B
 model. What it changes is how much of that model's unreliability the harness
 absorbs before it reaches you: fewer thrown-away generations, edits that land
 where they were meant to, multiple terminals that do not overwrite each
-other, and a wrong edit that is always one `/undo` away rather than a reason
-to `git stash` before every session.
+other, an edit that breaks the build saying so in the same turn rather than
+the next time you run anything, and a wrong edit that is always one `/undo`
+away rather than a reason to `git stash` before every session.
 
 ---
 
-## 18. License
+## 19. License
 
 Apache License 2.0 - see [LICENSE](LICENSE). It is provided **"AS IS", without
 warranties or conditions of any kind**, and its authors and contributors are

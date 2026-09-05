@@ -34,10 +34,10 @@
 * [x] A git commit per AI edit and /undo to take it back, toggled with /autocommit
 * [x] Deepthink: plan -> check -> build -> review the real diff -> verify, driven by the harness
 * [x] Stop a model that keeps calling a tool it has just been refused
+* [x] Auto-verify: run the project's own check after a turn that wrote a file, and hand a failure back to fix. Three tries, then it has to explain
 
 ## next
 > See roadmap.md for the reasoning and the order.
 
-* [ ] Auto-verify loop: run the project's tests after an edit and feed failures back
 * [ ] Whole-project Tree-sitter index (symbol table) instead of plain text search
 * [ ] Split the reusable parts out to PyPI (JSON repair, MCP client, shell sessions)

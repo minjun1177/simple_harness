@@ -263,6 +263,14 @@ NATIVE_TOOLS = True
 # or changed is left alone. Toggle it in a session with /autocommit.
 GIT_AUTO_COMMIT = True
 
+# Auto-verify: after a turn changes a file, run the project's own check and put
+# a failure in front of the model instead of hoping it thinks to check itself.
+# Only a check the project already declares is ever run - see verify.py, which
+# also explains why a slow one turns itself off. Toggle it with /autoverify.
+AUTO_VERIFY = True
+VERIFY_TIMEOUT = 90         # seconds one check gets before it is killed and disabled
+VERIFY_OUTPUT_CHARS = 2000  # of a failure, the tail - which is where it is written down
+
 SUBAGENT_MAX_TURNS = 12
 SUBAGENT_MAX_DEPTH = 1
 SUBAGENT_DEPTH = 0              # how deep we currently are; not a user setting

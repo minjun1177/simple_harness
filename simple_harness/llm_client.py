@@ -20,6 +20,7 @@ from simple_harness import context
 from simple_harness import mcp_client
 from simple_harness import providers
 from simple_harness import toolspec
+from simple_harness import verify
 
 
 TOOL_CALL_TAG = "<tool_call>"
@@ -776,6 +777,12 @@ MAX_EMPTY_REPLIES = 1      # one nudge, then say so
 REFUSAL_PREFIX = config.TOOL_REFUSAL_PREFIX
 MAX_REFUSALS_IN_A_ROW = 3
 
+# Auto-verify feeds a failing check back and lets the model fix it. Three goes,
+# for the same reason as above: by the fourth it is not converging, and another
+# round of guesses is worth less to the person watching than being told plainly
+# what is broken. See verify.py.
+MAX_VERIFY_FAILURES = 3
+
 
 async def chat_turn(messages: list[dict]) -> str:
     call_count = 0
@@ -783,6 +790,14 @@ async def chat_turn(messages: list[dict]) -> str:
     empty_replies = 0
     refusals = 0
     refusal_nudges = 0
+    verify_failures = 0
+    verify_done = False        # set when this turn has spent its three goes
+    # A turn does not inherit what the last one wrote - only a turn that ran
+    # out of tries leaves anything behind. Guarded by the depth even though a
+    # sub-agent runs its own loop today: if one is ever routed through here,
+    # clearing would throw away the files its parent is waiting to check.
+    if not config.SUBAGENT_DEPTH:
+        verify.clear()
     while True:
         # Text a console mangled cannot be encoded, so one bad character would
         # fail this request and every later one. Repair it before it is sent.
@@ -903,3 +918,31 @@ async def chat_turn(messages: list[dict]) -> str:
 
         if stop_after_tools:
             return stored
+
+        # Every tool call in this reply has run, so the files are in the state
+        # the model meant to leave them in. Now the project's own check gets to
+        # disagree. A failure goes back as a message rather than as a tool
+        # result: the refusal counter above reads `[System]` off tool results
+        # to spot a model knocking on a closed door, and this is the opposite -
+        # a door it should walk through.
+        if verify_done:
+            verify.clear()
+        elif verify.pending():
+            for report in verify.run_pending():
+                if report.ok:
+                    if verify_failures:
+                        messages.append({"role": "user",
+                                         "content": verify.recovered_message(report)})
+                    verify_failures = 0
+                    continue
+                verify_failures += 1
+                if verify_failures >= MAX_VERIFY_FAILURES:
+                    verify_done = True
+                    print(f"  {S.WARN}⚠  The check has failed "
+                          f"{MAX_VERIFY_FAILURES} times; asking the model to "
+                          f"explain rather than guess again.{S.R}")
+                    messages.append({"role": "user", "content":
+                                     verify.gave_up_message(MAX_VERIFY_FAILURES)})
+                    break
+                messages.append({"role": "user",
+                                 "content": verify.failure_message(report)})
