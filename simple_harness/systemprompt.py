@@ -71,7 +71,7 @@ _TEXT_ANCHOR_EXAMPLE = """
       <tool_call>
       {"name": "edit_file", "arguments": {"filepath": "game.py"}}
       <new_content>
-      50:1f|    print("the answer was", answer)
+      50:1fa|    print("the answer was", answer)
       </new_content>
       </tool_call>
 
@@ -82,7 +82,7 @@ _TEXT_ANCHOR_EXAMPLE = """
       <tool_call>
       {"name": "edit_file", "arguments": {"filepath": "game.py"}}
       <old_content>
-      50:1f-53:9c
+      50:1fa-53:9c0
       </old_content>
       <new_content>
           print("the answer was", answer)
@@ -92,14 +92,14 @@ _TEXT_ANCHOR_EXAMPLE = """
 
 _NATIVE_ANCHOR_EXAMPLE = """
       edit_file(filepath="game.py",
-                new_content='50:1f|    print("the answer was", answer)')
+                new_content='50:1fa|    print("the answer was", answer)')
 
   There is no old_content at all. To change three lines, send three such rows,
   newline-separated. To replace lines 50-53 with a different NUMBER of lines,
   or to delete them, name them in old_content instead:
 
       edit_file(filepath="game.py",
-                old_content="50:1f-53:9c",
+                old_content="50:1fa-53:9c0",
                 new_content='    print("the answer was", answer)')
 """
 
@@ -182,13 +182,13 @@ def tool_rules(native: bool | None = None) -> str:
 
 #### HASHLINE FORMAT
 When you use `read_file`, each line is returned in **hashline format**: `LINE_NUM:HASH|content`.
-- Example: `50:1f|    print(answer)` means line 50, hash `1f`, content `    print(answer)`.
-- The hash is a 2-character fingerprint of that line's exact content.
+- Example: `50:1fa|    print(answer)` means line 50, hash `1fa`, content `    print(answer)`.
+- The hash is a 3-character fingerprint of that line's exact content.
 - **To change a line, send it back with its anchor and the new text.** This is the whole edit - you never retype the old line, and there is no `old_content`:
 @@ANCHOR_EXAMPLE@@
-- `50:1f|<new text>` means "line 50, which you read as hash `1f`, now says this". The number says which line, and the hash proves you are looking at the version that is on disk. Change only what is after the `|`; keep the anchor exactly as `read_file` gave it, because that is the check.
+- `50:1fa|<new text>` means "line 50, which you read as hash `1fa`, now says this". The number says which line, and the hash proves you are looking at the version that is on disk. Change only what is after the `|`; keep the anchor exactly as `read_file` gave it, because that is the check.
 - One row per line changed. The lines need not be next to each other. Each row replaces one line with one line, so nothing below moves and your other anchors stay good.
-- Use `old_content` only for what that cannot do: replacing lines with a different NUMBER of lines, or deleting them. There, `old_content` holds the anchors alone - `50:1f`, one per line, or a span `50:1f-53:9c` - and `new_content` is plain text with no anchors (empty deletes the lines).
+- Use `old_content` only for what that cannot do: replacing lines with a different NUMBER of lines, or deleting them. There, `old_content` holds the anchors alone - `50:1fa`, one per line, or a span `50:1fa-53:9c0` - and `new_content` is plain text with no anchors (empty deletes the lines).
 - If an anchor no longer matches the file, the edit is refused and nothing is written: the file changed under you, or you mistyped the hash. `read_file` again and use the new anchors. Never invent a hash - copy it.
 - A line that appears twice in the file is still unambiguous by anchor. Matching it as text is not, and is refused.
 - Anything in `old_content` that is not anchors is matched as literal text and must be reproduced exactly.

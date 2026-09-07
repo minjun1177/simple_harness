@@ -157,10 +157,24 @@ def handle_end_process(session_id: str) -> str:
     return f"[Success] Stopped '{command}' (session {sid})."
 
 
-_HASHLINE_PATTERN = re.compile(r'^\d+:[0-9a-f]{2}\|')
+# How much of the digest an anchor carries. Two characters is 256 values, and
+# an anchor is checked against a *position* - so a line that has moved away and
+# a different line that has moved in collide once in 256, and that collision is
+# a silent overwrite of code the model never read. Three is 4096, for one more
+# character per line: on this repository's largest file that is 465 tokens on a
+# 23,600-token listing, 2%.
+#
+# The patterns below accept two *or* three, on purpose. A two-character digest
+# can never equal a three-character hash, so it is refused either way - but
+# being read as an anchor at all is what turns "old_content was not found" into
+# "line 50 is not what 50:1f says it is; it now reads 50:1fa|...", which is the
+# difference between a model that corrects itself and one that resends.
+HASHLINE_DIGITS = 3
+
+_HASHLINE_PATTERN = re.compile(r'^\d+:[0-9a-f]{2,3}\|')
 
 def _line_hash(line: str) -> str:
-    return hashlib.md5(line.encode("utf-8")).hexdigest()[:2]
+    return hashlib.md5(line.encode("utf-8")).hexdigest()[:HASHLINE_DIGITS]
 
 def _encode_hashlines(content: str) -> str:
     lines = content.split("\n")
@@ -297,7 +311,7 @@ def handle_run_python(content: str, stdin: str = "", reset: bool = False) -> str
 # editing by hashline anchor
 # ---------------------------------------------------------------------------
 #
-# `read_file` returns every line as `50:1f|print(answer)`, and until now that
+# `read_file` returns every line as `50:1fa|print(answer)`, and until now that
 # prefix was only a display aid: `edit_file` stripped it off and matched what
 # was left as text. So the model still had to reproduce the line exactly - every
 # space of indentation, every quote, every backslash - which is the single thing
@@ -316,30 +330,30 @@ def handle_run_python(content: str, stdin: str = "", reset: bool = False) -> str
 # with the hash, an edit against a stale reading of the file is refused and the
 # model is told what is actually there now.
 
-# `50:1f`, or the whole row as read_file printed it: `50:1f|print(answer)`.
-_ANCHOR = re.compile(r'^\s*(\d+)\s*:\s*([0-9a-fA-F]{2})\s*(?:\|(.*))?$')
-# A span, both ends verified: `50:1f-53:9c`.
-_ANCHOR_SPAN = re.compile(r'^\s*(\d+)\s*:\s*([0-9a-fA-F]{2})\s*-\s*'
-                          r'(\d+)\s*:\s*([0-9a-fA-F]{2})\s*$')
+# `50:1fa`, or the whole row as read_file printed it: `50:1fa|print(answer)`.
+_ANCHOR = re.compile(r'^\s*(\d+)\s*:\s*([0-9a-fA-F]{2,3})\s*(?:\|(.*))?$')
+# A span, both ends verified: `50:1fa-53:9c0`.
+_ANCHOR_SPAN = re.compile(r'^\s*(\d+)\s*:\s*([0-9a-fA-F]{2,3})\s*-\s*'
+                          r'(\d+)\s*:\s*([0-9a-fA-F]{2,3})\s*$')
 
-# The same span with the pipes still on it: `50:1f-53:9c|`, or
-# `50:1f|def f():-53:9c|    return`. `read_file` prints a `|` after every
+# The same span with the pipes still on it: `50:1fa-53:9c0|`, or
+# `50:1fa|def f():-53:9c0|    return`. `read_file` prints a `|` after every
 # anchor it produces, so a model writing a span puts one there too - it is
 # generalising from the only example it has been shown. The strict pattern
 # above is tried first and this one only when it misses, so what a correct
 # span means does not change; this reads a spelling that used to fall through
 # to text matching and come back as "old_content was not found", which says
 # nothing about the anchor being one character off. Both ends are still
-# hash-checked, so a row that splits in the wrong place fails safely rather
-# than editing the wrong lines. Non-greedy on the first text: split at the
-# first `-<line>:<hash>`, not the last.
-_ANCHOR_SPAN_PIPED = re.compile(r'^\s*(\d+)\s*:\s*([0-9a-fA-F]{2})\s*(?:\|.*?)?-\s*'
-                                r'(\d+)\s*:\s*([0-9a-fA-F]{2})\s*(?:\|.*)?$')
+# hash-checked, and `_anchor_target` only takes a reading that *verifies*, so a
+# row that splits in the wrong place loses to whichever reading describes the
+# file. Non-greedy on the first text: split at the first `-<line>:<hash>`.
+_ANCHOR_SPAN_PIPED = re.compile(r'^\s*(\d+)\s*:\s*([0-9a-fA-F]{2,3})\s*(?:\|.*?)?-\s*'
+                                r'(\d+)\s*:\s*([0-9a-fA-F]{2,3})\s*(?:\|.*)?$')
 
 # A row that names a line and quotes it but carries no hash: `3|    return x`
 # or `3     return x`. Exactly one separator is consumed, so the line's own
 # indentation survives into the text and can be compared with what is on disk.
-# This is never trusted on its own - see `_verified_unhashed`.
+# The quoted text is the whole of the evidence here - see `_anchor_problem`.
 _ANCHOR_NO_HASH = re.compile(r'^[ \t]*(\d+)[ \t|](.*)$')
 
 
@@ -380,26 +394,40 @@ def _parse_anchors(old_content: str):
     if checks:
         return (checks[0][0], checks[-1][0], checks, False)
 
-    # Only now, when nothing else reads it: a span still wearing its pipes.
-    # Last rather than first because one anchor whose quoted text happens to
-    # end in something shaped like `-4:96` is a real row, and reading it as a
-    # span would edit a line the model never named. `_ANCHOR` claims that row,
-    # so this is reached only when the `-` is what stopped it - which is the
-    # span case and nothing else.
-    if len(rows) == 1:
-        span = _ANCHOR_SPAN_PIPED.match(rows[0])
-        if span:
-            return span_of(span)
     return None
+
+
+def _parse_piped_span(old_content: str):
+    """A span still wearing the pipes `read_file` printed, or None.
+
+    Kept apart from `_parse_anchors` because it is genuinely ambiguous with it:
+    `6:cae|def f():-9:964|` reads as a span, and also as one anchor whose quoted
+    text happens to contain `-9:964|`. Neither is silly, so this does not guess
+    - `_anchor_target` tries both against the file and keeps whichever one
+    describes it.
+    """
+    rows = [row for row in (old_content or "").split("\n") if row.strip()]
+    if len(rows) != 1:
+        return None
+    span = _ANCHOR_SPAN_PIPED.match(rows[0])
+    if not span:
+        return None
+    first, first_hash, last, last_hash = span.groups()
+    return (int(first), int(last),
+            [(int(first), first_hash.lower(), None),
+             (int(last), last_hash.lower(), None)], True)
 
 
 def _parse_unhashed_anchors(old_content: str):
     """Rows that name a line and quote it but carry no hash, or None.
 
-    Same shape `_parse_anchors` returns, with `None` where the hash would be.
-    Never used without `_verified_unhashed` agreeing: a line number on its own
-    points at whatever has since moved into that position, and the quoted text
-    is the only thing that says otherwise.
+    Same shape `_parse_anchors` returns, with `None` where the hash would be -
+    which is what makes `_anchor_problem` insist on the quoted text for these
+    rows. A line number on its own points at whatever has since moved into that
+    position, and the quote is the only thing that says otherwise. `3 return x`
+    is also what an ordinary snippet out of a numbered list looks like, so a
+    reading that does not describe the file is not an error here: it goes back
+    to being matched as text, exactly as it was before this existed.
     """
     rows = [row for row in (old_content or "").split("\n") if row.strip()]
     if not rows:
@@ -412,27 +440,6 @@ def _parse_unhashed_anchors(old_content: str):
         number, text = one.groups()
         checks.append((int(number), None, text))
     return (checks[0][0], checks[-1][0], checks, False)
-
-
-def _verified_unhashed(lines: list, checks: list) -> bool:
-    """Whether every hash-less row really is the line it says it is.
-
-    The whole of the safety here. `3 return x` is also what an ordinary snippet
-    out of a numbered list looks like, so this has to be certain before it takes
-    over - and when it is not, the caller falls back to matching the text, which
-    is what happened before this existed. So nothing that worked can start
-    failing, and nothing is edited on the strength of a bare line number.
-
-    Trailing whitespace is invisible and routinely dropped in copying; leading
-    whitespace is the indentation and has to match, exactly as it does when a
-    mistyped hash is forgiven beside a line that reads right.
-    """
-    for number, _, text in checks:
-        if not 1 <= number <= len(lines):
-            return False
-        if text is None or text.rstrip() != lines[number - 1].rstrip():
-            return False
-    return True
 
 
 def _show_lines(lines: list, numbers) -> str:
@@ -485,8 +492,8 @@ def _no_old_content(filepath: str, file_content: str, new_content: str) -> str:
                     f"or read_file for the rest.")
     return ("[Error] old_content was empty, so nothing was named to replace. "
             "Either put the hashline anchors of the lines in old_content "
-            "(e.g. 50:1f), or put the anchor in front of each new line "
-            "(50:1f|<the new line>) and leave old_content out.")
+            "(e.g. 50:1fa), or put the anchor in front of each new line "
+            "(50:1fa|<the new line>) and leave old_content out.")
 
 
 def _quoted_wrong(file_content: str, old_content: str) -> str:
@@ -518,54 +525,84 @@ def _anchor_target(filepath: str, file_content: str, old_content: str) -> tuple:
         (start, end, "")       these lines, verified against what is on disk
     """
     lines = file_content.split("\n")
-    parsed = _parse_anchors(old_content)
-    if parsed is None:
-        # Second chance for a row with the hash left off. It is taken only when
-        # every row proves itself against the file; otherwise this was ordinary
-        # text and goes back to being matched as text.
-        unhashed = _parse_unhashed_anchors(old_content)
-        if unhashed is None or not _verified_unhashed(lines, unhashed[2]):
-            return None, None, ""
-        parsed = unhashed
-    first, last, checks, spanned = parsed
+
+    # A row can be readable more than one way, and which one was meant is not
+    # decidable from the row - `6:cae|def f():-9:964|` is both a span and one
+    # anchor with an odd quoted text. So nothing here guesses: each reading is
+    # checked against the file and the first that *describes* it wins. When
+    # none does, the complaint is about the first reading, which is the one the
+    # model most likely meant.
+    readings = [reading for reading in (_parse_anchors(old_content),
+                                        _parse_piped_span(old_content),
+                                        _parse_unhashed_anchors(old_content))
+                if reading is not None]
+    if not readings:
+        return None, None, ""
+
+    problem = ""
+    for index, reading in enumerate(readings):
+        complaint = _anchor_problem(filepath, lines, reading)
+        if not complaint:
+            return reading[0], reading[1], ""
+        if not index:
+            problem = complaint
+
+    # A hash-less row that does not describe the file is not an error: it is
+    # ordinary text that happens to start with a number, and matching it as
+    # text is what happened before this reading existed. Falling back is always
+    # safe; taking over wrongly is not.
+    if all(digest is None for _, _, checks, _ in readings for _, digest, _ in checks):
+        return None, None, ""
+    return None, None, problem
+
+
+def _anchor_problem(filepath: str, lines: list, reading: tuple) -> str:
+    """"" if this reading describes the file, else what is wrong with it."""
+    first, last, checks, spanned = reading
 
     if last < first:
-        return None, None, (f"[Error] The anchors run backwards: {first} comes after "
-                            f"{last}. Name the first line of the span first.")
+        return (f"[Error] The anchors run backwards: {first} comes after "
+                f"{last}. Name the first line of the span first.")
     out_of_range = next((n for n, _, _ in checks if n < 1 or n > len(lines)), 0)
     if out_of_range:
-        return None, None, (f"[Error] There is no line {out_of_range} in {filepath} - "
-                            f"it has {len(lines)} lines. read_file it again and take "
-                            f"the anchors from that listing.")
+        return (f"[Error] There is no line {out_of_range} in {filepath} - "
+                f"it has {len(lines)} lines. read_file it again and take "
+                f"the anchors from that listing.")
     if not spanned:
         numbers = [n for n, _, _ in checks]
         if numbers != list(range(first, last + 1)):
-            return None, None, (
-                f"[Error] The anchors {', '.join(str(n) for n in numbers)} are not one "
-                f"unbroken run of lines. Either list every line from {first} to {last}, "
-                f"or write the span as {first}:{checks[0][1]}-{last}:{checks[-1][1]}.")
+            return (f"[Error] The anchors {', '.join(str(n) for n in numbers)} are not one "
+                    f"unbroken run of lines. Either list every line from {first} to {last}, "
+                    f"or write the span as {first}:{checks[0][1]}-{last}:{checks[-1][1]}.")
 
+    # When the row quotes the line, the quote decides; the hash decides only
+    # when there is nothing else. The hash is a few hand-copied characters and
+    # the line is not, so a line that reads exactly right is the stronger
+    # evidence when they disagree - and, in the other direction, a hash that
+    # agrees with a line the model quoted differently is not evidence at all.
+    # Three characters collide once in 4096 and the file is edited over and
+    # over, so that is not a hypothetical: the quoted line is what catches it.
+    # Trailing whitespace is invisible and routinely dropped in copying;
+    # leading whitespace is the indentation and has to match.
     for number, digest, text in checks:
         line = lines[number - 1]
-        if _line_hash(line) == digest:
+        if text is not None:
+            if text.rstrip() == line.rstrip():
+                continue
+        elif _line_hash(line) == digest:
             continue
-        # The hash is two hand-copied characters and the text beside it is not,
-        # so a line that reads exactly right is taken as the stronger evidence.
-        # Trailing whitespace is invisible and routinely dropped in copying;
-        # leading whitespace is the indentation and has to match.
-        if text is not None and text.rstrip() == line.rstrip():
-            continue
-        return None, None, (
-            f"[Error] Line {number} of {filepath} is not what {number}:{digest} says it "
-            f"is. It now reads {number}:{_line_hash(line)}|{line[:120]}\n"
-            f"The file has changed since you read it, or the anchor was mistyped. "
-            f"read_file it again and use the anchors from the new listing.")
+        return (f"[Error] Line {number} of {filepath} is not what "
+                f"{number}{':' + digest if digest else ''}"
+                f"{'|' + text[:80] if text is not None else ''} says it "
+                f"is. It now reads {number}:{_line_hash(line)}|{line[:120]}\n"
+                f"The file has changed since you read it, or the anchor was mistyped. "
+                f"read_file it again and use the anchors from the new listing.")
 
-    return first, last, ""
+    return ""
 
 
 # The same row `read_file` printed, handed back with different text after the
-# `|`: `38:ff|print()` means "line 38, which currently hashes to ff, becomes
+# `|`: `38:ff7|print()` means "line 38, which currently hashes to ff, becomes
 # print()". One row says which line, proves it is the line that was read, and
 # carries the replacement - so the shortest possible edit is one line long and
 # the old text is never repeated anywhere.
@@ -573,9 +610,9 @@ def _anchor_target(filepath: str, file_content: str, old_content: str) -> tuple:
 # Leading whitespace is allowed and dropped. `read_file` never indents a row, so
 # an indented one is a model that reformatted the block - and writing its literal
 # text into the file, which is what would otherwise happen, is a silent wrong
-# edit. A real source line that looks like `50:1f|...` is imaginable; one that
+# edit. A real source line that looks like `50:1fa|...` is imaginable; one that
 # still looks like it after this much of a coincidence is not.
-_ANCHORED_LINE = re.compile(r'^\s*(\d+)\s*:\s*([0-9a-fA-F]{2})\|(.*)$')
+_ANCHORED_LINE = re.compile(r'^\s*(\d+)\s*:\s*([0-9a-fA-F]{2,3})\|(.*)$')
 
 
 def _parse_patch(new_content: str):
@@ -622,7 +659,7 @@ def _patch_disagrees(old_content: str, patch: list) -> str:
 
 def _edit_by_patch(filepath: str, file_content: str, patch: list,
                    old_content: str) -> str:
-    """Apply `38:ff|print()` rows: each replaces the one line it names."""
+    """Apply `38:ff7|print()` rows: each replaces the one line it names."""
     problem = _patch_disagrees(old_content, patch)
     if problem:
         return problem
@@ -671,11 +708,60 @@ def _edit_by_patch(filepath: str, file_content: str, patch: list,
     which = ", ".join(str(number) for number, _, _ in patch)
     return (f"[Success] File edited: {filepath} (line{'s' if len(patch) > 1 else ''} "
             f"{which} replaced). One line became one line, so nothing below moved "
-            f"and the rest of your anchors are still good.")
+            f"and the rest of your anchors are still good."
+            + _echo_region("\n".join(lines), [n for n, _, _ in patch], moved=False))
 
 
 def _preview(text: str, limit: int = 150) -> str:
     return text[:limit] + ("..." if len(text) > limit else "")
+
+
+# Lines of context either side of a change, echoed back with the result.
+EDIT_ECHO_LINES = 5
+_EDIT_ECHO_MAX = 60          # ceiling, for an edit scattered across a big file
+
+
+def _echo_region(file_content: str, changed: list, moved: bool) -> str:
+    """The edited lines and their neighbours, as `read_file` would print them.
+
+    Editing a line changes its hash, and changing the number of lines moves
+    every anchor below it - so after an edit the model is holding anchors that
+    are wrong, and its only recourse was to read the whole file again. That is
+    a round trip and the whole file back into a context that is usually small,
+    to recover a few lines it already knows.
+
+    The lines it is working in are the ones it wants next, so they come back
+    with the result: current, correct, and already in the format an edit is
+    written in. Nothing is inferred here - this is the file as it now stands.
+    """
+    lines = file_content.split("\n")
+    windows = []
+    for number in sorted({n for n in changed if 1 <= n <= len(lines)}):
+        low = max(1, number - EDIT_ECHO_LINES)
+        high = min(len(lines), number + EDIT_ECHO_LINES)
+        # Touching or overlapping windows become one, so a run of edits does
+        # not print the same neighbourhood several times over.
+        if windows and low <= windows[-1][1] + 1:
+            windows[-1][1] = max(windows[-1][1], high)
+        else:
+            windows.append([low, high])
+    if not windows:
+        return ""
+
+    shown, budget = [], _EDIT_ECHO_MAX
+    for low, high in windows:
+        if budget <= 0:
+            shown.append("  …")
+            break
+        if shown:
+            shown.append("  …")
+        for number in range(low, min(high, low + budget - 1) + 1):
+            shown.append(f"  {number}:{_line_hash(lines[number - 1])}|{lines[number - 1]}")
+        budget -= high - low + 1
+
+    return ("\nThe file now reads, around what you changed:\n" + "\n".join(shown)
+            + ("\nAnchors outside this listing have moved with it; read_file for those."
+               if moved else ""))
 
 
 def _edit_by_anchor(filepath: str, file_content: str, start: int, end: int,
@@ -704,10 +790,15 @@ def _edit_by_anchor(filepath: str, file_content: str, start: int, end: int,
     except Exception as e:
         return f"[Error] Cannot write file: {e}"
 
-    moved = ("" if len(replacement) == count else
-             " Every line below it has moved, so read_file again before anchoring "
-             "another edit to this file.")
-    return f"[Success] File edited: {filepath} ({where} replaced).{moved}"
+    shifted = len(replacement) != count
+    note = (" Every line below it has moved." if shifted else "")
+    # The lines that are now where the edit landed, so the next edit in this
+    # neighbourhood needs no read_file. A deletion leaves nothing of its own to
+    # show, so the window is taken around where the lines used to start.
+    touched = (list(range(start, start + len(replacement))) if replacement
+               else [min(start, max(1, len(lines)))])
+    return (f"[Success] File edited: {filepath} ({where} replaced).{note}"
+            + _echo_region("\n".join(lines), touched, moved=shifted))
 
 
 def handle_read_file(filepath: str) -> str:
@@ -751,11 +842,11 @@ def handle_write_file(filepath: str, content: str) -> str:
 def handle_edit_file(filepath: str, old_content: str, new_content: str) -> str:
     """Replace part of a file. Three ways of saying which part, in this order.
 
-    1. `new_content` rows that each carry their own anchor - `38:ff|print()` -
+    1. `new_content` rows that each carry their own anchor - `38:ff7|print()` -
        replace the line each one names, and `old_content` is not needed at all.
        The shortest form there is, and the one that never repeats the old text.
-    2. `old_content` made of anchors - `50:1f`, the whole row
-       `50:1f|print(answer)`, several rows, or a span `50:1f-53:9c` - names the
+    2. `old_content` made of anchors - `50:1fa`, the whole row
+       `50:1fa|print(answer)`, several rows, or a span `50:1fa-53:9c0` - names the
        lines, and `new_content` is what replaces them. This is the form to use
        when the number of lines changes, or when they are to be deleted.
     3. Anything else in `old_content` is matched as literal text, exactly as it
@@ -788,12 +879,12 @@ def handle_edit_file(filepath: str, old_content: str, new_content: str) -> str:
     if old_content not in file_content:
         return ("[Error] The specified old_content was not found in the file. If the "
                 "exact text is hard to reproduce, read_file the file and put the "
-                "line's hashline anchor (e.g. 50:1f) in old_content instead."
+                "line's hashline anchor (e.g. 50:1fa) in old_content instead."
                 + _quoted_wrong(file_content, raw_old))
     count = file_content.count(old_content)
     if count > 1:
         return (f"[Error] old_content found {count} times. Give a longer snippet, or "
-                f"put the line's hashline anchor (e.g. 50:1f, from read_file) in "
+                f"put the line's hashline anchor (e.g. 50:1fa, from read_file) in "
                 f"old_content instead - a line number is never ambiguous.")
 
     old_preview = _preview(old_content)
@@ -806,7 +897,14 @@ def handle_edit_file(filepath: str, old_content: str, new_content: str) -> str:
     try:
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(new_file_content)
-        return f"[Success] File edited: {filepath}"
+        # A text match names no lines, so where it landed is worked out from
+        # how much of the file came before it.
+        at = file_content.index(old_content)
+        first = file_content.count("\n", 0, at) + 1
+        touched = list(range(first, first + max(1, new_content.count("\n") + 1)))
+        shifted = new_content.count("\n") != old_content.count("\n")
+        return (f"[Success] File edited: {filepath}"
+                + _echo_region(new_file_content, touched, moved=shifted))
     except Exception as e:
         return f"[Error] Cannot write file: {e}"
 

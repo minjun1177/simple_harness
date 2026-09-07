@@ -37,7 +37,7 @@ exists to make small models genuinely usable rather than nearly usable.
 - **`@` file attachments**: Typing `@` opens a list of what is in the directory you are standing in - arrow keys to move, Tab to insert, `/` to descend into a folder. `@src/main.py` sends that file with your message instead of spending a round trip on the model asking for it. Directories arrive as their listing, a path that does not exist is reported without stopping the turn, and one mention cannot swallow the context window (`MENTION_MAX_CHARS`).
 - **`!` shell escape**: A line starting with `!` runs as a shell command - yours, not the model's, so no approval prompt - and its output joins the conversation, so the next question can be about what it printed.
 - **Enhanced Terminal Shell**: Input autocompletion for slash commands and persistent input history across restarts powered by `prompt_toolkit`.
-- **Hashline Line-Level Hashing**: File reading returns every line as `LINE_NUM:HASH|content`, and `edit_file` takes that row *back* as the whole edit: `38:ff|print()` means line 38 becomes `print()`. No second block, no retyping the old line, no matching. The hash is checked against the file first, so an edit made against a stale reading is refused rather than landing a few lines off.
+- **Hashline Line-Level Hashing**: File reading returns every line as `LINE_NUM:HASH|content`, and `edit_file` takes that row *back* as the whole edit: `38:ff7|print()` means line 38 becomes `print()`. No second block, no retyping the old line, no matching. The hash is checked against the file first, so an edit made against a stale reading is refused rather than landing a few lines off.
 - **Multi-Source Web Search**: Queries several keyless sources (DuckDuckGo, Wikipedia, Stack Exchange, GitHub, optional self-hosted SearXNG), reads the actual pages, ranks passages locally with BM25, and reports "no relevant results" rather than returning off-topic pages.
 - **Agent Skills**: Folder-based instruction packs (`skills/<name>/SKILL.md`) that the model loads on demand. Only each skill's name and description sit in the system prompt, so a large library stays cheap until a skill is actually needed.
 - **Tool Permissions**: Rules in `.permissions.json` decide what runs without asking and what never runs at all, filling the gap between prompting for everything and `/automode` allowing everything. Answering `a` at any approval prompt saves a rule.
@@ -184,10 +184,10 @@ feeds `write_file` and `run_python`; `<old_content>` and `<new_content>` feed
 `read_file` returns every line with a prefix:
 
 ```
-50:1f|    print(answer)
+50:1fa|    print(answer)
 ```
 
-`50` is the line number and `1f` is a two-character fingerprint of that line's
+`50` is the line number and `1fa` is a three-character fingerprint of that line's
 exact content. Both used to be decoration - `edit_file` stripped the prefix off
 and matched what was left as literal text, so to change one line the model still
 had to reproduce it perfectly: every space of indentation, every quote, every
@@ -202,19 +202,19 @@ the `|`, and that is the entire edit - there is no `old_content` block:
 <tool_call>
 {"name": "edit_file", "arguments": {"filepath": "game.py"}}
 <new_content>
-50:1f|    print("the answer was", answer)
+50:1fa|    print("the answer was", answer)
 </new_content>
 </tool_call>
 ````
 
-`50:1f` says *which* line and proves it is the line that was read; everything
+`50:1fa` says *which* line and proves it is the line that was read; everything
 after the `|` is what it becomes. One row per line changed, and the lines need
 not be next to each other:
 
 ````
 <new_content>
-12:a4|import sys
-50:1f|    print("the answer was", answer)
+12:a41|import sys
+50:1fa|    print("the answer was", answer)
 </new_content>
 ````
 
@@ -228,10 +228,10 @@ text.
 
 | `old_content` | Means |
 | :--- | :--- |
-| `50:1f` | Replace line 50 |
-| `50:1f\|    print(answer)` | The whole row copied out of the listing - the text beside it is the *old* line, and is only used to confirm it |
-| `50:1f` / `51:9c` / `52:aa`, one per line | Replace that run of lines |
-| `50:1f-53:9c` | Replace the span, both ends checked |
+| `50:1fa` | Replace line 50 |
+| `50:1fa\|    print(answer)` | The whole row copied out of the listing - the text beside it is the *old* line, and is only used to confirm it |
+| `50:1fa` / `51:9c0` / `52:aa4`, one per line | Replace that run of lines |
+| `50:1fa-53:9c0` | Replace the span, both ends checked |
 
 An empty `new_content` there deletes the lines outright.
 
@@ -241,8 +241,8 @@ every anchor is checked against the file before anything is written, and a
 mismatch is refused with what is actually there:
 
 ```
-[Error] Line 50 of game.py is not what 50:1f says it is. It now reads
-50:9c|    print(result)
+[Error] Line 50 of game.py is not what 50:1fa says it is. It now reads
+50:9c0|    print(result)
 The file has changed since you read it, or the anchor was mistyped. read_file it
 again and use the anchors from the new listing.
 ```
@@ -254,14 +254,17 @@ the result says so too, so the next edit starts from a fresh `read_file`.
 
 In the one-row form the hash is the *only* check there is - the text beside it
 is what the line is to become, not what it is now - so it is never waived. In
-the `old_content` form there is a second piece of evidence, and it is used: a
-hash that disagrees with an exactly-correct line beside it
-(`50:ab|    print(answer)`) is treated as a slip of two hand-copied characters,
-and the line itself is believed.
+the `old_content` form the row may also quote the line, and then **the quote
+decides, in both directions.** A hash that disagrees with an exactly-correct
+line beside it (`50:abd|    print(answer)`) is a slip of three hand-copied
+characters and the line is believed. A hash that *agrees* while the quoted line
+does not is the more interesting case: an anchor points at a position, so a
+line that moved away and a different line that moved in collide once in 4096,
+and the quote is what catches it. That is refused.
 
 **A spelling that can only mean one thing is read, not refused.** `read_file`
 prints a `|` after every anchor, so a model writes one after a span too, and
-`6:ca-9:96|` used to fall through to text matching and come back as
+`6:cae-9:964|` used to fall through to text matching and come back as
 "old_content was not found" - which says nothing about the anchor being one
 character off. A local 4B model spent eight tool calls resending it. Now it
 resolves. So does a row that names a line and quotes it with no hash at all
@@ -279,13 +282,36 @@ the next call can be right without going to look:
 [Error] Nothing was written. Those rows name lines but carry no hash, and the
 text after the `|` is what the line is to become - so there is nothing here
 that shows you have read what is already on it. game.py currently has:
-  50:1f|    print(answer)
-Send it again with each anchor exactly as it appears above - 50:1f|<the new
+  50:1fa|    print(answer)
+Send it again with each anchor exactly as it appears above - 50:1fa|<the new
 line> - or read_file for the rest.
 ```
 
 The model is not offered a "confirm and proceed" instead. Being asked is not
 being stopped, and a 4B model says yes.
+
+**An edit hands back the lines around it, already anchored.** Editing a line
+changes its hash, and changing the number of lines moves every anchor below it
+- so straight after an edit the model is holding anchors that are wrong, and
+its only recourse was to read the whole file again. That is a round trip, and
+the whole file back into a context that is usually small, to recover a few
+lines it already knows. The neighbourhood comes back with the result instead:
+
+```
+[Success] File edited: greet.py (line 3 replaced). One line became one line, so
+nothing below moved and the rest of your anchors are still good.
+The file now reads, around what you changed:
+  1:eb1|def greet(name):
+  2:cd7|    answer = "hi " + name
+  3:3dd|    pass
+  4:964|    return answer
+  5:d41|
+```
+
+Five lines either side, merged when two edits are close and elided when they
+are far apart. Nothing is inferred - this is the file as it now stands. When
+the line count changed, the listing says so, because anchors *outside* it have
+moved and those still need a `read_file`.
 
 An `old_content` that is not made *entirely* of anchors is matched as text
 exactly as before, and so is a `new_content` whose rows are not all anchored.
@@ -362,7 +388,7 @@ that says what went wrong.
 ### File System & Workspace Tools
 - `read_file`: Read contents of a local file formatted with line numbers and line MD5 hashes.
 - `write_file`: Create new files or overwrite existing file content. The body comes in a `<content>` raw block.
-- `edit_file`: Replace part of a file, via `<old_content>` / `<new_content>` raw blocks. `old_content` either names the lines by hashline anchor (`50:1f`) or quotes them as text - see *Editing by hashline anchor*.
+- `edit_file`: Replace part of a file, via `<old_content>` / `<new_content>` raw blocks. `old_content` either names the lines by hashline anchor (`50:1fa`) or quotes them as text - see *Editing by hashline anchor*.
 - `delete_file`: Remove a file from disk.
 - `copy_file`: Copy a file to a new location.
 - `create_dir`: Create a new directory path.
@@ -1439,7 +1465,7 @@ The codebase is organized cleanly around the following components:
 - **`tests/test_tool_parsing.py`**: Every shape a model wraps a tool call in, and every shape that must not be read as one.
 - **`tests/test_resume.py`**: That `--resume` and `-c` open the conversation they name - and that neither hands back a blank one, or guesses, when they cannot.
 - **`tests/test_tool_reporting.py`**: That a tool result is judged by the marker it *starts* with, not one it happens to contain, and that no library writes an unasked-for paragraph to stderr while a tool is running.
-- **`tests/test_hashline_edit.py`**: That `38:ff|print()` reaches the line it names, that a stale or mistyped anchor is refused rather than applied a few lines off, and that everything which is not an anchor still behaves as it did.
+- **`tests/test_hashline_edit.py`**: That `38:ff7|print()` reaches the line it names, that a stale or mistyped anchor is refused rather than applied a few lines off, and that everything which is not an anchor still behaves as it did.
 - **`tests/test_channel.py`**: That a file one harness is changing cannot be written from another, that the refusal names who to ask, that a claim dies with the terminal that took it, and that several processes writing to the board at once lose nothing.
 - **`tests/test_mentions.py`**: What `@` attaches and what it must leave alone - an email address is not a file - and that the completion menu reads the real directory.
 - **`requirements-lock.txt`**: The exact dependency set the harness was tested against. `requirements.txt` gives the tested floors and a ceiling before the next breaking release.
@@ -1504,7 +1530,7 @@ to keep weak models working; most only have the one.
 has.** Claude Code, Aider and Cursor all ask the model to reproduce the exact
 old text it wants to change, then match that text back into the file - and a
 line that appears twice, or one reproduced with a stray space, makes the edit
-ambiguous or wrong. `read_file` here returns `50:1f|<content>`, a line number
+ambiguous or wrong. `read_file` here returns `50:1fa|<content>`, a line number
 plus a fingerprint of that exact line, and an edit is just that row handed
 back with different text after the `|`. There is no old-text block to get
 subtly wrong, a stale anchor is refused rather than landing a few lines off,

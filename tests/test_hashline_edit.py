@@ -1,6 +1,6 @@
 """Editing a file by naming its lines instead of quoting them.
 
-`read_file` has always returned `50:1f|    print(answer)`, and `edit_file` has
+`read_file` has always returned `50:1fa|    print(answer)`, and `edit_file` has
 always thrown that prefix away - so to change one line the model had to
 reproduce it exactly: every space of indentation, every quote, every backslash.
 That is the thing a small model gets wrong most often, and when the line
@@ -80,7 +80,7 @@ def line_of(path, number):
 
 print("--- the whole edit is one row: the anchor, and what the line becomes ---")
 path = sample()
-result = edit(path, "", '3:9b|    print("said:", answer)')
+result = edit(path, "", '3:9b2|    print("said:", answer)')
 check("new_content alone, with no old_content at all, edits the line",
       result.startswith("[Success"), result)
 check("and it is the right line", line_of(path, 3) == '    print("said:", answer)',
@@ -91,7 +91,7 @@ check("nothing moved, and the result says so",
       len(read(path).split("\n")) == 10 and "nothing below moved" in result, result)
 
 path = sample()
-result = edit(path, "", '2:cd|    answer = f"hi {name}"\n8:9b|    pass')
+result = edit(path, "", '2:cd7|    answer = f"hi {name}"\n8:9b2|    pass')
 check("several rows change several lines", result.startswith("[Success"), result)
 check("which need not be next to each other",
       line_of(path, 2) == '    answer = f"hi {name}"' and line_of(path, 8) == "    pass",
@@ -101,18 +101,18 @@ check("and the lines between them are untouched",
 check("the result names every line it changed", "lines 2, 8 replaced" in result, result)
 
 path = sample()
-same_line = edit(path, "", "3:9b|a\n3:9b|b")
+same_line = edit(path, "", "3:9b2|a\n3:9b2|b")
 check("naming one line twice is refused", same_line.startswith("[Error]"), same_line)
 check("because a line can only become one thing", "twice" in same_line, same_line)
 check("and nothing is written", read(path) == SAMPLE)
 
 print("\n--- the hash is the only check this form has, so it is not waived ---")
 path = sample()
-stale = edit(path, "", "3:0e|    pass")
+stale = edit(path, "", "3:0ee|    pass")
 check("a hash that does not match refuses the edit", stale.startswith("[Error]"), stale)
 check("the file is untouched", read(path) == SAMPLE)
 check("and the refusal says what is on that line now",
-      "3:9b|    print(answer)" in stale, stale)
+      "3:9b2|    print(answer)" in stale, stale)
 check("saying why nothing was written",
       "overwrite something you have not read" in stale, stale)
 
@@ -122,28 +122,28 @@ check("a line the file does not have is refused", missing.startswith("[Error]"),
 check("and it says how many lines there are", "10 lines" in missing, missing)
 
 path = sample()
-clash = edit(path, "1:eb", "3:9b|    pass")
+clash = edit(path, "1:eb1", "3:9b2|    pass")
 check("an old_content naming other lines is refused rather than half-obeyed",
       clash.startswith("[Error]"), clash)
 check("and says which lines new_content meant", "line(s) 3" in clash, clash)
 check("nothing is written", read(path) == SAMPLE)
 check("the same anchors in both is accepted",
-      edit(path, "3:9b", "3:9b|    pass").startswith("[Success"))
+      edit(path, "3:9b2", "3:9b2|    pass").startswith("[Success"))
 check("and edits that line", line_of(path, 3) == "    pass")
 
 path = sample()
 check("an indented row is still read as an anchor, not written literally",
-      edit(path, "", "    3:9b|    pass").startswith("[Success"))
+      edit(path, "", "    3:9b2|    pass").startswith("[Success"))
 check("so the file never gets an anchor written into it",
-      "3:9b|" not in read(path) and line_of(path, 3) == "    pass", line_of(path, 3))
+      "3:9b2|" not in read(path) and line_of(path, 3) == "    pass", line_of(path, 3))
 
 print("\n--- the longer form is for what the short one cannot do ---")
 path = sample()
 listing = tools.handle_read_file(path).split("\n")
 check("read_file still prints the anchor it is asked for",
-      listing[2] == "3:9b|    print(answer)", listing[2])
+      listing[2] == "3:9b2|    print(answer)", listing[2])
 
-result = edit(path, "3:9b", '    print("said:", answer)')
+result = edit(path, "3:9b2", '    print("said:", answer)')
 check("an anchor in old_content edits that line", result.startswith("[Success"), result)
 check("and it is the right line", line_of(path, 3) == '    print("said:", answer)',
       line_of(path, 3))
@@ -152,7 +152,7 @@ check("the identical line further down is untouched",
 check("nothing else moved", len(read(path).split("\n")) == 10)
 
 path = sample()
-result = edit(path, "3:9b|    print(answer)", '    print("said:", answer)')
+result = edit(path, "3:9b2|    print(answer)", '    print("said:", answer)')
 check("the whole row copied out of the listing works too",
       result.startswith("[Success") and line_of(path, 3) == '    print("said:", answer)',
       result)
@@ -162,25 +162,25 @@ path = sample()
 duplicate = edit(path, "    print(answer)", "    pass")
 check("quoting a line that appears twice is still refused",
       duplicate.startswith("[Error]") and "2 times" in duplicate, duplicate)
-check("and the refusal now says what to do instead", "50:1f" in duplicate, duplicate)
+check("and the refusal now says what to do instead", "50:1fa" in duplicate, duplicate)
 check("the file was not touched", read(path) == SAMPLE)
-check("by anchor the same edit lands", edit(path, "8:9b", "    pass").startswith("[Success"))
+check("by anchor the same edit lands", edit(path, "8:9b2", "    pass").startswith("[Success"))
 check("on the second one", line_of(path, 8) == "    pass" and
       line_of(path, 3) == "    print(answer)")
 
 print("\n--- an anchor that no longer describes the file is refused ---")
 path = sample()
-stale = edit(path, "3:0e", "    pass")
+stale = edit(path, "3:0ee", "    pass")
 check("a hash that does not match refuses the edit", stale.startswith("[Error]"), stale)
 check("the file is untouched", read(path) == SAMPLE)
 check("and the refusal says what is actually on that line",
-      "3:9b|    print(answer)" in stale, stale)
+      "3:9b2|    print(answer)" in stale, stale)
 check("and what to do about it", "read_file" in stale)
 
 # The real thing this protects against: the file moved under the model.
 path = sample()
-edit(path, "1:eb", "def greet(name):\n    # a new line, everything below shifts")
-after = edit(path, "3:9b", "    pass")
+edit(path, "1:eb1", "def greet(name):\n    # a new line, everything below shifts")
+after = edit(path, "3:9b2", "    pass")
 check("an anchor taken before an edit does not fire after it",
       after.startswith("[Error]"), after)
 check("nothing was written at the wrong place",
@@ -193,13 +193,13 @@ path = sample()
 typo = edit(path, "3:zz|    print(answer)", "    pass")
 check("a malformed hash is not an anchor at all - it falls through to text",
       typo.startswith("[Error]"), typo[:60])
-typo = edit(path, "3:ab|    print(answer)", "    pass")
+typo = edit(path, "3:abc|    print(answer)", "    pass")
 check("a wrong-but-well-formed hash beside the exact line is accepted",
       typo.startswith("[Success"), typo)
 check("and it edited that line", line_of(path, 3) == "    pass")
 
 path = sample()
-both_wrong = edit(path, "3:ab|    print(nothing)", "    pass")
+both_wrong = edit(path, "3:abc|    print(nothing)", "    pass")
 check("a wrong hash beside the wrong text is refused",
       both_wrong.startswith("[Error]"), both_wrong[:70])
 check("the file is untouched", read(path) == SAMPLE)
@@ -210,10 +210,10 @@ print("\n--- a span still spelled with the pipes read_file printed ---")
 # back as "old_content was not found", which says nothing about the anchor being
 # one character off - a local 4B model spent eight tool calls resending it.
 SPAN_NEW = 'def farewell(name):\n    return "bye " + name'
-for label, spelling in (("bare", "6:ca-9:96"),
-                        ("with a trailing pipe", "6:ca-9:96|"),
-                        ("with the row's text after it", "6:ca-9:96|    return answer"),
-                        ("with a pipe on both ends", "6:ca|def farewell(name):-9:96|")):
+for label, spelling in (("bare", "6:cae-9:964"),
+                        ("with a trailing pipe", "6:cae-9:964|"),
+                        ("with the row's text after it", "6:cae-9:964|    return answer"),
+                        ("with a pipe on both ends", "6:cae|def farewell(name):-9:964|")):
     path = sample()
     result = edit(path, spelling, SPAN_NEW)
     check(f"a span {label} resolves to the same lines",
@@ -225,8 +225,8 @@ for label, spelling in (("bare", "6:ca-9:96"),
 # end of a span. Reading that as a span would edit a line the model never named,
 # so the ordinary one-anchor reading has to win - which is why the piped span is
 # tried last rather than first.
-path = sample("hyphen.py", "a = 1\nb = 2\nc = x-4:96\nd = 4\n")
-one_row = edit(path, "3:d0|c = x-4:96", "c = 3")
+path = sample("hyphen.py", "a = 1\nb = 2\nc = x-4:964\nd = 4\n")
+one_row = edit(path, "3:d0e|c = x-4:964", "c = 3")
 check("a lone anchor is not re-read as a span because its text has a hyphen",
       one_row.startswith("[Success"), one_row[:70])
 check("so only the line it named changed",
@@ -257,7 +257,7 @@ check("a hash-less row whose text does not match is refused",
       wrong.startswith("[Error]"), wrong[:60])
 check("the file is untouched", read(path) == SAMPLE)
 check("and the refusal shows what that line really says",
-      "3:9b|    print(answer)" in wrong, wrong)
+      "3:9b2|    print(answer)" in wrong, wrong)
 
 # The guarantee that makes the whole thing safe to add: a snippet that merely
 # looks like a numbered row is still matched as text.
@@ -279,10 +279,10 @@ check("a hash-less row in new_content is refused", bare.startswith("[Error]"), b
 check("the file is untouched", read(path) == SAMPLE)
 check("and it is not written in literally", "3|" not in read(path))
 check("the refusal carries the line, ready to copy back",
-      "3:9b|    print(answer)" in bare, bare)
+      "3:9b2|    print(answer)" in bare, bare)
 
 path = sample()
-literal = edit(path, "3:9b", "1|a\n2|b")
+literal = edit(path, "3:9b2", "1|a\n2|b")
 check("but rows like that are still ordinary text when old_content named lines",
       literal.startswith("[Success"), literal[:60])
 check("and are written as they stand", line_of(path, 3) == "1|a" and
@@ -299,37 +299,95 @@ check("content binds to new_content",
 path = sample()
 check("so the call goes through",
       tools.dispatch_tool("edit_file",
-                          {"filepath": path, "content": "3:9b|    pass"}).startswith("[Success"))
+                          {"filepath": path, "content": "3:9b2|    pass"}).startswith("[Success"))
 check("and edits the line", line_of(path, 3) == "    pass")
+
+print("\n--- a hash that agrees with a line the model quoted differently ---")
+# Three hex characters are 4096 values, and an anchor points at a *position*:
+# a line that has moved away and a different line that has moved in collide
+# once in 4096. When the row quotes the line, that quote catches the collision
+# - so when the two disagree, the quote decides, in both directions.
+path = sample()
+collision = edit(path, "3:9b2|    print(nothing at all)", "    pass")
+check("a matching hash beside a line quoted differently is refused",
+      collision.startswith("[Error]"), collision[:70])
+check("the file is untouched", read(path) == SAMPLE)
+check("and the refusal shows both what was claimed and what is there",
+      "print(nothing at all)" in collision and "3:9b2|    print(answer)" in collision,
+      collision)
+check("while the hash alone still decides when nothing is quoted",
+      edit(path, "3:9b2", "    pass").startswith("[Success"))
+
+print("\n--- a two-character anchor is read, and refused ---")
+# Anchors got a third character. One left over from an older listing can never
+# match, but it is still *recognised*, so what comes back names the line and
+# gives the anchor that would have worked - which is the difference between a
+# model that corrects itself and one that resends.
+path = sample()
+short = edit(path, "3:9b", "    pass")
+check("an anchor a character short is refused", short.startswith("[Error]"), short[:60])
+check("and it is read as an anchor, not as text",
+      "Line 3" in short and "3:9b2|" in short, short)
+check("the file is untouched", read(path) == SAMPLE)
+check("the hash is three characters wide", len(tools._line_hash("x")) == 3)
+
+print("\n--- an edit hands back the lines around it, already anchored ---")
+# Editing a line changes its hash, and changing the line count moves every
+# anchor below. Reading the whole file again to recover a few lines is a round
+# trip and a context full of file, so the neighbourhood comes back with the
+# result - current, and in the format the next edit is written in.
+path = sample()
+result = edit(path, "", "3:9b2|    pass")
+check("a one-row edit echoes the region", "The file now reads" in result, result[:80])
+check("with the line it just wrote, freshly hashed",
+      f"3:{tools._line_hash('    pass')}|    pass" in result, result)
+check("and its neighbours", "2:cd7|" in result and "4:964|" in result, result)
+check("it does not claim anything moved", "have moved with it" not in result, result)
+
+path = sample()
+result = edit(path, "6:cae-9:964", "def farewell(name):")
+check("a span that shortens the file echoes the region too",
+      "The file now reads" in result, result[:80])
+check("and says the anchors outside it have moved",
+      "have moved with it" in result, result)
+check("the echoed anchors are the ones that now describe the file",
+      all(f"{n}:{tools._line_hash(line_of(path, n))}|" in result
+          for n in range(2, 7)), result)
+
+path = sample("wide.py", "\n".join(f"line {n}" for n in range(1, 200)) + "\n")
+big = edit(path, "", "\n".join(f"{n}:{tools._line_hash(f'line {n}')}|changed {n}"
+                               for n in (10, 100, 190)))
+check("scattered edits echo each neighbourhood, not the span between them",
+      big.count("…") >= 2 and "50:" not in big, big[-400:])
 
 print("\n--- several lines at once ---")
 path = sample()
-result = edit(path, "6:ca-9:96", 'def farewell(name):\n    return "bye " + name')
+result = edit(path, "6:cae-9:964", 'def farewell(name):\n    return "bye " + name')
 check("a span replaces every line in it", result.startswith("[Success"), result)
 check("with the new text", read(path).split("\n")[5:7] ==
       ["def farewell(name):", '    return "bye " + name'], str(read(path).split("\n")))
 check("and says the lines below have moved", "moved" in result, result)
 
 path = sample()
-result = edit(path, "3:9b\n4:96", "    return None")
+result = edit(path, "3:9b2\n4:964", "    return None")
 check("a run of anchors, one per line, does the same",
       result.startswith("[Success"), result)
 check("replacing both of them", read(path).split("\n")[2] == "    return None" and
       read(path).split("\n")[3] == "")
 
 path = sample()
-result = edit(path, "3:9b\n4:96", "    print(answer)\n    return answer")
+result = edit(path, "3:9b2\n4:964", "    print(answer)\n    return answer")
 check("a replacement of the same length does not claim anything moved",
       result.startswith("[Success") and "moved" not in result, result)
 
 print("\n--- anchors that do not describe a run of lines are refused ---")
 path = sample()
-gap = edit(path, "3:9b\n5:d4", "    pass")
+gap = edit(path, "3:9b2\n5:d41", "    pass")
 check("a gap between anchors is refused", gap.startswith("[Error]"), gap)
-check("and the span form is offered instead", "3:9b-5:d4" in gap, gap)
+check("and the span form is offered instead", "3:9b2-5:d41" in gap, gap)
 check("the file is untouched", read(path) == SAMPLE)
 
-backwards = edit(path, "9:96-3:9b", "    pass")
+backwards = edit(path, "9:964-3:9b2", "    pass")
 check("a span written backwards is refused", backwards.startswith("[Error]"), backwards)
 
 missing = edit(path, "99:9b", "    pass")
@@ -339,7 +397,7 @@ check("the file is still untouched", read(path) == SAMPLE)
 
 print("\n--- deleting, and the shape of the file afterwards ---")
 path = sample()
-result = edit(path, "4:96\n5:d4", "")
+result = edit(path, "4:964\n5:d41", "")
 check("an empty replacement removes the lines", result.startswith("[Success"), result)
 check("without leaving a blank one behind",
       read(path).split("\n")[3] == "def farewell(name):", str(read(path).split("\n")[:5]))
@@ -353,7 +411,7 @@ check("and the rest of the file is intact",
                      '    return answer\n'), repr(read(path)))
 
 path = sample()
-edit(path, "1:eb", "def greet(name):")
+edit(path, "1:eb1", "def greet(name):")
 check("a file that ended in a newline still does", read(path).endswith("answer\n"))
 check("and has not grown a line", len(read(path).split("\n")) == 10)
 
@@ -369,13 +427,13 @@ path = sample()
 # that is only half-prefixed (its 0.8 ratio, unchanged), so this is refused
 # rather than half-understood. It was refused before this feature too; what is
 # new is that the refusal says what to do instead.
-mixed = edit(path, '3:9b|    print(answer)\n    return answer', "    pass")
+mixed = edit(path, '3:9b2|    print(answer)\n    return answer', "    pass")
 check("a snippet that is only partly anchors is not treated as anchors",
       mixed.startswith("[Error]"), mixed[:60])
 check("and it is refused rather than half-stripped", read(path) == SAMPLE)
 check("with the refusal pointing at the anchor form", "anchor" in mixed, mixed)
 check("while every row being an anchor does take over",
-      edit(path, '3:9b|    print(answer)\n4:96|    return answer', "    pass"
+      edit(path, '3:9b2|    print(answer)\n4:964|    return answer', "    pass"
            ).startswith("[Success"))
 check("replacing exactly those lines",
       read(path).split("\n")[2:4] == ["    pass", ""], str(read(path).split("\n")[:5]))
@@ -386,7 +444,7 @@ check("a snippet that is not there is still refused", gone.startswith("[Error]")
 check("and now says the anchor is the way round it", "anchor" in gone, gone)
 
 path = sample()
-result = edit(path, "3:9b", "3:9b|    print(answer, flush=True)")
+result = edit(path, "3:9b2", "3:9b2|    print(answer, flush=True)")
 check("hashline prefixes in new_content are still stripped",
       line_of(path, 3) == "    print(answer, flush=True)", line_of(path, 3))
 
@@ -395,7 +453,7 @@ empty = edit(path, "", "    pass")
 check("replacement text with no anchors and no old_content is refused",
       empty.startswith("[Error]"), empty)
 check("rather than matched against the whole file", read(path) == SAMPLE)
-check("and it says both ways of naming the lines", "50:1f|" in empty, empty)
+check("and it says both ways of naming the lines", "50:1fa|" in empty, empty)
 
 print("\n--- the user still decides ---")
 path = sample()
@@ -410,7 +468,7 @@ def refuse(title, details, rule=""):
 
 tools._approval_prompt = refuse
 try:
-    denied = edit(path, "3:9b", "    pass")
+    denied = edit(path, "3:9b2", "    pass")
 finally:
     tools._approval_prompt = real_prompt
 check("an anchored edit is still put to the user", len(approvals) == 1)
@@ -424,7 +482,7 @@ check("and writes nothing", read(path) == SAMPLE)
 approvals.clear()
 tools._approval_prompt = refuse
 try:
-    denied = edit(path, "", "3:9b|    pass")
+    denied = edit(path, "", "3:9b2|    pass")
 finally:
     tools._approval_prompt = real_prompt
 check("a one-row edit is put to the user too", len(approvals) == 1)
@@ -434,8 +492,8 @@ check("declining refuses it", denied.startswith("[System]") and read(path) == SA
 
 print("\n--- a missing file is a missing file, whichever form is used ---")
 absent = os.path.join(WORK, "not-here.py")
-check("by one-row anchor", edit(absent, "", "1:aa|x").startswith("[Error]"))
-check("by anchor", edit(absent, "1:aa", "x").startswith("[Error]"))
+check("by one-row anchor", edit(absent, "", "1:aaa|x").startswith("[Error]"))
+check("by anchor", edit(absent, "1:aaa", "x").startswith("[Error]"))
 check("by text", edit(absent, "x", "y").startswith("[Error]"))
 
 shutil.rmtree(HOME, ignore_errors=True)

@@ -302,9 +302,9 @@ prose - because the model will claim success it did not earn, and the reader
 believes the last line.
 
 **5.12 An anchor is verified or it is not used.** `read_file` returns
-`50:1f|    print(answer)`, and `edit_file` reads that row back two ways:
-`tools._parse_patch` takes `38:ff|print()` in `new_content` as a whole edit -
-which line, and what it becomes - and `_parse_anchors` takes `50:1f` in
+`50:1fa|    print(answer)`, and `edit_file` reads that row back two ways:
+`tools._parse_patch` takes `38:ff7|print()` in `new_content` as a whole edit -
+which line, and what it becomes - and `_parse_anchors` takes `50:1fa` in
 `old_content` as the target for a replacement that changes the number of lines.
 
 The line number alone would be a loaded gun: it points at whatever has since
@@ -316,22 +316,35 @@ hash is the only evidence there is and it is never waived.
 
 The parse fails *closed into the old behaviour*: one ordinary line anywhere in
 `old_content` and the whole snippet is matched as text, exactly as before.
-Falling back is always safe; taking over wrongly is not. That is also why the
-one forgiving case is the one where the evidence is stronger, not weaker - a
-wrong hash beside a line whose text matches exactly is accepted, because two
-hand-copied hex characters are far easier to get wrong than the line itself.
+Falling back is always safe; taking over wrongly is not.
+
+When the row also quotes the line, the quote decides and the hash does not -
+in both directions. A wrong hash beside an exactly-correct line is accepted,
+because three hand-copied hex characters are easier to get wrong than the line
+itself. A hash that *agrees* while the quoted line does not is refused, which
+is the case that matters: `HASHLINE_DIGITS` is 3, so an anchor pointing at a
+position collides once in 4096 with whatever has moved into it, and the quote
+is the only thing that notices. The digits went from 2 to 3 for that reason -
+465 tokens on this repository's largest file, against a 1-in-256 silent
+overwrite. The patterns still *read* a two-character digest, which can never
+match, so a stale anchor gets "line 50 is not what 50:1f says it is; it now
+reads 50:1fa|..." rather than falling through to a text match that says
+nothing.
 
 Around that sits a repair layer, in the spirit of tool-call repair (5.6):
 a spelling that can only mean one thing is read rather than refused. `read_file`
 prints a `|` after every anchor, so a model writes one after a span too -
-`_ANCHOR_SPAN_PIPED` reads `6:ca-9:96|`, and is tried *last*, after the ordinary
-one-anchor reading, because a lone anchor whose quoted text ends in something
-shaped like `-4:96` is a real row and re-reading it as a span would edit a line
-nobody named. `_parse_unhashed_anchors` reads a row that names a line and quotes
-it with no hash at all - `3     print(answer)` - and `_verified_unhashed` takes
-it only when every row's text matches the line it names, which is the same
-evidence that forgives a mistyped hash. Everything else still falls through to
-text.
+`_ANCHOR_SPAN_PIPED` reads `6:cae-9:964|`, and `_parse_unhashed_anchors` reads a
+row that names a line and quotes it with no hash at all - `3     print(answer)`.
+
+Which reading was meant is not decidable from the row: `6:cae|def f():-9:964|`
+is a span, and equally one anchor whose quoted text contains `-9:964|`. So
+`_anchor_target` does not guess. It collects every reading that parses, asks
+`_anchor_problem` whether each one *describes the file*, and takes the first
+that does; when none does, it complains about the first, which is the one the
+model most likely meant. A reading made only of hash-less rows that does not
+describe the file is not an error at all - that is ordinary text starting with
+a number, and it goes back to being matched as text.
 
 What is never repaired is a row with no evidence at all. `3|    pass` in
 `new_content` names a line and says what it becomes, and nothing there shows the
@@ -341,6 +354,15 @@ carries the lines it meant, rendered exactly as `read_file` prints them
 and look. A model is never offered a "confirm and proceed" path instead: being
 asked is not being stopped, and a 4B model says yes. The same reasoning as the
 read-only planning stages (§7).
+
+A successful edit ends with `_echo_region`: the changed lines and five either
+side, rendered as `read_file` prints them. Editing a line changes its hash and
+changing the line count moves every anchor below, so without this the model is
+holding wrong anchors the moment it succeeds, and its only recourse is to read
+the whole file back into a small context. Windows merge when edits are close
+and elide when they are far apart, and the listing says so when anchors outside
+it have moved. It states the file, so it can be trusted the way `git diff` in
+deepthink's review stage can (5.10) - nothing here is remembered or inferred.
 
 **5.11 Two harnesses in one project must not silently overwrite each other.**
 Every instance is its own process, so nothing about the conversation can tell
