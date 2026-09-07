@@ -1656,6 +1656,9 @@ def handle_send_agent_message(message: str, to: str = "") -> str:
         # if the model keeps knocking on it (ARCHITECTURE 5.9).
         return (f"[System] The message was not sent: {said}. Use list_agents to see "
                 f"who is actually here, and do not retry the same message.")
+    # Whoever was waiting on an answer has had one. Not only the agent named:
+    # a model that replies to everybody has still replied.
+    channel.clear_asked()
     print(f"  {S.MUTED}\u2192 {channel.me()} to {to or 'everyone'}: "
           f"{' '.join(str(message).split())[:70]}{S.R}")
     return (f"[Success] Message {said}. They will read it on their next turn - "

@@ -16,6 +16,7 @@ from simple_harness.config import S
 from simple_harness.tui import _fmt_tool_call, _fmt_tool_result, _fmt_tokens
 from simple_harness.renderer import _render_line, _format_table, _render_full
 from simple_harness.tools import dispatch_tool
+from simple_harness import channel
 from simple_harness import context
 from simple_harness import mcp_client
 from simple_harness import providers
@@ -793,6 +794,7 @@ async def chat_turn(messages: list[dict]) -> str:
     verify_failures = 0
     verify_done = False        # set when this turn has spent its three goes
     last_failure = ""          # to tell a stuck model from one making progress
+    channel_nudged = False     # another agent's question, asked about once
     # A turn does not inherit what the last one wrote - only a turn that ran
     # out of tries leaves anything behind. Guarded by the depth even though a
     # sub-agent runs its own loop today: if one is ever routed through here,
@@ -865,6 +867,28 @@ async def chat_turn(messages: list[dict]) -> str:
                     "Every parameter goes inside \"arguments\". Inside a string value, "
                     "write \\\" for a quote, \\\\ for a backslash and \\n for a line break, "
                     "and close every brace you opened.")})
+                continue
+
+            # The turn is ending. If another agent asked this one something and
+            # it never answered, say so once. A model that writes "you have my
+            # agreement to proceed" into its own answer has addressed the other
+            # agent and delivered it to nobody, and the asker is sitting there
+            # waiting - which is exactly what two 4B models did to each other
+            # when this was tried. One nudge, then let it go: being asked twice
+            # is not going to work either.
+            asked = channel.awaiting_reply() if not channel_nudged else []
+            if asked:
+                channel_nudged = True
+                channel.clear_asked()
+                who = ", ".join(asked)
+                print(f"  {S.MUTED}↩ {who} asked something that has not been "
+                      f"answered; asking the model to reply{S.R}")
+                messages.append({"role": "user", "content": (
+                    f"[System] {who} sent you a message and is waiting on an "
+                    f"answer. Nothing you write here reaches them - your reply "
+                    f"goes to the user. Call send_agent_message to answer "
+                    f"{who}, then carry on. If you have nothing to say, send "
+                    f"them that.")})
                 continue
             return stored
 

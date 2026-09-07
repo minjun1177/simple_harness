@@ -340,6 +340,81 @@ check("and carries what was said", "taking the tests directory" in note)
 check("and names the tool to answer with", "send_agent_message" in note)
 check("the next turn is quiet again", channel.turn_note() == "")
 
+print("\n--- a question that was never answered is chased, once ---")
+# Two 4B models were run against each other to see whether the board holds up.
+# It did, until the last step: asked "are you finished with shared.py?", the
+# holder released the file and then wrote its reply into its own *answer* -
+# "you have my agreement for a1 to proceed" - addressed to the other agent and
+# delivered to nobody, while the asker sat waiting for a reply. The note asks
+# the model to use send_agent_message; asking is not enough here either.
+fresh_board()
+a1, a2 = join("one"), join("two")
+drain(a1, a2)
+channel.clear_asked()
+
+as_agent(a2)
+channel.send("everyone: I am starting on the parser")
+as_agent(a1)
+channel.turn_note()
+check("a broadcast is news, and news needs no answer", channel.awaiting_reply() == [],
+      str(channel.awaiting_reply()))
+
+as_agent(a2)
+channel.send("are you finished with shared.py?", to=a1)
+as_agent(a1)
+channel.turn_note()
+check("a message addressed to you is a question outstanding",
+      channel.awaiting_reply() == [a2], str(channel.awaiting_reply()))
+
+answered = tools.dispatch_tool("send_agent_message",
+                               {"message": "yes, go ahead", "to": a2})
+check("answering it clears that", answered.startswith("[Success")
+      and channel.awaiting_reply() == [], str(channel.awaiting_reply()))
+
+# And the turn loop is what chases it: a model that ends its turn without
+# answering gets told once, and only once.
+as_agent(a2)
+channel.send("and the other one?", to=a1)
+as_agent(a1)
+channel.turn_note()
+
+import asyncio                                    # noqa: E402
+from simple_harness import llm_client             # noqa: E402
+
+requests = []
+
+
+async def prose_only(messages, tools=None, calls_out=None):
+    """A model that answers the other agent in its own reply, as one really did."""
+    requests.append(len(messages))
+    return "Sure, that is fine by them - go ahead."
+
+
+conversation = [{"role": "system", "content": "x"},
+                {"role": "user", "content": "carry on"}]
+saved_stream = llm_client.stream_reply
+llm_client.stream_reply = prose_only
+try:
+    asyncio.run(llm_client.chat_turn(conversation))
+finally:
+    llm_client.stream_reply = saved_stream
+
+nudges = [m["content"] for m in conversation
+          if m["role"] == "user" and m["content"].startswith("[System]")
+          and "waiting on an answer" in m["content"]]
+check("a turn that answered in prose is asked to send it properly",
+      len(nudges) == 1, f"{len(nudges)} nudges, {len(requests)} requests")
+check("and asked exactly once, not until it complies",
+      len(requests) == 2, f"{len(requests)} requests")
+if nudges:
+    check("the nudge names who is waiting", a2 in nudges[0], nudges[0][:90])
+    check("and says that prose does not reach them",
+          "goes to the user" in nudges[0] or "reaches them" in nudges[0], nudges[0][:120])
+    check("and offers the way out of having nothing to say",
+          "nothing to say" in nudges[0], nudges[0][-90:])
+check("the question is not left outstanding after the nudge",
+      channel.awaiting_reply() == [], str(channel.awaiting_reply()))
+
 print("\n--- joining and leaving are announced ---")
 fresh_board()
 a1 = join("one")

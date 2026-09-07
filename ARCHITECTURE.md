@@ -397,6 +397,14 @@ taken, a home directory that cannot be written - each of those lets the write
 through. Coordination is worth a refusal; it is not worth a harness that cannot
 edit a file because a JSON file in `~/.localchat` is malformed.
 
+Answering is chased the same way the rest is enforced. `turn_note` records the
+agents that addressed this one directly (`awaiting_reply`), a successful
+`send_agent_message` clears it, and `chat_turn` nudges once when a turn ends
+with the question outstanding. It is there because two 4B models were run at
+each other and the holder replied *in its own answer* - "you have my agreement
+to proceed" - addressed to the other agent and delivered to nobody. A broadcast
+never sets it: news needs no answer.
+
 ---
 
 ## 6. Module map

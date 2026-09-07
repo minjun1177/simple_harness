@@ -511,6 +511,27 @@ sit unread until they press Enter. You can join in yourself with
 It is a message, not a call: nothing blocks waiting for a reply. Say what you
 need, carry on with something else, and the answer arrives on a later turn.
 
+**And a question that goes unanswered is chased, once.** Two `gemma4:e4b`
+instances were run against each other to see whether any of this holds up. It
+did, until the last step: asked "are you finished with shared.py?", the holder
+released the file and then wrote its reply into its own *answer* - "you have my
+agreement for a1 to proceed" - addressed to the other agent and delivered to
+nobody, while the asker sat waiting for a reply it had said it would wait for.
+Asking the model in the note to use `send_agent_message` is not enough, for the
+same reason asking is never enough here. So when a turn ends with a direct
+message unanswered, the harness says so once:
+
+```
+[System] a2 sent you a message and is waiting on an answer. Nothing you write
+here reaches them - your reply goes to the user. Call send_agent_message to
+answer a2, then carry on. If you have nothing to say, send them that.
+```
+
+Once, not until it complies - a model that ignores the second one would ignore
+the fourth. Run again with this in place, the same model answered properly and
+the loop closed: A was refused, asked, B released the file and replied, A
+wrote. A broadcast is not chased; it is news, and news needs no answer.
+
 **Not conflicting.** Talking is not enough, for the same reason nothing else in
 this harness relies on the model behaving: a model asked to coordinate will
 sometimes just edit the file. So the board is enforced.

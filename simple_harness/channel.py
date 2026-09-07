@@ -497,6 +497,27 @@ def describe(entry: dict) -> str:
     return f"{sender} → {'you' if to else 'everyone'}: {entry.get('text', '')}"
 
 
+# Agents that addressed this one directly and have not been answered since.
+#
+# Two 4B models were run against each other to see whether any of this holds
+# up. It did, up to the last step: asked "are you finished with shared.py?",
+# the holder released the file and then wrote its reply into its own answer -
+# "you have my agreement for a1 to proceed" - addressed to the other agent and
+# delivered to nobody. Meanwhile the asker had said it would wait for a reply.
+# Asking in the note is not enough, exactly as it is not enough anywhere else
+# here; `chat_turn` reads this and nudges once.
+_asked_by: list = []
+
+
+def awaiting_reply() -> list:
+    """Agents whose direct message this one has not answered."""
+    return list(_asked_by)
+
+
+def clear_asked() -> None:
+    _asked_by.clear()
+
+
 def turn_note() -> str:
     """What arrived since the last turn, as a message for the conversation.
 
@@ -508,6 +529,12 @@ def turn_note() -> str:
     fresh = take_for_model()
     if not fresh:
         return ""
+    for entry in fresh:
+        sender = entry.get("from") or ""
+        # `to` set means it was addressed to this agent rather than broadcast;
+        # a broadcast is news, and news does not need answering.
+        if sender and entry.get("to") and sender not in _asked_by:
+            _asked_by.append(sender)
     lines = "\n".join(f"  {describe(entry)}" for entry in fresh)
     return ("[Channel] From the other AI agents working in this same project:\n"
             f"{lines}\n"
