@@ -331,6 +331,11 @@ def _show_mcp(detail: str = "", only: str = ""):
                 counts.append(_plural(len(server.resources), "resource"))
             if server.prompts:
                 counts.append(_plural(len(server.prompts), "prompt"))
+            if mcp_client.is_lazy(server):
+                counts.append(f"{S.WARN}announced only{S.R}{S.GRAY}"
+                              f" - the model calls use_mcp_server for these")
+            elif mcp_client.lazy_enabled() and server.name in config.LOADED_MCP_SERVERS:
+                counts.append(f"{S.OK}loaded{S.R}{S.GRAY} this conversation")
             print(f"  {S.MUTED}│{S.R}  {S.GRAY}{' · '.join(counts)}{S.R}")
             if detail in ("tools", "all") and server.tools:
                 for tool in server.tools:

@@ -304,6 +304,17 @@ POLICY_AUTO_ALLOW = False       # set per call by dispatch_tool; not a user sett
 # knows the others exist - so two of them edit the same file and the second
 # write throws the first away. The board lives in ~/.localchat/channel/, one
 # file per workspace. See channel.py; /agents shows it.
+# A big MCP server is announced by name rather than described in full, and its
+# tools' parameters arrive when the model calls `use_mcp_server`. One 24-tool
+# server costs 3,549 tokens of prompt or 4,637 of native schema on *every*
+# request; its name and its tools' names cost 130. Below MCP_LAZY_MIN_TOOLS the
+# index would cost about what the schemas cost, so a small server is shown
+# outright and no round trip is spent on it. False restores the old behaviour
+# exactly. See mcp_client.
+MCP_LAZY_TOOLS = True
+MCP_LAZY_MIN_TOOLS = 6
+LOADED_MCP_SERVERS = []     # what this conversation has asked for; not a setting
+
 CHANNEL_ENABLED = True
 CHANNEL_CLAIMS = True           # refuse an edit to a file another agent is holding
 CHANNEL_CLAIM_TTL = 1800        # seconds a claim_files claim lasts
@@ -518,7 +529,7 @@ _NOT_A_SETTING = frozenset({
     "SYSTEM_PROMPT", "MODEL", "SESSION_TITLE", "CUSTOM_PERSONA",
     # Live state that happens to be spelled in capitals.
     "LOADED_SKILLS", "POLICY_AUTO_ALLOW", "DEEPTHINK_READONLY", "SUBAGENT_DEPTH",
-    "TDD_LOCK",
+    "TDD_LOCK", "LOADED_MCP_SERVERS",
     # Where the person's own files live. `LOCALCHAT_HOME` moves all of them
     # together; moving one by hand splits a memory or a session list in two.
     "MEMORY_FILE", "HISTORY_FILE", "SESSION_DIR",

@@ -364,6 +364,24 @@ and elide when they are far apart, and the listing says so when anchors outside
 it have moved. It states the file, so it can be trusted the way `git diff` in
 deepthink's review stage can (5.10) - nothing here is remembered or inferred.
 
+**5.13 A tool the model cannot see is still a tool it may call.** A server's
+tools cost 3,549 tokens of prompt or 4,637 of `tools` field on *every* request
+(measured, one 24-tool playwright server), so `mcp_client` announces a big one
+by name - 130 tokens - and `use_mcp_server` hands over the parameters when the
+model asks. What that must never become is a permission system. `resolve_tool`
+and `dispatch_tool` are untouched: a call to an unannounced server's tool runs,
+and `note_call` loads that server so the next one is not a guess. A saving that
+can refuse a call is not a saving.
+
+Two things fall out of it. `_tool_entries` and `_raw_input_schemas` are zipped
+by `native_tool_schemas`, so they filter through the same `shown_servers()` -
+filtering one and not the other would pair a tool's name with another tool's
+parameters. And the loaded set is read back out of the history
+(`loaded_in`, `context._sync_loaded_mcp_servers`) for the reason
+`LOADED_SKILLS` is: the compressor can drop the message that carried a
+server's tools, and a set kept only in memory would go on claiming they were
+sent.
+
 **5.11 Two harnesses in one project must not silently overwrite each other.**
 Every instance is its own process, so nothing about the conversation can tell
 you another one exists. `channel.py` is the only place that knows, and the only
@@ -428,7 +446,7 @@ app.py            the loop, slash commands, session lifecycle
 | `permissions.py` | Rule loading and the allow/deny/ask decision | |
 | `shell_session.py` | Live commands, waiting-vs-busy detection | |
 | `vm.py` | The scratch Python process: its wire protocol, its ceilings, and restarting it after it dies | How the result is worded - that is `tools.handle_run_python` |
-| `mcp_client.py` | MCP transports, JSON-RPC, MCP tool schemas | |
+| `mcp_client.py` | MCP transports, JSON-RPC, MCP tool schemas, which servers are described now | Whether the *built-in* tools are shown - that is `toolspec` |
 | `websearch.py` | Retrieval, extraction, BM25 reranking | |
 | `skills.py` | Skill discovery and loading | |
 | `tui.py` / `renderer.py` | Terminal chrome and markdown | Decisions |
@@ -744,6 +762,7 @@ for t in tests/*.py; do python "$t" || echo "FAILED: $t"; done
 | `test_settings.py` | That `/set` records only what changed, that a broken settings file still starts, that a saved API key can be deleted, and that the banner fits the terminal |
 | `test_caching.py` | That the cache breakpoints reach Anthropic, that all three hosted providers' cache counters are read back, and that the prefix this harness builds is byte-stable enough to cache |
 | `test_verify.py` | That auto-verify picks the right check, runs it once per turn, refuses one it cannot run, and turns off a suite that will not finish (§7a) |
+| `test_mcp_lazy.py` | That a big MCP server is announced rather than described, that asking for it hands over the parameters, that a call to an unloaded one still works, and that names and schemas cannot come apart (5.13) |
 | `test_tdd.py` | That `/tdd` reaches a test file however its path is written, refuses in `dispatch_tool`, holds nothing on disk, and lifts itself (§7a) |
 | `test_docs.py` | That this file and `README.md` still describe the program that exists |
 

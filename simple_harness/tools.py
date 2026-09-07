@@ -1573,6 +1573,11 @@ def handle_mcp_tool_call(function_name: str, arguments: dict) -> str:
     server, tool = resolved
     tool_name = str(tool.get("name", ""))
 
+    # Reaching a tool from a server whose schemas are not being sent means the
+    # model got the name from somewhere and wants it. Hiding the parameters for
+    # the *next* call after that would only have it guessing them.
+    mcp_client.note_call(function_name)
+
     if not mcp_client.auto_approved(server, tool_name):
         details = [("server", server.name), ("tool", tool_name)]
         for key, value in arguments.items():
@@ -1889,6 +1894,7 @@ def _handlers() -> dict:
             "query_ast_node": handle_query_ast_node,
             "submit_plan_for_approval": handle_submit_plan_for_approval,
             "use_skill": handle_use_skill,
+            "use_mcp_server": mcp_client.use_server,
             "spawn_agent": handle_spawn_agent,
             "list_agents": handle_list_agents,
             "send_agent_message": handle_send_agent_message,

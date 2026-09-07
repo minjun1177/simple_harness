@@ -176,7 +176,7 @@ def tool_rules(native: bool | None = None) -> str:
 13. When receiving Tool Result data, never print template strings like '[user_provided_input]' exactly as they are.
 14. Reply by naturally substituting the actual data from the tool result into the sentence.
 15. Skills: if a request matches an entry in AVAILABLE SKILLS, call `use_skill` with {"skill_name": "<the exact name>"} BEFORE doing the work, then follow the returned instructions. Load a skill once per conversation - never reload one you already have. Never invent a skill name that is not on the list.
-16. MCP tools: any tool named `mcp__<server>__<tool>` comes from an attached MCP server and is used exactly like a built-in tool. Copy the name character for character, and pass the parameters that tool lists - never guess a server or tool name that is not in the MCP TOOLS section.
+16. MCP tools: any tool named `mcp__<server>__<tool>` comes from an attached MCP server and is used exactly like a built-in tool. Copy the name character for character, and pass the parameters that tool lists - never guess a server or tool name that is not in the MCP TOOLS section. A server listed under MCP SERVERS is attached but its tools' parameters are not shown yet: call `use_mcp_server` with {"server": "<the exact name>"} once, then use its tools normally.
 @@WORK_IT_OUT@@
 @@IMPORTANT_LAST@@
 

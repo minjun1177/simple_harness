@@ -80,6 +80,7 @@ def _adopt_session(loaded) -> list[dict]:
         config.SYSTEM_PROMPT = _build_system_prompt()
         messages.insert(0, {"role": "system", "content": _compose_system_prompt()})
     config.LOADED_SKILLS[:] = skills.loaded_skill_names(messages)
+    config.LOADED_MCP_SERVERS[:] = mcp_client.loaded_in(messages)
     return messages
 
 
@@ -504,6 +505,10 @@ async def main(resume_id: str = "") -> None:
             complete_while_typing=True,
         )
 
+    # Which MCP servers the system prompt was built for, so a load can be
+    # noticed. Sorted, so the comparison is about the set and not the order.
+    mcp_servers_in_prompt = sorted(config.LOADED_MCP_SERVERS)
+
     while True:
         try:
             user_input = await _read_line(
@@ -550,6 +555,7 @@ async def main(resume_id: str = "") -> None:
             _show_help()
             continue
         if cmd == "/clear":
+            config.LOADED_MCP_SERVERS.clear()
             config.SYSTEM_PROMPT = _build_system_prompt()
             messages = [{"role": "system", "content": _compose_system_prompt()}]
             current_session_id = None
@@ -1005,6 +1011,15 @@ async def main(resume_id: str = "") -> None:
                 "will not work. Make the failing test pass by changing the "
                 "code it tests. If you conclude the test itself is wrong, say "
                 "so and stop; do not work around it.]")
+
+        # Loading an MCP server changes what belongs in the system prompt: the
+        # index should stop announcing a server whose tools are now listed, and
+        # over the text protocol the prompt is where those tools live. The
+        # prompt is not rebuilt every turn - a stable prefix is what the hosted
+        # providers cache - so it is rebuilt exactly when that set has moved.
+        if sorted(config.LOADED_MCP_SERVERS) != mcp_servers_in_prompt:
+            _refresh_system_prompt(messages)
+            mcp_servers_in_prompt = sorted(config.LOADED_MCP_SERVERS)
 
         # What the other agents said reaches the model here, ahead of the user's
         # own message so that the request stays the last thing in the history.

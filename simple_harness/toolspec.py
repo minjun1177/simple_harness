@@ -336,6 +336,14 @@ TOOLS = (
         params=(
             Param(name='skill_name', description='The exact skill name from the AVAILABLE SKILLS list.', aliases=('name', 'skill')),
         ),
+    ),
+    Tool(
+        name='use_mcp_server',
+        description="Load the tools of an MCP server listed under MCP SERVERS. Those servers are attached and working, but only their tool names are shown - this returns the parameters for each one. Call it before using a tool from a server listed there, once per server per conversation.",
+        aliases=('load_mcp_server', 'get_mcp_tool_list'),
+        params=(
+            Param(name='server', description='The exact server name from the MCP SERVERS list.', aliases=('name', 'server_name')),
+        ),
     ),)
 
 

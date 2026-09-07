@@ -147,7 +147,7 @@ deliberate `VM_TIMEOUT`.
 
 ## 4. Tool Capabilities
 
-The client equips the model with 33 tools. They are listed in one table in
+The client equips the model with 34 tools. They are listed in one table in
 `toolspec.py`, from which both the system prompt and the dispatcher are
 generated - so this list cannot quietly drift from what actually runs.
 
@@ -414,7 +414,8 @@ that says what went wrong.
 
 ### MCP Tools
 Present only when an MCP server is attached (see MCP Servers below).
-- `mcp__<server>__<tool>`: Every tool each connected server exposes, listed in the system prompt with its own parameters.
+- `mcp__<server>__<tool>`: Every tool each connected server exposes, with its own parameters. A server with more than a handful of tools is announced by name instead and its parameters arrive on request - see *Big servers are announced, not described*.
+- `use_mcp_server`: Hand over one announced server's tools, with their parameters. Called once per server, per conversation.
 - `list_mcp_resources`: List the resources the connected servers expose, with the URI needed to read each one.
 - `read_mcp_resource`: Read one resource by URI.
 
@@ -816,7 +817,58 @@ Calls go through the same approval prompt as `run_cmd` and file edits, so
 nothing runs on an attached server without a `y` - unless `/automode on`,
 `autoApprove`, or `trust` says otherwise.
 
-Tuning knobs live in `config.py`: `MCP_ENABLED`, `MCP_STARTUP_TIMEOUT`,
+### Big servers are announced, not described
+
+A server's tools are written out in full on **every request** - into the system
+prompt over the text protocol, into the request's own `tools` field over a
+native one. Measured against a real `@playwright/mcp` server with 24 tools:
+
+| | tokens, every request |
+| :--- | ---: |
+| in the system prompt (text protocol) | 3,549 |
+| in the `tools` field (native) | 4,637 |
+| **its name and its tools' names** | **130** |
+
+That is paid whether or not the conversation has anything to do with a browser,
+and attaching three such servers spends most of a 65,536 context on tool
+descriptions nobody asked for.
+
+So a server with `MCP_LAZY_MIN_TOOLS` tools or more (6 by default) is
+*announced* rather than described:
+
+```
+### MCP SERVERS (attached, tools not yet loaded):
+- playwright (24 tools): browser_close, browser_resize, browser_navigate,
+  browser_click, browser_type, browser_snapshot, browser_evaluate, …
+```
+
+Names only - a name is what tells the model whether a server does the thing it
+wants. When it decides it does, `use_mcp_server("playwright")` hands over the
+parameters, and from then on those tools are in the list like any other. It is
+the shape `use_skill` already has, for the same reason: the prompt should carry
+what is needed to *choose*, not everything that might be used.
+
+Three things keep it from being a trap:
+
+**Loading is about what the model is shown, never about what it may do.** A
+call to an unloaded server's tool still resolves and still runs - a context
+optimisation must not be able to break a call. And calling one loads that
+server, so the *next* call is not a guess. (Over a native interface a provider
+cannot emit a call whose schema it was never given; that is a protocol limit
+rather than a rule here, and it is what the announcement exists to work
+around.)
+
+**A load that the compressor dropped is a load that ended.** The loaded set is
+read back out of the conversation, exactly as `LOADED_SKILLS` is, so the model
+is never told a server is "already loaded" after the message carrying its tools
+was pruned away.
+
+**A small server is not worth a round trip.** Below `MCP_LAZY_MIN_TOOLS` the
+announcement costs about what the schemas cost, so those servers are shown
+outright. `MCP_LAZY_TOOLS = False` restores the old behaviour exactly.
+
+Tuning knobs live in `config.py`: `MCP_ENABLED`, `MCP_LAZY_TOOLS`,
+`MCP_LAZY_MIN_TOOLS`, `MCP_STARTUP_TIMEOUT`,
 `MCP_CALL_TIMEOUT`, `MCP_HTTP_TIMEOUT`, `MCP_RESULT_CHARS`,
 `MCP_MAX_TOOLS_PER_SERVER`, `MCP_TRUSTED_SERVERS`, and
 `MCP_AUTO_APPROVE_READONLY`.
@@ -1379,6 +1431,8 @@ The settings worth knowing:
 | `VM_MEMORY_MB` | 512 | Address space the VM may take. Enforced on Linux; accepted and ignored on macOS, absent on Windows. 0 for no limit |
 | `VM_FILE_MB` | 64 | Largest file the VM may write. POSIX only; 0 for no limit |
 | `MCP_ENABLED` | `True` | Attach MCP servers on startup |
+| `MCP_LAZY_TOOLS` | `True` | Announce a big MCP server by name; send its tools when asked |
+| `MCP_LAZY_MIN_TOOLS` | 6 | Tools a server needs before it is announced rather than described |
 | `SEARXNG_URL` | `""` | A self-hosted search instance to prefer over the public sources |
 
 The rest are tuning knobs for search, MCP and command sessions; they are

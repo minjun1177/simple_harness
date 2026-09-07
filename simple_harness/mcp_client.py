@@ -953,10 +953,149 @@ def describe_schema(schema: dict | None) -> dict:
     return described
 
 
+# ---------------------------------------------------------------------------
+# which servers the model is shown, and when
+# ---------------------------------------------------------------------------
+# A server's tools are described in full on every single request - in the
+# prompt over the text protocol, in the `tools` field over a native one. One
+# playwright server, 24 tools, measured: 3,549 tokens of prompt or 4,637 of
+# schema, every turn, whether or not the conversation is about a browser.
+# Attach two more and most of a 65,536 context is tool descriptions.
+#
+# So a big server is announced rather than described: its name and its tools'
+# names cost 130 tokens, and `use_mcp_server` fetches the parameters when the
+# model decides it wants them. This is the shape `use_skill` already has, and
+# for the same reason - the prompt should carry what is needed to *choose*, not
+# everything that might be used.
+#
+# A small server is not worth the round trip: below `MCP_LAZY_MIN_TOOLS` the
+# index would cost about what the schemas cost, so it is shown outright.
+#
+# Loading is about what the model is *shown*, never about what it may do.
+# `dispatch_tool` resolves an MCP call the same way it always has, so nothing
+# here can break a call that would have worked. (Over a native interface the
+# provider cannot emit a call whose schema it was not given, which is a
+# protocol limit rather than a rule of this harness - `note_call` covers it by
+# loading a server the moment one of its tools is used.)
+
+def _loaded_names() -> list:
+    """Servers this conversation has asked for. Not `_loaded`, which is this
+    module's own "has the config file been read" flag."""
+    from simple_harness import config
+    return getattr(config, "LOADED_MCP_SERVERS", [])
+
+
+def lazy_enabled() -> bool:
+    return bool(_cfg("MCP_LAZY_TOOLS", True))
+
+
+def is_lazy(server) -> bool:
+    """Whether this server is big enough to be worth announcing rather than
+    describing, and has not been asked for yet."""
+    if not lazy_enabled():
+        return False
+    if server.name in _loaded_names():
+        return False
+    return len(server.tools or []) >= int(_cfg("MCP_LAZY_MIN_TOOLS", 6))
+
+
+def shown_servers() -> list:
+    """Connected servers whose tools are described to the model right now."""
+    return [s for s in connected_servers() if not is_lazy(s)]
+
+
+def announced_servers() -> list:
+    """Connected servers the model is told about but not yet shown."""
+    return [s for s in connected_servers() if is_lazy(s)]
+
+
+LOAD_MARKER = "[MCP server: "
+
+
+def mark_loaded(name: str) -> None:
+    from simple_harness import config
+    if name and name not in config.LOADED_MCP_SERVERS:
+        config.LOADED_MCP_SERVERS.append(name)
+
+
+def note_call(tool_name: str) -> None:
+    """A tool from an unannounced server was called anyway - so show it now.
+
+    The model reached for it from memory, or the person named it. Either way it
+    is clearly wanted, and leaving its parameters hidden would have the model
+    guessing them on the next call.
+    """
+    found = resolve_tool(tool_name)
+    if found:
+        mark_loaded(found[0].name)
+
+
+def loaded_in(messages: list) -> list:
+    """The servers whose load is still visible in this conversation.
+
+    Read back out of the history for the same reason `LOADED_SKILLS` is: the
+    compressor can drop the message that loaded one, and a set kept only in
+    memory would then claim a server is loaded whose tools nothing is sending.
+    """
+    blob = "\n".join(m.get("content", "") for m in messages if isinstance(m, dict))
+    return [s.name for s in all_servers() if f"{LOAD_MARKER}{s.name}]" in blob]
+
+
+def use_server(name: str) -> str:
+    """`use_mcp_server`: hand over one server's tools, in full."""
+    if not _cfg("MCP_ENABLED", True):
+        return "[Error] MCP is switched off, so no server has any tools to give."
+    name = (name or "").strip()
+    known = [s.name for s in connected_servers()]
+    if not name:
+        return (f"[Error] Which server? Connected: {', '.join(known) or '(none)'}.")
+    server = get_server(name)
+    if server is None or server.state != "connected":
+        return (f"[Error] There is no connected MCP server called '{name}'. "
+                f"Connected: {', '.join(known) or '(none)'}. Use the name exactly "
+                f"as it appears under MCP SERVERS.")
+
+    already = name in _loaded_names()
+    mark_loaded(name)
+    entries = _entries_for([server])
+    note = (" They were already loaded earlier in this conversation."
+            if already else "")
+    head = (f"{LOAD_MARKER}{name}] {len(entries)} tools. They are part of your "
+            f"tool list from now on - call them by the full "
+            f"`{TOOL_PREFIX}{_slug(name)}__<tool>` name.{note}")
+
+    # Over a native interface the schemas travel in the request's own `tools`
+    # field from here on, so writing them into the result as well would put the
+    # same 3,500 tokens in the history for nothing. Over the text protocol
+    # there is no such field - the result *is* how they arrive - so there they
+    # are written out in full. Either way the marker at the front is what
+    # `loaded_in` reads back, and it survives a trimmed result.
+    if _native_active():
+        return head + " Their parameters are supplied with your next request."
+    return head + "\n\n" + json.dumps(entries, indent=2, ensure_ascii=False)
+
+
+def _native_active() -> bool:
+    """Whether tools reach the model through the request rather than the prompt.
+
+    Imported inside the function: `llm_client` imports this module, so a
+    module-level import would be a cycle.
+    """
+    try:
+        from simple_harness import llm_client
+        return bool(llm_client.native_enabled())
+    except Exception:
+        return False
+
+
 def _tool_entries() -> list[dict]:
+    return _entries_for(shown_servers())
+
+
+def _entries_for(servers: list) -> list[dict]:
     limit = int(_cfg("MCP_MAX_TOOLS_PER_SERVER", 40))
     entries = []
-    for server in connected_servers():
+    for server in servers:
         for tool in server.tools[:limit]:
             name = str(tool.get("name") or "").strip()
             if not name:
@@ -1037,10 +1176,15 @@ def native_tool_schemas() -> list:
 
 
 def _raw_input_schemas() -> list:
-    """The servers' own schemas, in the same order `_tool_entries` returns."""
+    """The servers' own schemas, in the same order `_tool_entries` returns.
+
+    `shown_servers()` in both, because `native_tool_schemas` zips the two: a
+    filter applied to one and not the other would pair a tool's name with
+    another tool's parameters, which is worse than either extreme.
+    """
     limit = int(_cfg("MCP_MAX_TOOLS_PER_SERVER", 40))
     schemas = []
-    for server in connected_servers():
+    for server in shown_servers():
         for tool in server.tools[:limit]:
             if not str(tool.get("name") or "").strip():
                 continue
@@ -1055,9 +1199,15 @@ def mcp_tools_prompt(tools_json: bool = True) -> str:
     if not _cfg("MCP_ENABLED", True):
         return ""
     entries = _tool_entries()
-    if not entries:
+    index = _server_index()
+    if not entries and not index:
         return ""
     entries.extend(_resource_tool_entries())
+
+    if not entries:
+        # Everything attached is announced rather than described, so the
+        # section that would say "call these" has nothing to introduce.
+        return index
 
     if tools_json:
         lines = [
@@ -1082,7 +1232,7 @@ def mcp_tools_prompt(tools_json: bool = True) -> str:
         ]
 
     notes = []
-    for server in connected_servers():
+    for server in shown_servers():
         if server.instructions:
             text = server.instructions
             if len(text) > INSTRUCTIONS_MAX_LENGTH:
@@ -1093,6 +1243,39 @@ def mcp_tools_prompt(tools_json: bool = True) -> str:
         lines.extend(notes)
         lines.append("")
 
+    return "\n".join(lines) + index
+
+
+def _server_index() -> str:
+    """The servers that are announced but not described, and their tool names.
+
+    Names only. A name is what tells the model whether a server does the thing
+    it wants - `browser_navigate` is unmistakable - and 24 of them cost 130
+    tokens against the 4,637 their schemas cost. The parameters are what
+    `use_mcp_server` is for, and they arrive when the model has decided.
+    """
+    servers = announced_servers()
+    if not servers:
+        return ""
+    lines = [
+        "\n### MCP SERVERS (attached, tools not yet loaded):",
+        "Each of these has more tools than are worth describing up front, so only",
+        "their names are listed. Call `use_mcp_server` with the server's name to",
+        "get the parameters for its tools; do that BEFORE using one of them.",
+        "",
+    ]
+    limit = int(_cfg("MCP_MAX_TOOLS_PER_SERVER", 40))
+    for server in servers:
+        names = [str(tool.get("name") or "").strip()
+                 for tool in server.tools[:limit]]
+        names = [name for name in names if name]
+        lines.append(f"- {server.name} ({len(names)} tools): {', '.join(names)}")
+        if server.instructions:
+            text = " ".join(server.instructions.split())
+            if len(text) > 200:
+                text = text[:199].rstrip() + "…"
+            lines.append(f"  {text}")
+    lines.append("")
     return "\n".join(lines)
 
 

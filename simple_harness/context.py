@@ -263,9 +263,23 @@ def _sync_loaded_skills(messages: list[dict]) -> None:
     config.LOADED_SKILLS[:] = [n for n in config.LOADED_SKILLS if f"[Skill: {n}]\nSource:" in blob]
 
 
+def _sync_loaded_mcp_servers(messages: list[dict]) -> None:
+    """Forget an MCP server whose tool listing was pruned out of the context.
+
+    Same trap as the skills above, one layer along: the model is told a
+    server's tools are "already loaded" after the compressor dropped the
+    message that listed them, and then guesses their parameters.
+    """
+    if not config.LOADED_MCP_SERVERS:
+        return
+    from simple_harness import mcp_client
+    config.LOADED_MCP_SERVERS[:] = mcp_client.loaded_in(messages)
+
+
 async def manage_context(messages: list[dict]) -> None:
     await _manage_context(messages)
     _sync_loaded_skills(messages)
+    _sync_loaded_mcp_servers(messages)
 
 
 async def _manage_context(messages: list[dict]) -> None:

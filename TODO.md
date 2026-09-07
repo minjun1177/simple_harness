@@ -40,6 +40,7 @@
 * [x] An edit hands back the lines around it, so the next one needs no re-read
 * [x] pytest runs with --showlocals: a failure arrives as the state that caused it
 * [x] /tdd: lock this project's test files for one request, so "make the test pass" cannot mean "edit the test"
+* [x] Announce a big MCP server by name instead of describing it; use_mcp_server sends its tools when the model asks
 
 ## next
 > See roadmap.md for the reasoning and the order.
