@@ -328,6 +328,34 @@ def _agents_command(rest: str) -> None:
     _show_agents()
 
 
+_TDD_LABEL = "/tdd"
+
+
+def _arm_tdd() -> None:
+    """Lock this project's test files for the request that is about to run.
+
+    "Make this test pass" is a request models answer by editing the test -
+    deleting the assertion, or loosening it until it is true. Asking them not
+    to does not work, for the same reason it does not work in a planning stage:
+    a 4B model that is stuck will take the opening it is given. So the opening
+    is closed at the dispatcher, through the permission rules that already sit
+    there, and the model is told plainly what it may not touch and why.
+
+    One request, not a mode. It lifts itself when the turn ends (including on
+    an error), because a lock nobody remembers turning on is worse than no lock.
+    """
+    permissions.release(_TDD_LABEL)          # never stack two arms
+    rules = [f"{tool}({pattern})"
+             for pattern in verify.TEST_PATTERNS
+             for tool in ("edit_file", "write_file", "delete_file", "copy_file")]
+    permissions.hold("deny", rules, _TDD_LABEL)
+    config.TDD_LOCK = True
+    print(f"  {S.INFO}✓ /tdd armed for one request.{S.MUTED} The test files are "
+          f"read-only; only the code under test can change. Auto-verify gets "
+          f"{config.TDD_VERIFY_FAILURES} tries instead of "
+          f"{llm_client.MAX_VERIFY_FAILURES}.{S.R}")
+
+
 def _set_command(rest: str, messages: list[dict]) -> None:
     """`/set`: read and change a setting without editing `config.py`.
 
@@ -465,7 +493,7 @@ async def main(resume_id: str = "") -> None:
         from simple_harness.config import (SlashCommandCompleter, PathMentionCompleter,
                                       merge_completers, PromptSession, FileHistory)
         completer = merge_completers([
-            SlashCommandCompleter(['/help', '/clear', '/usage', '/model', '/models', '/exit', '/quit', '/sessions', '/load', '/title', '/autotitle', '/automode', '/fullcontent', '/record', '/export', '/system', '/planmode', '/skills', '/skill', '/mcp', '/perms', '/think', '/connect', '/undo', '/autocommit', '/autoverify', '/deepthink', '/agents', '/vm', '/set']),
+            SlashCommandCompleter(['/help', '/clear', '/usage', '/model', '/models', '/exit', '/quit', '/sessions', '/load', '/title', '/autotitle', '/automode', '/fullcontent', '/record', '/export', '/system', '/planmode', '/skills', '/skill', '/mcp', '/perms', '/think', '/connect', '/undo', '/autocommit', '/autoverify', '/tdd', '/deepthink', '/agents', '/vm', '/set']),
             PathMentionCompleter(),
         ])
         session_pt = PromptSession(
@@ -924,6 +952,25 @@ async def main(resume_id: str = "") -> None:
             _set_command(user_input[len("/set"):], messages)
             continue
 
+        # Last of the commands on purpose: `/tdd <request>` arms the lock and
+        # then *falls through* with the request as the message, so it has to
+        # sit where falling through lands on the fall-through.
+        if cmd == "/tdd" or cmd.startswith("/tdd "):
+            rest = user_input[len("/tdd"):].strip()
+            if rest.lower() == "off":
+                dropped = permissions.release(_TDD_LABEL)
+                config.TDD_LOCK = False
+                print(f"  {S.INFO}✓ /tdd lifted.{S.MUTED}"
+                      f"{f' {len(dropped)} rules dropped.' if dropped else ''}{S.R}\n")
+                continue
+            if not rest:
+                _arm_tdd()
+                print(f"  {S.MUTED}Send your request now, or /tdd off to lift "
+                      f"it.{S.R}\n")
+                continue
+            _arm_tdd()
+            user_input = rest          # and on to the fall-through below
+
         # Every slash command has had its turn and continued; what is left is a
         # message for the model, so this is where an `@path` becomes context.
         # Before the plan-mode note, so the attachment stays under the sentence
@@ -944,6 +991,20 @@ async def main(resume_id: str = "") -> None:
                     "For simple conversational queries, you may answer directly.]"
                 )
             user_input += plan_prompt
+
+        if config.TDD_LOCK:
+            # Told as well as enforced. The refusal alone would work, but it
+            # costs a tool call to discover, and a model that knows the test is
+            # off limits spends that call on the code instead. The last
+            # sentence is the escape hatch: sometimes the test really is wrong,
+            # and saying so is a better answer than six tries at satisfying it.
+            user_input += (
+                "\n\n[System Note: TDD MODE is ON for this request. This "
+                "project's test files are locked - edit_file, write_file, "
+                "delete_file and copy_file are refused on them, and trying "
+                "will not work. Make the failing test pass by changing the "
+                "code it tests. If you conclude the test itself is wrong, say "
+                "so and stop; do not work around it.]")
 
         # What the other agents said reaches the model here, ahead of the user's
         # own message so that the request stays the last thing in the history.
@@ -988,6 +1049,16 @@ async def main(resume_id: str = "") -> None:
 
         except Exception as e:
             print(f"\n  {S.ERR}✗ Error: {e}{S.R}\n")
+        finally:
+            # `/tdd` is armed for one request and lifts itself here - including
+            # when the turn ended in an error or the user interrupted it. A
+            # lock that outlives what it was asked for is a lock nobody
+            # remembers turning on.
+            if config.TDD_LOCK:
+                permissions.release(_TDD_LABEL)
+                config.TDD_LOCK = False
+                print(f"  {S.MUTED}◆ /tdd lifted - the test files are writable "
+                      f"again.{S.R}\n")
 
 
 def _use_utf8_output() -> None:

@@ -95,6 +95,25 @@ check("deny still beats allow",
       load({"allow": ["run_cmd(rm *)"], "deny": ["run_cmd(rm *)"]}) is not None
       and verdict("run_cmd", command="rm x") == "deny")
 
+# `copy_file` writes `dst`, and `dst` was in no rule's reach: only the first
+# key of `_TARGET_KEYS` a call carried was ever matched, and for copy_file that
+# is `src`. So a deny on a path stopped `write_file` from putting anything
+# there and `copy_file` put it there anyway - while `tools._WRITES_FILES`,
+# which auto-commit and the agent channel both read, had always said `dst` is
+# the path that changes. A deny is now asked about every path a call touches.
+load({"deny": ["copy_file(*/.env)", "write_file(*/.env)"]})
+check("a deny reaches the path copy_file writes, not just the one it reads",
+      verdict("copy_file", src="a.py", dst="/home/u/.env") == "deny")
+check("and the source is still matched as before",
+      verdict("copy_file", src="/home/u/.env", dst="a.py") == "deny")
+check("a copy that touches neither is untouched",
+      verdict("copy_file", src="a.py", dst="b.py") == "ask")
+# Widening applies to deny only: an allow that names one path must not quietly
+# start covering a call because some *other* argument matched it (5.6a).
+load({"allow": ["copy_file(a.py)"]})
+check("an allow still covers only its single target",
+      verdict("copy_file", src="b.py", dst="a.py") == "ask")
+
 # ---------------------------------------------------------------------------
 print("\n--- an empty pattern is a malformed rule, not a wildcard ---")
 load({"allow": ["write_file()"]})

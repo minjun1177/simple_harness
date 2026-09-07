@@ -271,6 +271,13 @@ AUTO_VERIFY = True
 VERIFY_TIMEOUT = 90         # seconds one check gets before it is killed and disabled
 VERIFY_OUTPUT_CHARS = 2000  # of a failure, the tail - which is where it is written down
 
+# /tdd locks this project's test files for one request, so "make this test
+# pass" cannot be answered by editing the test. It lifts itself when the turn
+# ends. The whole point is to stay in the loop longer than usual, so it gets a
+# larger budget than the ordinary one in llm_client.
+TDD_LOCK = False            # armed by /tdd for one turn; not a user setting
+TDD_VERIFY_FAILURES = 6
+
 SUBAGENT_MAX_TURNS = 12
 SUBAGENT_MAX_DEPTH = 1
 SUBAGENT_DEPTH = 0              # how deep we currently are; not a user setting
@@ -511,6 +518,7 @@ _NOT_A_SETTING = frozenset({
     "SYSTEM_PROMPT", "MODEL", "SESSION_TITLE", "CUSTOM_PERSONA",
     # Live state that happens to be spelled in capitals.
     "LOADED_SKILLS", "POLICY_AUTO_ALLOW", "DEEPTHINK_READONLY", "SUBAGENT_DEPTH",
+    "TDD_LOCK",
     # Where the person's own files live. `LOCALCHAT_HOME` moves all of them
     # together; moving one by hand splits a memory or a session list in two.
     "MEMORY_FILE", "HISTORY_FILE", "SESSION_DIR",

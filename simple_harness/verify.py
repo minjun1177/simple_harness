@@ -65,7 +65,15 @@ CHECKS = (
           # This interpreter, not whatever `pytest` is first on PATH: the
           # harness is normally running inside the project's own virtualenv,
           # and that is the environment the tests are meant to be run in.
-          command=(sys.executable, "-m", "pytest", "-x", "-q"),
+          #
+          # `-l` is `--showlocals`: the variables in each failing frame, printed
+          # under it. "KeyError on line 45" asks a 4B model to work backwards to
+          # what was in scope; "KeyError on line 45, user_id = None, data = {}"
+          # asks it to read. Working backwards is the thing it is worst at, so
+          # this is most of the value of running the tests at all. pytest cuts
+          # a long repr down itself - a 500-key dict of 200-character strings
+          # came to 500 more characters, not 100,000 - so it fits the budget.
+          command=(sys.executable, "-m", "pytest", "-x", "-q", "-l"),
           ok_codes=(0, 5)),
     Check("npm test",
           markers=("package.json",),
@@ -83,6 +91,22 @@ CHECKS = (
           command=("go", "test", "./..."),
           ok_codes=(0,)),
 )
+
+# What a test file is called, by convention, in the languages the checks above
+# cover. `/tdd` denies writing to these for one request, so "make the test
+# pass" cannot be answered by editing the test. `fnmatch`'s `*` crosses `/`,
+# so one pattern covers a bare name, a relative path and an absolute one.
+#
+# Generous rather than exact: locking a file that only looks like a test costs
+# one refusal the model can read and work around, while missing a real one
+# costs the whole point of the mode. `run_cmd` is not covered and cannot be -
+# what a shell command writes is not knowable from the call.
+TEST_PATTERNS = ("*test_*.py", "*_test.py", "*conftest.py", "*tests/*",
+                 "*/test/*", "*_test.go", "*_test.rs", "*tests.rs",
+                 "*.test.js", "*.test.jsx", "*.test.ts", "*.test.tsx",
+                 "*.spec.js", "*.spec.jsx", "*.spec.ts", "*.spec.tsx",
+                 "*_spec.rb", "*Test.java", "*Tests.cs")
+
 
 # What one run of a check came to. `ok` is True, False, or None for "it never
 # really ran" - a timeout or a runner that would not start, which is a fact
@@ -383,8 +407,9 @@ def recovered_message(report: Report) -> str:
 
 
 def gave_up_message(limit: int) -> str:
-    return (f"[System] Auto-verify has failed {limit} times in a row, so it is "
-            f"off for the rest of this turn. Stop editing. Tell the user which "
+    return (f"[System] Auto-verify has come back with the same failure {limit} "
+            f"times, so it is off for the rest of this turn. Stop editing. "
+            f"Tell the user which "
             f"check is failing, what you changed, and what you think is wrong - "
             f"a fourth guess is worth less to them than an honest description. "
             f"They can take your changes back with /undo.")

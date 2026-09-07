@@ -512,7 +512,21 @@ chat_turn      →  verify.run_pending()           # once, after the whole reply
   throw away the parent's pending check.
 
 `MAX_VERIFY_FAILURES` lives in `llm_client` beside `MAX_REFUSALS_IN_A_ROW`, for
-the same reason: past three, another round is not converging.
+the same reason: past three, another round is not converging. It counts *the
+same* failure, not failures - a turn that starts with a red tree burns two of
+its three lives on problems the model did not cause, which is what happened in
+the run this rule came from. A failure whose text differs is progress and
+starts the budget again; `MAX_TOOL_CALLS` still bounds the turn either way.
+
+`/tdd` is the other half of the same loop. It holds `deny` rules for
+`verify.TEST_PATTERNS` in `permissions` (`hold` / `release`, memory only, never
+a file) for exactly one turn, released in the turn loop's `finally` so an error
+or a Ctrl-C cannot leave a project locked. `config.TDD_LOCK` says it is armed;
+`TDD_VERIFY_FAILURES` gives the loop a longer budget while it is. Enforcement
+is `dispatch_tool` step 5, unchanged - the mode adds no new gate, it writes
+rules for the gate that is already there. `run_cmd` is outside it for the same
+reason it is outside the channel's claims: what a shell command writes is not
+knowable from the call.
 
 This does not replace deepthink's stage 6, and the overlap is deliberate. Stage
 6 asks a different question - whether what runs is what was *planned* - and it
@@ -730,6 +744,7 @@ for t in tests/*.py; do python "$t" || echo "FAILED: $t"; done
 | `test_settings.py` | That `/set` records only what changed, that a broken settings file still starts, that a saved API key can be deleted, and that the banner fits the terminal |
 | `test_caching.py` | That the cache breakpoints reach Anthropic, that all three hosted providers' cache counters are read back, and that the prefix this harness builds is byte-stable enough to cache |
 | `test_verify.py` | That auto-verify picks the right check, runs it once per turn, refuses one it cannot run, and turns off a suite that will not finish (§7a) |
+| `test_tdd.py` | That `/tdd` reaches a test file however its path is written, refuses in `dispatch_tool`, holds nothing on disk, and lifts itself (§7a) |
 | `test_docs.py` | That this file and `README.md` still describe the program that exists |
 
 `test_docs.py` is why the two documents can be trusted: it fails if either names

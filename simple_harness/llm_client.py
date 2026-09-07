@@ -792,6 +792,7 @@ async def chat_turn(messages: list[dict]) -> str:
     refusal_nudges = 0
     verify_failures = 0
     verify_done = False        # set when this turn has spent its three goes
+    last_failure = ""          # to tell a stuck model from one making progress
     # A turn does not inherit what the last one wrote - only a turn that ran
     # out of tries leaves anything behind. Guarded by the depth even though a
     # sub-agent runs its own loop today: if one is ever routed through here,
@@ -934,15 +935,30 @@ async def chat_turn(messages: list[dict]) -> str:
                         messages.append({"role": "user",
                                          "content": verify.recovered_message(report)})
                     verify_failures = 0
+                    last_failure = ""
                     continue
+                # The count is for a model that is *stuck*, not for a turn that
+                # has several things wrong with it. A run against gemma4:e4b hit
+                # three different failures - a module that was not callable, a
+                # bug that was already in the tree, then a brace it had just
+                # deleted - and was stopped on the third, one edit after being
+                # handed exactly what it needed to fix it. A failure that reads
+                # differently is progress, so the budget starts again; the same
+                # text three times over is the door that is not going to open.
+                if report.output != last_failure:
+                    verify_failures = 0
+                last_failure = report.output
                 verify_failures += 1
-                if verify_failures >= MAX_VERIFY_FAILURES:
+                # `/tdd` exists to stay in this loop, so it gets a longer one.
+                budget = (config.TDD_VERIFY_FAILURES if config.TDD_LOCK
+                          else MAX_VERIFY_FAILURES)
+                if verify_failures >= budget:
                     verify_done = True
-                    print(f"  {S.WARN}⚠  The check has failed "
-                          f"{MAX_VERIFY_FAILURES} times; asking the model to "
-                          f"explain rather than guess again.{S.R}")
-                    messages.append({"role": "user", "content":
-                                     verify.gave_up_message(MAX_VERIFY_FAILURES)})
+                    print(f"  {S.WARN}⚠  The same failure came back {budget} "
+                          f"times; asking the model to explain rather than "
+                          f"guess again.{S.R}")
+                    messages.append({"role": "user",
+                                     "content": verify.gave_up_message(budget)})
                     break
                 messages.append({"role": "user",
                                  "content": verify.failure_message(report)})

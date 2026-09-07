@@ -176,6 +176,8 @@ def _show_help():
         ("/autocommit <on/off>", "Turn that on or off"),
         ("/autoverify", "Whether an edit is checked against the project's own tests"),
         ("/autoverify <on/off>", "Turn that on or off"),
+        ("/tdd <request>", "Run one request with this project's test files locked"),
+        ("/tdd", "Arm that for your next message; /tdd off lifts it"),
     ]
     # Not slash commands: these two act on the line itself, so they are listed
     # apart from the table rather than pretending to belong to it.

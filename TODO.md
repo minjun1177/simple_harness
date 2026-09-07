@@ -35,6 +35,11 @@
 * [x] Deepthink: plan -> check -> build -> review the real diff -> verify, driven by the harness
 * [x] Stop a model that keeps calling a tool it has just been refused
 * [x] Auto-verify: run the project's own check after a turn that wrote a file, and hand a failure back to fix. Three tries, then it has to explain
+* [x] Repair an anchor spelling that can only mean one thing; refuse the rest with the real lines attached
+* [x] Three-character hashes, and the quoted line beats the hash when they disagree
+* [x] An edit hands back the lines around it, so the next one needs no re-read
+* [x] pytest runs with --showlocals: a failure arrives as the state that caused it
+* [x] /tdd: lock this project's test files for one request, so "make the test pass" cannot mean "edit the test"
 
 ## next
 > See roadmap.md for the reasoning and the order.

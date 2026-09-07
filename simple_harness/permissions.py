@@ -40,6 +40,11 @@ VERDICTS = ("deny", "allow")
 _TARGET_KEYS = ("command", "filepath", "dirpath", "src", "url", "uri", "query",
                 "paths", "name", "id")
 
+# Arguments a `deny` rule is also matched against, beyond the one target. See
+# `_all_targets`. `dst` is the path `copy_file` *writes*, and until this it was
+# the one thing about a call that no rule could reach.
+_EXTRA_DENY_KEYS = ("dst",)
+
 _rules: dict[str, list[tuple[str, str]]] = {}
 _sources: list[str] = []
 _loaded = False
@@ -108,7 +113,44 @@ def rule_sources() -> list[str]:
 
 
 def rules_for(verdict: str) -> list[tuple[str, str]]:
-    return list(load_rules().get(verdict, []))
+    return list(load_rules().get(verdict, [])) + _held.get(verdict, [])
+
+
+# ---------------------------------------------------------------------------
+# rules that live for part of a session
+# ---------------------------------------------------------------------------
+# A rule the user turned on for one request - `/tdd` locking the test files -
+# is not a preference and does not belong in their `.permissions.json`. It
+# lives here instead: same matching, same `deny`-wins precedence, gone when it
+# is released. Nothing writes it to disk, so a crash cannot leave a project
+# locked in a way its owner never asked for and cannot see.
+
+_held: dict[str, list[tuple[str, str]]] = {}
+
+
+def hold(verdict: str, rules, label: str) -> None:
+    """Add rules for now. `label` is what `/perms` shows as their source."""
+    if verdict not in VERDICTS:
+        return
+    _held.setdefault(verdict, []).extend(
+        (rule, label) for rule in rules if isinstance(rule, str) and rule.strip())
+
+
+def release(label: str = "") -> list:
+    """Drop held rules - all of them, or just one label's. Returns what went."""
+    dropped = []
+    for verdict, entries in _held.items():
+        keep = [entry for entry in entries if label and entry[1] != label]
+        dropped += [entry for entry in entries if entry not in keep]
+        _held[verdict] = keep
+    return dropped
+
+
+def held(label: str = "") -> list:
+    """The rules being held, as (verdict, rule, label)."""
+    return [(verdict, rule, source)
+            for verdict, entries in _held.items() for rule, source in entries
+            if not label or source == label]
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +171,31 @@ def _target_and_key(arguments: dict) -> tuple[str, str]:
         if isinstance(value, str) and value.strip():
             return value.strip(), key
     return "", ""
+
+
+def _all_targets(arguments: dict) -> list:
+    """Every path-ish argument of a call, not just the first one that answers.
+
+    `copy_file` takes `src` and `dst`, and only `src` is in `_TARGET_KEYS` - so
+    `deny write_file(*/.env)` stopped a write to that path and `copy_file` put
+    a file there anyway. `tools._WRITES_FILES` has always said `dst` is the one
+    `copy_file` writes, which is what auto-commit and the agent channel act on;
+    the rules were the only part that disagreed.
+
+    Used for `deny` only. Denying on any argument can refuse more than before
+    and never allows more, so no rule anybody has written becomes broader.
+    Allow keeps the single target, where "the rule covers exactly the call it
+    names" is the whole point (5.6a).
+    """
+    if not isinstance(arguments, dict):
+        return []
+    seen, targets = set(), []
+    for key in _TARGET_KEYS + _EXTRA_DENY_KEYS:
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip() and value.strip() not in seen:
+            seen.add(value.strip())
+            targets.append(value.strip())
+    return targets
 
 
 def _normalise(text: str) -> str:
@@ -209,8 +276,11 @@ def decide(tool: str, arguments: dict) -> tuple[str, str]:
 
     target, key = _target_and_key(arguments)
     for verdict in VERDICTS:               # deny is checked first and wins
+        # A deny is asked about every path the call touches; an allow only
+        # about the one target. See `_all_targets`.
+        subjects = _all_targets(arguments) if verdict == "deny" else [target]
         for rule, _source in rules_for(verdict):
-            if not matches(rule, tool, target):
+            if not any(matches(rule, tool, subject) for subject in subjects or [""]):
                 continue
             if (verdict == "allow" and key == "command"
                     and chains_a_second_command(_split_rule(rule)[1], target)):
