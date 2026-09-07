@@ -322,6 +322,26 @@ _ANCHOR = re.compile(r'^\s*(\d+)\s*:\s*([0-9a-fA-F]{2})\s*(?:\|(.*))?$')
 _ANCHOR_SPAN = re.compile(r'^\s*(\d+)\s*:\s*([0-9a-fA-F]{2})\s*-\s*'
                           r'(\d+)\s*:\s*([0-9a-fA-F]{2})\s*$')
 
+# The same span with the pipes still on it: `50:1f-53:9c|`, or
+# `50:1f|def f():-53:9c|    return`. `read_file` prints a `|` after every
+# anchor it produces, so a model writing a span puts one there too - it is
+# generalising from the only example it has been shown. The strict pattern
+# above is tried first and this one only when it misses, so what a correct
+# span means does not change; this reads a spelling that used to fall through
+# to text matching and come back as "old_content was not found", which says
+# nothing about the anchor being one character off. Both ends are still
+# hash-checked, so a row that splits in the wrong place fails safely rather
+# than editing the wrong lines. Non-greedy on the first text: split at the
+# first `-<line>:<hash>`, not the last.
+_ANCHOR_SPAN_PIPED = re.compile(r'^\s*(\d+)\s*:\s*([0-9a-fA-F]{2})\s*(?:\|.*?)?-\s*'
+                                r'(\d+)\s*:\s*([0-9a-fA-F]{2})\s*(?:\|.*)?$')
+
+# A row that names a line and quotes it but carries no hash: `3|    return x`
+# or `3     return x`. Exactly one separator is consumed, so the line's own
+# indentation survives into the text and can be compared with what is on disk.
+# This is never trusted on its own - see `_verified_unhashed`.
+_ANCHOR_NO_HASH = re.compile(r'^[ \t]*(\d+)[ \t|](.*)$')
+
 
 def _parse_anchors(old_content: str):
     """The lines an `old_content` *names*, or None if it quotes them instead.
@@ -338,22 +358,154 @@ def _parse_anchors(old_content: str):
     if not rows:
         return None
 
+    def span_of(match):
+        first, first_hash, last, last_hash = match.groups()
+        return (int(first), int(last),
+                [(int(first), first_hash.lower(), None),
+                 (int(last), last_hash.lower(), None)], True)
+
     if len(rows) == 1:
         span = _ANCHOR_SPAN.match(rows[0])
         if span:
-            first, first_hash, last, last_hash = span.groups()
-            return (int(first), int(last),
-                    [(int(first), first_hash.lower(), None),
-                     (int(last), last_hash.lower(), None)], True)
+            return span_of(span)
 
     checks = []
     for row in rows:
         one = _ANCHOR.match(row)
         if not one:
-            return None
+            checks = None
+            break
         number, digest, text = one.groups()
         checks.append((int(number), digest.lower(), text))
+    if checks:
+        return (checks[0][0], checks[-1][0], checks, False)
+
+    # Only now, when nothing else reads it: a span still wearing its pipes.
+    # Last rather than first because one anchor whose quoted text happens to
+    # end in something shaped like `-4:96` is a real row, and reading it as a
+    # span would edit a line the model never named. `_ANCHOR` claims that row,
+    # so this is reached only when the `-` is what stopped it - which is the
+    # span case and nothing else.
+    if len(rows) == 1:
+        span = _ANCHOR_SPAN_PIPED.match(rows[0])
+        if span:
+            return span_of(span)
+    return None
+
+
+def _parse_unhashed_anchors(old_content: str):
+    """Rows that name a line and quote it but carry no hash, or None.
+
+    Same shape `_parse_anchors` returns, with `None` where the hash would be.
+    Never used without `_verified_unhashed` agreeing: a line number on its own
+    points at whatever has since moved into that position, and the quoted text
+    is the only thing that says otherwise.
+    """
+    rows = [row for row in (old_content or "").split("\n") if row.strip()]
+    if not rows:
+        return None
+    checks = []
+    for row in rows:
+        one = _ANCHOR_NO_HASH.match(row)
+        if not one:
+            return None
+        number, text = one.groups()
+        checks.append((int(number), None, text))
     return (checks[0][0], checks[-1][0], checks, False)
+
+
+def _verified_unhashed(lines: list, checks: list) -> bool:
+    """Whether every hash-less row really is the line it says it is.
+
+    The whole of the safety here. `3 return x` is also what an ordinary snippet
+    out of a numbered list looks like, so this has to be certain before it takes
+    over - and when it is not, the caller falls back to matching the text, which
+    is what happened before this existed. So nothing that worked can start
+    failing, and nothing is edited on the strength of a bare line number.
+
+    Trailing whitespace is invisible and routinely dropped in copying; leading
+    whitespace is the indentation and has to match, exactly as it does when a
+    mistyped hash is forgiven beside a line that reads right.
+    """
+    for number, _, text in checks:
+        if not 1 <= number <= len(lines):
+            return False
+        if text is None or text.rstrip() != lines[number - 1].rstrip():
+            return False
+    return True
+
+
+def _show_lines(lines: list, numbers) -> str:
+    """The lines named, in the shape `read_file` prints them.
+
+    So a refusal hands back something that can be copied straight into the next
+    call rather than costing a `read_file` round trip to go and look.
+    """
+    shown = []
+    for number in sorted({n for n in numbers if 1 <= n <= len(lines)}):
+        line = lines[number - 1]
+        shown.append(f"  {number}:{_line_hash(line)}|{line[:160]}")
+    return "\n".join(shown)
+
+
+# The anchored row with the hash left off: `38|print()`. The pipe is required
+# here - `38 print()` as *new* text is far more likely to be a line that really
+# starts with a number than an anchor somebody forgot half of.
+_PATCH_NO_HASH = re.compile(r'^[ \t]*(\d+)\|(.*)$')
+
+
+def _no_old_content(filepath: str, file_content: str, new_content: str) -> str:
+    """Nothing was named to replace. Say which of the two mistakes it was.
+
+    A `new_content` of `38|print()` is the anchored row minus its hash, and the
+    text after the `|` is what the line is to *become* - so there is nothing
+    here that says the model ever read line 38, and nothing to check it against.
+    It is refused rather than confirmed: the hash is what makes this form safe,
+    and a model that is merely asked "are you sure?" says yes. But the refusal
+    carries the lines it seems to have meant, in the shape read_file prints
+    them, so the next call can be right without going back to look.
+
+    Left alone otherwise, so a call that meant something else gets the same
+    error it always did.
+    """
+    rows = [row for row in (new_content or "").split("\n") if row.strip()]
+    matched = [_PATCH_NO_HASH.match(row) for row in rows]
+    lines = file_content.split("\n")
+    if rows and all(matched):
+        numbers = [int(m.group(1)) for m in matched]
+        listing = _show_lines(lines, numbers)
+        if listing:
+            return (f"[Error] Nothing was written. Those rows name lines but carry no "
+                    f"hash, and the text after the `|` is what the line is to become - "
+                    f"so there is nothing here that shows you have read what is "
+                    f"already on {'them' if len(numbers) > 1 else 'it'}. "
+                    f"{filepath} currently has:\n{listing}\n"
+                    f"Send it again with each anchor exactly as it appears above - "
+                    f"{numbers[0]}:{_line_hash(lines[numbers[0] - 1])}|<the new line> - "
+                    f"or read_file for the rest.")
+    return ("[Error] old_content was empty, so nothing was named to replace. "
+            "Either put the hashline anchors of the lines in old_content "
+            "(e.g. 50:1f), or put the anchor in front of each new line "
+            "(50:1f|<the new line>) and leave old_content out.")
+
+
+def _quoted_wrong(file_content: str, old_content: str) -> str:
+    """What the lines an unverified hash-less row named actually say, or "".
+
+    Reached when `old_content` looked like `3 return x` and line 3 does not say
+    that, so it was matched as text and the text was not there either. Both
+    readings failed, and the model is told nothing about why - which is the loop
+    a small model gets stuck in. This adds the half it cannot see.
+    """
+    unhashed = _parse_unhashed_anchors(old_content)
+    if unhashed is None:
+        return ""
+    lines = file_content.split("\n")
+    listing = _show_lines(lines, [number for number, _, _ in unhashed[2]])
+    if not listing:
+        return ""
+    return (f"\nIf you meant to name lines by number, they need the hash too. "
+            f"They currently read:\n{listing}")
 
 
 def _anchor_target(filepath: str, file_content: str, old_content: str) -> tuple:
@@ -365,11 +517,17 @@ def _anchor_target(filepath: str, file_content: str, old_content: str) -> tuple:
         (None, None, <error>)  anchors, but they do not describe the file
         (start, end, "")       these lines, verified against what is on disk
     """
+    lines = file_content.split("\n")
     parsed = _parse_anchors(old_content)
     if parsed is None:
-        return None, None, ""
+        # Second chance for a row with the hash left off. It is taken only when
+        # every row proves itself against the file; otherwise this was ordinary
+        # text and goes back to being matched as text.
+        unhashed = _parse_unhashed_anchors(old_content)
+        if unhashed is None or not _verified_unhashed(lines, unhashed[2]):
+            return None, None, ""
+        parsed = unhashed
     first, last, checks, spanned = parsed
-    lines = file_content.split("\n")
 
     if last < first:
         return None, None, (f"[Error] The anchors run backwards: {first} comes after "
@@ -614,13 +772,11 @@ def handle_edit_file(filepath: str, old_content: str, new_content: str) -> str:
     if patch is not None:
         return _edit_by_patch(filepath, file_content, patch, old_content)
 
-    new_content = _strip_hashlines(new_content)
-
     if not (old_content or "").strip():
-        return ("[Error] old_content was empty, so nothing was named to replace. "
-                "Either put the hashline anchors of the lines in old_content "
-                "(e.g. 50:1f), or put the anchor in front of each new line "
-                "(50:1f|<the new line>) and leave old_content out.")
+        return _no_old_content(filepath, file_content, new_content)
+
+    raw_old = old_content
+    new_content = _strip_hashlines(new_content)
 
     start, end, problem = _anchor_target(filepath, file_content, old_content)
     if problem:
@@ -632,7 +788,8 @@ def handle_edit_file(filepath: str, old_content: str, new_content: str) -> str:
     if old_content not in file_content:
         return ("[Error] The specified old_content was not found in the file. If the "
                 "exact text is hard to reproduce, read_file the file and put the "
-                "line's hashline anchor (e.g. 50:1f) in old_content instead.")
+                "line's hashline anchor (e.g. 50:1f) in old_content instead."
+                + _quoted_wrong(file_content, raw_old))
     count = file_content.count(old_content)
     if count > 1:
         return (f"[Error] old_content found {count} times. Give a longer snippet, or "

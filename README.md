@@ -259,6 +259,34 @@ hash that disagrees with an exactly-correct line beside it
 (`50:ab|    print(answer)`) is treated as a slip of two hand-copied characters,
 and the line itself is believed.
 
+**A spelling that can only mean one thing is read, not refused.** `read_file`
+prints a `|` after every anchor, so a model writes one after a span too, and
+`6:ca-9:96|` used to fall through to text matching and come back as
+"old_content was not found" - which says nothing about the anchor being one
+character off. A local 4B model spent eight tool calls resending it. Now it
+resolves. So does a row that names a line and quotes it with no hash at all
+(`50    print(answer)`), but only when the quoted text really is that line -
+which is the same evidence that forgives a mistyped hash. When it is not, the
+content goes back to being matched as text.
+
+**What is never repaired is a row with nothing behind it.** `50|    pass` in
+`new_content` names a line and says what it becomes, and nothing there shows
+the model has read what it is about to overwrite. That is refused - but the
+refusal hands back the lines it meant, in the shape `read_file` prints them, so
+the next call can be right without going to look:
+
+```
+[Error] Nothing was written. Those rows name lines but carry no hash, and the
+text after the `|` is what the line is to become - so there is nothing here
+that shows you have read what is already on it. game.py currently has:
+  50:1f|    print(answer)
+Send it again with each anchor exactly as it appears above - 50:1f|<the new
+line> - or read_file for the rest.
+```
+
+The model is not offered a "confirm and proceed" instead. Being asked is not
+being stopped, and a 4B model says yes.
+
 An `old_content` that is not made *entirely* of anchors is matched as text
 exactly as before, and so is a `new_content` whose rows are not all anchored.
 Anchors have to be certain before they take over, because falling back is always

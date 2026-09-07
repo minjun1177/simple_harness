@@ -204,6 +204,104 @@ check("a wrong hash beside the wrong text is refused",
       both_wrong.startswith("[Error]"), both_wrong[:70])
 check("the file is untouched", read(path) == SAMPLE)
 
+print("\n--- a span still spelled with the pipes read_file printed ---")
+# `read_file` puts a `|` after every anchor it produces, so a model writing a
+# span puts one there too. That used to fall through to text matching and come
+# back as "old_content was not found", which says nothing about the anchor being
+# one character off - a local 4B model spent eight tool calls resending it.
+SPAN_NEW = 'def farewell(name):\n    return "bye " + name'
+for label, spelling in (("bare", "6:ca-9:96"),
+                        ("with a trailing pipe", "6:ca-9:96|"),
+                        ("with the row's text after it", "6:ca-9:96|    return answer"),
+                        ("with a pipe on both ends", "6:ca|def farewell(name):-9:96|")):
+    path = sample()
+    result = edit(path, spelling, SPAN_NEW)
+    check(f"a span {label} resolves to the same lines",
+          result.startswith("[Success"), result[:70])
+    check("  ...and replaced them", read(path).split("\n")[5:7] ==
+          ["def farewell(name):", '    return "bye " + name'])
+
+# One anchor whose quoted text happens to end in something shaped like the far
+# end of a span. Reading that as a span would edit a line the model never named,
+# so the ordinary one-anchor reading has to win - which is why the piped span is
+# tried last rather than first.
+path = sample("hyphen.py", "a = 1\nb = 2\nc = x-4:96\nd = 4\n")
+one_row = edit(path, "3:d0|c = x-4:96", "c = 3")
+check("a lone anchor is not re-read as a span because its text has a hyphen",
+      one_row.startswith("[Success"), one_row[:70])
+check("so only the line it named changed",
+      read(path) == "a = 1\nb = 2\nc = 3\nd = 4\n", repr(read(path)))
+
+print("\n--- a row that names a line and quotes it, with no hash at all ---")
+# The hash is two hand-copied characters and the quoted line is not, so a row
+# that proves itself against the file is as good as one carrying the hash -
+# this is the rule already applied when a hash is *mistyped*, extended to one
+# that was never written. It is taken only when every row verifies; when it
+# does not, the content goes back to being matched as text, so nothing that
+# worked before can start failing here.
+path = sample()
+result = edit(path, "3     print(answer)", "    pass")
+check("a hash-less row whose text matches edits that line",
+      result.startswith("[Success"), result[:70])
+check("and it is the right line", line_of(path, 3) == "    pass")
+check("the identical line 8 is untouched", line_of(path, 8) == "    print(answer)")
+
+path = sample()
+check("the pipe spelling works too",
+      edit(path, "3|    print(answer)", "    pass").startswith("[Success"))
+check("on the same line", line_of(path, 3) == "    pass")
+
+path = sample()
+wrong = edit(path, "3     print(nothing)", "    pass")
+check("a hash-less row whose text does not match is refused",
+      wrong.startswith("[Error]"), wrong[:60])
+check("the file is untouched", read(path) == SAMPLE)
+check("and the refusal shows what that line really says",
+      "3:9b|    print(answer)" in wrong, wrong)
+
+# The guarantee that makes the whole thing safe to add: a snippet that merely
+# looks like a numbered row is still matched as text.
+TEXTY = "intro\n3 spaces are required\ntail\n"
+path = sample("doc.md", TEXTY)
+check("a real snippet shaped like an anchor is still matched as text",
+      edit(path, "3 spaces are required", "4 spaces are required").startswith("[Success"))
+check("and it edited the text, not line 3",
+      read(path) == "intro\n4 spaces are required\ntail\n", repr(read(path)))
+
+print("\n--- the same row in new_content, where nothing can vouch for it ---")
+# Here the text after the `|` is what the line is to *become*, so there is no
+# second piece of evidence the way there is in old_content - only the hash can
+# say the model has read what it is about to overwrite. Without this the
+# literal string "3|    pass" is what would be written into the file.
+path = sample()
+bare = edit(path, "", "3|    pass")
+check("a hash-less row in new_content is refused", bare.startswith("[Error]"), bare[:60])
+check("the file is untouched", read(path) == SAMPLE)
+check("and it is not written in literally", "3|" not in read(path))
+check("the refusal carries the line, ready to copy back",
+      "3:9b|    print(answer)" in bare, bare)
+
+path = sample()
+literal = edit(path, "3:9b", "1|a\n2|b")
+check("but rows like that are still ordinary text when old_content named lines",
+      literal.startswith("[Success"), literal[:60])
+check("and are written as they stand", line_of(path, 3) == "1|a" and
+      line_of(path, 4) == "2|b", repr(read(path)))
+
+print("\n--- a <content> block on an edit_file call ---")
+# `content` is write_file's block name, and a model that has just used it
+# reaches for it again. Without the alias the block is dropped on the floor and
+# the model is told old_content was empty, which is true and unhelpful.
+from simple_harness import toolspec          # noqa: E402
+check("content binds to new_content",
+      toolspec.get("edit_file").bind({"filepath": "x", "content": "y"}) == ["x", "", "y"],
+      str(toolspec.get("edit_file").bind({"filepath": "x", "content": "y"})))
+path = sample()
+check("so the call goes through",
+      tools.dispatch_tool("edit_file",
+                          {"filepath": path, "content": "3:9b|    pass"}).startswith("[Success"))
+check("and edits the line", line_of(path, 3) == "    pass")
+
 print("\n--- several lines at once ---")
 path = sample()
 result = edit(path, "6:ca-9:96", 'def farewell(name):\n    return "bye " + name')

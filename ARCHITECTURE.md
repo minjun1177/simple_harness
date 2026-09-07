@@ -321,6 +321,27 @@ one forgiving case is the one where the evidence is stronger, not weaker - a
 wrong hash beside a line whose text matches exactly is accepted, because two
 hand-copied hex characters are far easier to get wrong than the line itself.
 
+Around that sits a repair layer, in the spirit of tool-call repair (5.6):
+a spelling that can only mean one thing is read rather than refused. `read_file`
+prints a `|` after every anchor, so a model writes one after a span too -
+`_ANCHOR_SPAN_PIPED` reads `6:ca-9:96|`, and is tried *last*, after the ordinary
+one-anchor reading, because a lone anchor whose quoted text ends in something
+shaped like `-4:96` is a real row and re-reading it as a span would edit a line
+nobody named. `_parse_unhashed_anchors` reads a row that names a line and quotes
+it with no hash at all - `3     print(answer)` - and `_verified_unhashed` takes
+it only when every row's text matches the line it names, which is the same
+evidence that forgives a mistyped hash. Everything else still falls through to
+text.
+
+What is never repaired is a row with no evidence at all. `3|    pass` in
+`new_content` names a line and says what it becomes, and nothing there shows the
+model has read what is being overwritten - so it is refused, and the refusal
+carries the lines it meant, rendered exactly as `read_file` prints them
+(`tools._show_lines`) so the next call can be right without a round trip to go
+and look. A model is never offered a "confirm and proceed" path instead: being
+asked is not being stopped, and a 4B model says yes. The same reasoning as the
+read-only planning stages (§7).
+
 **5.11 Two harnesses in one project must not silently overwrite each other.**
 Every instance is its own process, so nothing about the conversation can tell
 you another one exists. `channel.py` is the only place that knows, and the only
