@@ -12,9 +12,9 @@ mistakes are.
 
 ## 1. What this is
 
-A terminal AI assistant, ~12,350 lines of Python, no framework. It talks to
+A terminal AI assistant, ~14,400 lines of Python, no framework. It talks to
 Ollama, Anthropic, OpenAI and Gemini over plain HTTP (no vendor SDKs), gives the
-model 33 tools, and runs them with the user's approval.
+model 34 tools, and runs them with the user's approval.
 
 The design constraint that explains most of the odd decisions: **it has to work
 with a 4-billion-parameter local model.** Such a model cannot reliably escape a
@@ -405,6 +405,26 @@ each other and the holder replied *in its own answer* - "you have my agreement
 to proceed" - addressed to the other agent and delivered to nobody. A broadcast
 never sets it: news needs no answer.
 
+**5.14 The public surface only grows.** Five things belong to the people using
+this and not to whoever is editing it: slash command names, `/set` setting
+names, tool names, the `~/.localchat` layout, and the project files
+(`.permissions.json`, `.mcp.json`, `skills/<name>/SKILL.md`) that are read from
+the working directory first. `tests/test_compat.py` lists all five and fails
+when one disappears; adding is free and reported, never failed.
+
+Two of them are less obviously public than the rest. A **setting name** is
+public the moment it exists, because `/set` derives its list from `config.py`
+rather than a table - so a rename there renames a key in somebody's saved
+`settings.json`. A **tool name** is written into the history as `<tool_call>`
+text whatever protocol produced it (§2), so renaming one does not just change a
+prompt: it stops an old session from replaying. Nothing inside
+`simple_harness.*` is covered - the modules are an implementation, and the
+reusable pieces are meant to leave for packages of their own.
+
+While the major version is 0 this is a record rather than a guarantee, and
+`CHANGELOG.md` says so in as many words. It exists from 0.6.0 so that 1.0.0 can
+be a promise already kept rather than one made on the day.
+
 ---
 
 ## 6. Module map
@@ -788,6 +808,7 @@ for t in tests/*.py; do python "$t" || echo "FAILED: $t"; done
 | `test_mcp_lazy.py` | That a big MCP server is announced rather than described, that asking for it hands over the parameters, that a call to an unloaded one still works, and that names and schemas cannot come apart (5.13) |
 | `test_tdd.py` | That `/tdd` reaches a test file however its path is written, refuses in `dispatch_tool`, holds nothing on disk, and lifts itself (§7a) |
 | `test_docs.py` | That this file and `README.md` still describe the program that exists |
+| `test_compat.py` | That the commands, settings, tool names and files people build habits on are still there under the same names (5.14) |
 
 `test_docs.py` is why the two documents can be trusted: it fails if either names
 a file, function or setting that is gone, if `README.md` misses a tool or a

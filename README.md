@@ -1605,6 +1605,7 @@ The codebase is organized cleanly around the following components:
 - **`tests/test_git_ops.py`**: Auto-commit and undo against real repositories - including that undo refuses when it would destroy something.
 - **`tests/test_native_tools.py`**: Each provider's tool-call wire format, and that both protocols end up in the same place.
 - **`tests/test_docs.py`**: Fails when README.md or ARCHITECTURE.md names something that is gone, or misses something that is new.
+- **`tests/test_compat.py`**: The public surface written down - fails when a slash command, a `/set` setting, a tool name or a file on disk is renamed or dropped.
 - **`tests/test_subagent.py`**: What a sub-agent may do, what it may not, and that only its report crosses back.
 - **`tests/test_permissions.py`**: What an allow rule covers - and that it stops at the command it names, rather than at whatever the shell was told to run next.
 - **`tests/test_paths.py`**: That nothing personal is written into whatever directory you started in, and that state from an older version is named rather than moved.
