@@ -21,7 +21,7 @@ exists to make small models genuinely usable rather than nearly usable.
 
 - **Any Provider**: `/connect` points the harness at Ollama, Anthropic, OpenAI (or anything OpenAI-compatible), or Google Gemini. No vendor SDKs - four wire formats normalised into one event shape.
 - **Two Tool Protocols, One Tool Table**: A model with a real function-calling interface gets the tools through it; one without gets them as `<tool_call>` text with a JSON repair engine behind it. For Ollama this is decided per model. Both come from the same table, and both end up as the same call.
-- **Deepthink**: `/deepthink on` turns one request into plan → argue with the plan → build → review the real diff → run it. The planning stages *cannot* edit, and the harness reports what the final check actually ran.
+- **Deepthink**: `/deepthink on` turns one request into plan → argue with the plan → build → review the real diff → run it. The planning stages *cannot* edit, the harness reports what the final check actually ran, and a check that says the work is not done sends the whole chain back to the plan.
 - **Undo**: every file an AI tool changes is committed on its own, so `/undo` takes it back. It commits only what the tool named, and refuses to undo over work it did not create.
 - **Auto-verify**: a turn that changes a file has the project's own check run against it - `pytest`, `npm test`, `cargo test`, `go test` - and a failure goes straight back to the model as the error it has to fix. Only a check the project already declares is ever run, four edits in one reply are one run of the suite, and after three failures in a row the harness stops guessing and asks the model to explain. This is most of the difference between a small model that needs checking and one that tells you when it is wrong.
 - **Several harnesses in one project**: people run three of these at once and, until now, none of them knew the others existed - two would read the same file and the second write would silently throw the first away. The instances working in one project now share a board: they can see each other, message each other, and a file one of them is in the middle of changing is refused to the others by name. See *The Agent Channel*.
@@ -1105,9 +1105,22 @@ is read back in one short call to decide. Anything unclear counts as work to do.
 A build stage that changed nothing also ends the chain rather than reviewing and
 verifying work that was never done.
 
+**And it goes round again when six turns were not enough.** A stage 6 that finds
+half the plan undone used to have nowhere to put that finding - the chain ended
+and handed the report back as the answer. Now it says so, with a marker or in a
+short read-back of its own report, and the chain **starts over at stage 1**:
+never in the middle, because what is left after a failed pass is a different
+piece of work and planning it is the part that was missing. The next pass is
+told to finish what the report named and not to widen it, and it ends after one
+turn if there is nothing left after all. `DEEPTHINK_MAX_PASSES` (3) is the
+ceiling. This gate leans the opposite way to the one above: anything unclear
+counts as **finished**, because a chain that sets itself off again on a maybe
+does not end.
+
 ```
 /deepthink            the stages, and whether it is on
 /deepthink on|off     turn it on or off
+/set DEEPTHINK_MAX_PASSES 3    how many times it may start over
 ```
 
 Deepthink supersedes plan mode while it is on, so `/planmode` injects nothing -
@@ -1431,7 +1444,8 @@ The settings worth knowing:
 | `AUTO_VERIFY` | `True` | Run the project's own check after a turn changes a file |
 | `VERIFY_TIMEOUT` | 90 | Seconds one check gets before it is killed and turned off |
 | `VERIFY_OUTPUT_CHARS` | 2000 | Of a failing check, how much of the tail the model is shown |
-| `DEEPTHINK` | `False` | Start with the five-stage chain on |
+| `DEEPTHINK` | `False` | Start with the six-stage chain on |
+| `DEEPTHINK_MAX_PASSES` | 3 | Times the chain may start over when the final check says it is not done |
 | `SUBAGENT_MAX_TURNS` | 12 | Turns a sub-agent gets before it must report |
 | `SUBAGENT_MAX_DEPTH` | 1 | 1 means sub-agents cannot hire sub-agents |
 | `SHOW_THINKING` | `False` | Show a reasoning model's scratch work |
@@ -1580,14 +1594,14 @@ The codebase is organized cleanly around the following components:
 - **`sse.py`**: Reading server-sent events without waiting for data that has not been sent. Shared by the providers and the MCP client.
 - **`permissions.py`**: Permission rule loading, matching, and the allow/deny/ask decision.
 - **`shell_session.py`**: Live commands - output draining, waiting-for-input detection, and the session registry.
-- **`deepthink.py`**: The five-stage chain - the stage instructions, what each stage may do, and when the chain stops early.
+- **`deepthink.py`**: The six-stage chain - the stage instructions, what each stage may do, when the chain stops early, and when it starts over.
 - **`git_ops.py`**: A commit per AI edit, and the undo that makes it worth having.
 - **`atomic.py`**: Writing a file so a crash cannot leave half of it behind. Used for sessions, memory, permission rules and the saved API keys.
 - **`terms.py`**: What the harness does to the machine it runs on, shown once before it does it.
 - **`tests/test_platform.py`**: Checks the waiting-for-input detection on the machine it is run on. Worth running on any new machine, and especially on Windows - see below.
 - **`tests/test_registry.py`**: Fails if the tool table, the system prompt and the handlers stop describing the same tools.
 - **`tests/test_durability.py`**: Atomic writes (including killing a writer mid-write) and the token estimate.
-- **`tests/test_deepthink.py`**: Stage sequencing, both early stops, and that the planning stages really cannot edit.
+- **`tests/test_deepthink.py`**: Stage sequencing, both early stops, the repeat pass and its ceiling, and that the planning stages really cannot edit.
 - **`tests/test_git_ops.py`**: Auto-commit and undo against real repositories - including that undo refuses when it would destroy something.
 - **`tests/test_native_tools.py`**: Each provider's tool-call wire format, and that both protocols end up in the same place.
 - **`tests/test_docs.py`**: Fails when README.md or ARCHITECTURE.md names something that is gone, or misses something that is new.

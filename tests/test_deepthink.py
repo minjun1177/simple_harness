@@ -49,23 +49,28 @@ class Scripted(providers.Provider):
         return ""
 
     gate_answer = "YES"          # what it says when asked if there is work to do
+    more_answer = "NO"           # ... and when asked if the work is unfinished
 
     async def stream(self, messages, max_tokens=None, tools=None):
         last = messages[-1]["content"]
         self.prompts.append(last)
         # The chain asks a yes/no question of its own between stages. A real
         # provider answers it; a mock that hands back the next stage reply
-        # instead would put every later stage one out of step.
-        reply = (self.gate_answer if "Answer with one word, YES or NO" in last
-                 else (self.replies.pop(0) if self.replies else "done."))
+        # instead would put every later stage one out of step. There are two
+        # such questions and they mean opposite things, so they are told apart
+        # by what they quote back.
+        if "Answer with one word, YES or NO" in last:
+            reply = self.more_answer if "--- report ---" in last else self.gate_answer
+        else:
+            reply = self.replies.pop(0) if self.replies else "done."
         yield {"text": reply}
         yield {"done": True, "prompt_tokens": 1, "completion_tokens": 1,
                "total_seconds": 0.0, "eval_seconds": 0.0}
 
 
-def drive(replies, request="파서를 고쳐줘"):
+def drive(replies, request="파서를 고쳐줘", cls=Scripted):
     saved = providers._active
-    scripted = Scripted(replies)
+    scripted = cls(replies)
     providers._active = scripted
     messages = [{"role": "system", "content": "sys"},
                 {"role": "user", "content": request}]
@@ -302,6 +307,69 @@ check("and is told not to widen it",
       "not a second review" in deepthink.STAGES[4].instruction)
 check("an empty list means changing nothing",
       "change nothing" in deepthink.STAGES[4].instruction)
+
+print("\n--- a final check that says it is not done starts the chain again ---")
+os.chdir(plain)
+git_ops._repo_root_cache.clear()
+
+SIX = ["계획.", "검토.", "구현.", "검토했다.", "고칠 것 없음."]
+
+answer, scripted, messages, printed = drive(
+    SIX + [f"두 가지 중 하나가 아직 안 됐다.\n{deepthink.MORE_MARKER}"]
+    + SIX + ["이번엔 전부 통과했다."])
+prompts = stage_prompts(scripted)
+check("it went round twice", len(prompts) == 12, f"{len(prompts)} stages")
+check("and the second time started at the plan, not in the middle",
+      prompts[6].startswith("[Deepthink 1/6"), prompts[6][:16])
+check("the later pass is marked as one on screen", "pass 2" in printed)
+check("the next pass is told what it is finishing",
+      any("going round again" in m["content"] for m in messages))
+check("and how to end if nothing is left",
+      deepthink.STOP_MARKER in deepthink.CARRY_OVER)
+check("the marker is not shown to the user", deepthink.MORE_MARKER not in answer,
+      repr(answer))
+check("the answer is the last pass's", answer.strip() == "이번엔 전부 통과했다.",
+      repr(answer))
+
+# The marker is the model saying so outright. A model that forgets it - the same
+# one that forgets NO_PLAN_NEEDED - gets its own report read back instead.
+class SaysUnfinished(Scripted):
+    more_answer = "YES"
+
+
+config.DEEPTHINK_MAX_PASSES = 2
+answer, scripted, messages, printed = drive(
+    SIX + ["테스트가 아직 실패한다."] + SIX + ["이제 통과한다."],
+    cls=SaysUnfinished)
+check("a report read back as unfinished goes round too",
+      len(stage_prompts(scripted)) == 12, str(len(stage_prompts(scripted))))
+config.DEEPTHINK_MAX_PASSES = 3
+
+# ... but only on a plain yes. Unlike the plan gate, an unclear answer here
+# stops: a chain that restarts itself on a maybe never ends.
+async def _more(text):
+    return await deepthink._needs_another_pass(text)
+
+
+saved = providers._active
+providers._active = Waffles([])
+check("an unreadable verdict counts as finished", not asyncio.run(_more("보고서")))
+providers._active = saved
+
+config.DEEPTHINK_MAX_PASSES = 2
+answer, scripted, messages, printed = drive(
+    (SIX + [f"아직 안 됐다.\n{deepthink.MORE_MARKER}"]) * 3)
+check("it stops at the ceiling rather than going round forever",
+      len(stage_prompts(scripted)) == 12, str(len(stage_prompts(scripted))))
+check("and says why it stopped short", "is the limit" in printed, printed[-300:])
+check("the unfinished report is still handed back", "아직 안 됐다" in answer,
+      repr(answer))
+config.DEEPTHINK_MAX_PASSES = 3
+
+check("the verify stage is told when to ask for another pass",
+      deepthink.MORE_MARKER in deepthink.STAGES[5].instruction)
+check("and not to ask for one just to polish",
+      "never because something could be nicer" in deepthink.STAGES[5].instruction)
 
 print("\n--- the planning stages cannot edit, whatever the model tries ---")
 os.chdir(plain)

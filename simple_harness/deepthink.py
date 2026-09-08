@@ -31,10 +31,18 @@ nothing, because the memory is of the intention, not of the code. Stage 6 goes
 back to the plan, because code that runs and is not what was agreed is still not
 finished.
 
+Six stages are not always enough. A verify stage that finds half the plan still
+undone has nowhere to put that finding: the chain ends, and the report of
+unfinished work is handed back as the answer. So when stage 6 says the job is
+not done, the whole chain runs again - from stage 1, never from the middle,
+because what is left after a failed pass is a different piece of work and
+planning it is the part that was missing. `DEEPTHINK_MAX_PASSES` is the ceiling;
+a model that is never satisfied would otherwise never stop.
+
 The mode is off by default and toggled with `/deepthink`. It costs six turns
 where one would do, which is worth it for a change to real code and a waste for
 a question - so stage 1 is allowed to end the chain when there is nothing to
-build.
+build, and that is what ends a repeat pass with nothing left in it.
 """
 
 from simple_harness import config
@@ -164,10 +172,33 @@ Then report honestly:
 
 Then stop. If you could not verify it, the answer is "I could not verify it" -
 do not follow that with a summary saying it works. You have not earned that
-sentence, and the person reading it will believe you.""", edits=True),
+sentence, and the person reading it will believe you.
+
+If what you have just reported leaves the request unfinished - something the
+plan called for is still not done, something you ran still fails, the change
+does not do what was asked - then put MORE_WORK_NEEDED on the last line by
+itself. The chain starts over at the plan and works on what is left, which is
+better than handing back work you have just said is not finished. Write it only
+because what was asked is not done, never because something could be nicer.""",
+          edits=True),
 )
 
 STOP_MARKER = "NO_PLAN_NEEDED"
+MORE_MARKER = "MORE_WORK_NEEDED"
+
+# What the next pass is told, so it plans what is left rather than the whole
+# request again. Its last line hands the chain back its own way out: a pass with
+# nothing left in it ends after stage 1 like any other request that needs no
+# work.
+CARRY_OVER = """\
+[Deepthink - going round again]
+The check you just wrote says this is not finished, so the chain starts over
+from the plan rather than handing it back.
+
+What is left is what that report named as undone or still failing, and nothing
+else. Do not re-plan the parts that already work, and do not widen the request.
+If it turns out there is nothing left to do after all, say so and end the plan
+with NO_PLAN_NEEDED."""
 
 
 def enabled() -> bool:
@@ -178,8 +209,13 @@ def enabled() -> bool:
 # the chain
 # ---------------------------------------------------------------------------
 
-async def run(messages: list) -> str:
-    """Drive the six stages over one request. Returns the last answer."""
+async def run(messages: list, pass_number: int = 1) -> str:
+    """Drive the six stages over one request. Returns the last answer.
+
+    `pass_number` counts the times round: a final check that says the work is
+    not done sends the chain back to stage 1, and the count is what stops that
+    happening forever.
+    """
     from simple_harness.context import manage_context
     from simple_harness.llm_client import chat_turn
 
@@ -199,7 +235,7 @@ async def run(messages: list) -> str:
             # "not watching", not "nothing changed".
             build_from = git_ops.head() if git_ops.enabled() else ""
 
-        _banner(number, stage)
+        _banner(number, stage, pass_number)
         messages.append({"role": "user",
                          "content": f"[Deepthink {number}/{len(STAGES)} - "
                                     f"{stage.title}]\n{instruction}"})
@@ -218,6 +254,19 @@ async def run(messages: list) -> str:
 
         if stage.key == "verify":
             _report_checks(messages[appended_from:])
+            again = await _needs_another_pass(answer)
+            answer = answer.replace(MORE_MARKER, "").strip()
+            if again:
+                ceiling = max(1, config.DEEPTHINK_MAX_PASSES)
+                if pass_number >= ceiling:
+                    _note(f"the final check says it is still not done, but "
+                          f"{ceiling} pass{'es' if ceiling > 1 else ''} is the "
+                          f"limit - what is left is in the report above")
+                else:
+                    _note(f"not finished, so it goes round again from the plan "
+                          f"- pass {pass_number + 1} of at most {ceiling}")
+                    messages.append({"role": "user", "content": CARRY_OVER})
+                    return await run(messages, pass_number + 1)
 
         if stage.key == "plan" and not await _needs_building(answer):
             answer = answer.replace(STOP_MARKER, "").strip()
@@ -254,6 +303,32 @@ async def _needs_building(plan: str) -> bool:
         return True
     word = verdict.strip().upper().split()
     return not (word and word[0].strip(".,!:*`") == "NO")
+
+
+async def _needs_another_pass(report: str) -> bool:
+    """Did the final check just say the work is not done?
+
+    The same shape as `_needs_building`, and the default is the other way
+    round. There, anything unclear counted as work to do: four wasted turns are
+    cheaper than a request that never got built. Here, anything unclear stops.
+    Another pass is six more turns, and a chain that sets itself off again on a
+    maybe is a chain that does not end - so it takes a plain yes, either the
+    marker or a second call that says so in one word.
+    """
+    if MORE_MARKER in report:
+        return True
+    if not report.strip():
+        return False
+    try:
+        verdict = await providers.complete([{"role": "user", "content": (
+            "Below is a report an assistant wrote after checking its own work. "
+            "Does it say that something it set out to do is still not done, or "
+            "still failing? Answer with one word, YES or NO, and nothing "
+            "else.\n\n--- report ---\n" + report.strip()[-2500:])}], max_tokens=6)
+    except Exception:
+        return False
+    word = verdict.strip().upper().split()
+    return bool(word) and word[0].strip(".,!:*`") == "YES"
 
 
 def _with_changes(instruction: str, build_from: str):
@@ -305,9 +380,10 @@ def _report_checks(turns: list) -> None:
         _note(f"{failed} of the {ran} commands the final check ran failed")
 
 
-def _banner(number: int, stage: Stage) -> None:
+def _banner(number: int, stage: Stage, pass_number: int = 1) -> None:
+    again = f"  {S.MUTED}pass {pass_number}{S.R}" if pass_number > 1 else ""
     print(f"\n  {S.PURPLE}◆ deepthink {number}/{len(STAGES)}{S.R}  "
-          f"{S.BOLD}{stage.title}{S.R}")
+          f"{S.BOLD}{stage.title}{S.R}{again}")
     print(f"  {_hr(width=60)}")
 
 

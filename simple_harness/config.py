@@ -284,12 +284,16 @@ SUBAGENT_DEPTH = 0              # how deep we currently are; not a user setting
 
 PLANMODE = False
 
-# Deepthink: one request becomes plan -> check -> build -> review -> verify,
-# driven by the harness rather than left to the model to remember. Off by
-# default - it costs five turns where one would often do. Toggle with
+# Deepthink: one request becomes plan -> check -> build -> review -> revise ->
+# verify, driven by the harness rather than left to the model to remember. Off
+# by default - it costs six turns where one would often do. Toggle with
 # /deepthink. See deepthink.py.
 DEEPTHINK = False
 DEEPTHINK_READONLY = False      # set per stage by deepthink.py; not a user setting
+# A pass whose final check says the work is still not done starts the chain
+# again from the plan. This is the ceiling on that: a model that is never
+# satisfied would otherwise never stop, and three passes is already 18 turns.
+DEEPTHINK_MAX_PASSES = 3
 
 LOADED_SKILLS = []
 

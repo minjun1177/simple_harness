@@ -422,7 +422,7 @@ app.py            the loop, slash commands, session lifecycle
       └ tools.py  dispatch_tool + every tool handler
       └ context.py token budget, trimming, compression
       └ verify.py the project's own check, run after a turn that wrote a file
-  └ deepthink.py  the five-stage chain
+  └ deepthink.py  the six-stage chain
   └ subagent.py   spawn_agent's own conversation loop
   └ channel.py    the board the harnesses in one project share
       └ vm.py     the Python scratch process behind run_python
@@ -443,7 +443,7 @@ app.py            the loop, slash commands, session lifecycle
 | `toolspec.py` | Names, descriptions, parameters, both schema renderings | Handlers, imports of other modules |
 | `tools.py` | Handlers, dispatch, approval prompts, the hashline anchor (5.12) | Tool descriptions - those are in `toolspec` |
 | `systemprompt.py` | Prompt text; `tool_rules(native)` shared with `subagent` | A second copy of anything |
-| `deepthink.py` | Stage list, stage instructions, stage gating | Tool logic |
+| `deepthink.py` | Stage list, stage instructions, stage gating, when the chain repeats | Tool logic |
 | `subagent.py` | The sub-agent's own loop and prompt | A second protocol |
 | `git_ops.py` | Commit, undo, diff. Never raises | Anything not about git |
 | `verify.py` | Which check a project declares, running it, and the wording of a failure | When to run it or how many times - that is `chat_turn` |
@@ -484,7 +484,19 @@ own list went unread. Review is read-only now and its output is a numbered list;
 revise works through that list and is told not to widen it. If the list is
 empty, revise changes nothing and says so.
 
-Four mechanisms make it more than a prompt:
+**The chain can start itself over.** When stage 6 reports the work unfinished -
+`MORE_MARKER` on its last line, or `_needs_another_pass` reading that report back
+in one short call - `run` recurses with `pass_number + 1` and the six stages run
+again from stage 1. Not from the middle: what is left after a failed pass is a
+different piece of work, and stage 1 is what plans it. The recursion is bounded
+twice over - `config.DEEPTHINK_MAX_PASSES` (3) is the hard ceiling, and
+`CARRY_OVER` tells the next pass to end with `STOP_MARKER` if the report named
+nothing left, so a pass with no work in it costs one turn rather than six. The
+two gates lean opposite ways on purpose: `_needs_building` treats anything
+unclear as work to do, `_needs_another_pass` treats anything unclear as finished,
+because a chain that restarts itself on a maybe does not terminate.
+
+Five mechanisms make it more than a prompt:
 
 - **`config.DEEPTHINK_READONLY`** is set for every stage with `edits = False` -
   1, 2 and 4 - and `dispatch_tool` refuses anything in `tools._CHANGES_THINGS`.
@@ -497,6 +509,9 @@ Four mechanisms make it more than a prompt:
   request. Code that runs and is not what was agreed is still not finished.
 - **`_report_checks`** counts the commands stage 6 actually ran and prints the
   truth after the model's summary (invariant 5.10).
+- **`run(messages, pass_number)`** is one function calling itself, so a repeat
+  pass is the same six stages with the same gating rather than a second code
+  path that would drift from the first.
 
 Two early exits: a plan with nothing to build ends the chain after stage 1
 (`_needs_building`, which believes the `NO_PLAN_NEEDED` marker for free and

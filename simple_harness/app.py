@@ -930,15 +930,19 @@ async def main(resume_id: str = "") -> None:
                       f"{len(deepthink.STAGES)} turns:{S.R}")
                 for i, stage in enumerate(deepthink.STAGES, 1):
                     print(f"  {S.MUTED}│{S.R} {S.GRAY}{i}.{S.R} {stage.title}")
-                print(f"  {S.MUTED}╰─ a request that needs no changes stops "
+                print(f"  {S.MUTED}├─ a request that needs no changes stops "
                       f"after the first.{S.R}")
+                print(f"  {S.MUTED}╰─ a final check that says it is not done "
+                      f"starts again at 1, up to "
+                      f"{config.DEEPTHINK_MAX_PASSES} times.{S.R}")
                 print(f"  {S.MUTED}Usage: /deepthink <on/off>{S.R}\n")
                 continue
             config.DEEPTHINK = setting == "on"
             if config.DEEPTHINK:
                 print(f"  {S.INFO}✓ Deepthink is ON.{S.MUTED} Say what you want built "
                       f"and it will plan, argue with the plan, build it, review the "
-                      f"diff, then run it.{S.R}\n")
+                      f"diff, then run it - and plan again if that check says it "
+                      f"is not done.{S.R}\n")
             else:
                 print(f"  {S.INFO}✓ Deepthink is OFF.{S.MUTED} Back to one turn per "
                       f"request.{S.R}\n")
