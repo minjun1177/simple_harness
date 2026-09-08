@@ -19,6 +19,7 @@ from simple_harness import git_ops
 from simple_harness import permissions
 from simple_harness import shell_session
 from simple_harness import toolspec
+from simple_harness import vault
 from simple_harness import verify
 from simple_harness import vm
 from simple_harness.websearch import search_web as search_pipeline, strip_html
@@ -192,6 +193,25 @@ def _existing_newline(filepath: str) -> str:
     return "\r\n" if b"\r\n" in head else "\n"
 
 
+def _would_erase_a_secret(filepath: str, text: str) -> list:
+    """Secrets the file holds now that this write would replace with a name.
+
+    Only the ones actually at risk: a `.env.example` full of placeholders names
+    no secret it is standing on, so it is written without complaint.
+    """
+    named = vault.used_in({"body": text})
+    if not named:
+        return []
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="replace") as handle:
+            existing = handle.read()
+    except OSError:
+        return []                   # a new file replaces nothing
+    secrets = vault.known()
+    return [name for name in named
+            if secrets.get(name) and secrets[name] in existing]
+
+
 def _write_file(filepath: str, text: str, newline: str = "\n") -> str:
     """Replace a file with `text`, all at once or not at all. "" or the problem.
 
@@ -211,6 +231,20 @@ def _write_file(filepath: str, text: str, newline: str = "\n") -> str:
     if not os.path.isdir(directory):
         return (f"[Error] Cannot write file: [Errno 2] No such file or directory: "
                 f"{filepath!r} - {directory} does not exist. create_dir it first.")
+
+    overwritten = _would_erase_a_secret(filepath, text)
+    if overwritten:
+        # A placeholder is never expanded into a file (vault.FILLED_IN), which
+        # is what stops a secret being copied out through one. The other half
+        # of that rule is here: writing the placeholder *over* the real value
+        # would replace the key with the word `{{env:NAME}}` and lose it - and
+        # the model, which cannot see either, would have no idea it had.
+        return (f"[Error] Nothing was written. {filepath} currently holds the real "
+                f"value of {', '.join(overwritten)}, and this would put the "
+                f"placeholder there instead - which would destroy "
+                f"{'it' if len(overwritten) == 1 else 'them'}. A secret is not "
+                f"yours to rewrite: leave the line alone, or tell the user what "
+                f"you would change and let them edit it.")
     if newline != "\n":
         text = text.replace("\n", newline)
     try:
@@ -635,6 +669,15 @@ def _anchor_problem(filepath: str, lines: list, reading: tuple) -> str:
         line = lines[number - 1]
         if text is not None:
             if text.rstrip() == line.rstrip():
+                continue
+            # A line carrying a secret was shown to the model with the value
+            # replaced, so the redacted spelling is the *only* one it can quote
+            # back. Without this the model quotes exactly what it was given,
+            # is told the line "is not what you say it is", is shown the same
+            # redacted line again, and has nowhere to go - the refusal loop
+            # this file exists to avoid. The hash is still the real line's, so
+            # the proof that it read the current file is untouched.
+            if text.rstrip() == vault.redact(line).rstrip():
                 continue
         elif _line_hash(line) == digest:
             continue
@@ -1991,7 +2034,11 @@ def dispatch_tool(function_name: str, arguments: dict) -> str | None:
 
     config.POLICY_AUTO_ALLOW = verdict == "allow"
     try:
-        result = _run_tool(function_name, arguments)
+        # The handler is the only thing that sees a real secret. `arguments` is
+        # what was displayed, is what goes on being displayed, and is what the
+        # conversation keeps - so the expansion lives in a copy and dies with
+        # this call. See vault.py.
+        result = _run_tool(function_name, vault.fill_in(function_name, arguments))
     except KeyboardInterrupt:
         # The person stopping a tool is not a tool that went wrong. It belongs
         # to the turn loop, which knows how to end.
@@ -2020,7 +2067,11 @@ def dispatch_tool(function_name: str, arguments: dict) -> str | None:
     # pay for one run of the suite against the finished state, not three
     # against states it was halfway through. `llm_client` runs what is noted.
     verify.note_written(written)
-    return _name_the_failure(function_name, arguments, result)
+    # Last, so nothing downstream of here can carry a value back: whatever the
+    # tool read, ran or printed, what reaches the model - and through it the
+    # provider, and the session file on disk - names the secret instead of
+    # spelling it.
+    return vault.redact(_name_the_failure(function_name, arguments, result))
 
 
 def _handlers() -> dict:

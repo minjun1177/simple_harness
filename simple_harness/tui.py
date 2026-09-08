@@ -672,11 +672,22 @@ def _approval_prompt(action_label: str, details: list[tuple[str, str]], rule: st
 
     w = max(40, tw() - 8)
     print(f"  {S.WARN}╭{'─' * w}╮{S.R}")
+    from simple_harness import vault
+
+    filled = []
     for label, value in details:
         # The one place every tool's arguments are shown, so it sees whatever a
         # model sent - a dict where a path was wanted, a number, None. The gate
         # in front of `run_cmd` and `delete_file` must not be what raises.
         label, value = str(label), value if isinstance(value, str) else str(value)
+        # By this point a `{{env:NAME}}` has already been expanded for the
+        # handler, so the box would otherwise print the key itself - into a
+        # terminal, a scrollback and quite possibly a screenshot. It goes back
+        # to reading as the placeholder, and a line below says it is filled in.
+        hidden = vault.redact(value)
+        if hidden != value:
+            filled += [n for n in vault.used_in({"v": hidden}) if n not in filled]
+            value = hidden
         label_w = _disp_width(label)
         max_val = w - label_w - 5
         val_display = value if len(value) <= max_val else value[:max_val - 3] + "..."
@@ -695,6 +706,13 @@ def _approval_prompt(action_label: str, details: list[tuple[str, str]], rule: st
                 pad_left = " " * (label_w + 2)
                 print(f"  {S.WARN}│{S.R}  {pad_left}{vl}{pad}{S.WARN}│{S.R}")
     print(f"  {S.WARN}╰{'─' * w}╯{S.R}")
+
+    if filled:
+        # Said outright rather than left to be inferred from the placeholder:
+        # approving this hands a real secret to whatever is about to run.
+        print(f"  {S.MUTED}◆ {', '.join(filled)} "
+              f"{'is' if len(filled) == 1 else 'are'} filled in from .env when "
+              f"this runs - the model has not seen {'it' if len(filled) == 1 else 'them'}{S.R}")
 
     if rule:
         print(f"  {S.MUTED}a = always allow {S.GRAY}{rule}{S.MUTED} (saved to .permissions.json){S.R}")

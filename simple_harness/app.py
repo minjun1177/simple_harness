@@ -18,6 +18,7 @@ from simple_harness import providers
 from simple_harness import connect
 from simple_harness import mentions
 from simple_harness import tools
+from simple_harness import vault
 from simple_harness import verify
 from simple_harness import vm
 from simple_harness.config import S
@@ -623,8 +624,13 @@ async def main(resume_id: str = "") -> None:
             output = _run_user_command(command)
             _fmt_tool_result(command, output)
             print()
+            # On screen it is theirs and unredacted - they ran it. What goes
+            # into the conversation is not: that reaches the provider and the
+            # session file, and `!cat .env` should not be how a key gets there.
+            # `safe_run_cmd` is called directly here, so `dispatch_tool`'s own
+            # redaction is not in the way.
             messages.append({"role": "user",
-                             "content": f"[Shell] $ {command}\n{output}"})
+                             "content": vault.redact(f"[Shell] $ {command}\n{output}")})
             current_session_id = save_session(messages, current_session_id)
             continue
 

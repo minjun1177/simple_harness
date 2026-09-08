@@ -360,6 +360,17 @@ DEEPTHINK_MAX_PASSES = 3
 
 LOADED_SKILLS = []
 
+# --- secrets -----------------------------------------------------------------
+# A `.env` is the one file whose contents are the secret, and a value the model
+# reads does not stay read: it goes to the provider and into the session file
+# on disk. So the harness reads it, hands the model `{{env:NAME}}`, and puts
+# the real value back when the model uses that placeholder in something that
+# runs. See vault.py, which also says plainly what this does not cover.
+SECRET_REDACT = True
+SECRET_MIN_LENGTH = 8       # below this a "secret" is a word like `dev`, and
+                            # hiding it would rewrite every tool result
+SECRET_FILES = []           # extra filenames to treat the same way
+
 # --- tool permissions --------------------------------------------------------
 # Rules live in .permissions.json / ~/.localchat/permissions.json. Empty rules
 # behave exactly as before: the approval prompt decides.

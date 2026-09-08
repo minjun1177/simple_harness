@@ -5,6 +5,7 @@ from simple_harness import toolspec
 
 from simple_harness.skills import skills_catalog_prompt
 from simple_harness.mcp_client import mcp_tools_prompt
+from simple_harness import vault
 
 CURRENT_OS = platform.system()
 
@@ -225,7 +226,8 @@ Your goal is to be maximally helpful by leveraging your tools when needed.
 Finally, You must reply in the language of the given text/sentence/question.
 """
     return (base_prompt + mcp_tools_prompt(tools_json=not native)
-            + skills_catalog_prompt() + load_context_file())
+            + skills_catalog_prompt() + vault.prompt_section()
+            + load_context_file())
 
 
 if __name__ == "__main__":

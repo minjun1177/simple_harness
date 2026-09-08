@@ -97,6 +97,14 @@ def _read(path: str) -> tuple[bool, str]:
     if body.startswith(config.TOOL_ERROR_PREFIX):
         return False, body[len(config.TOOL_ERROR_PREFIX):].strip()
 
+    # `@.env` reaches `read_file` directly rather than through `dispatch_tool`,
+    # so the redaction that happens there would be missed - and an attachment
+    # goes to the provider and into the session file exactly like a tool result
+    # does. Typing `@.env` is the person's own choice; sending them their keys
+    # back is not what they were choosing.
+    from simple_harness import vault
+    body = vault.redact(body)
+
     cap = config.MENTION_MAX_CHARS
     if cap and len(body) > cap:
         # A mention is one keystroke and can name a file of any size. The

@@ -1393,6 +1393,48 @@ exact call from now on and appends the rule to `.permissions.json`. `/perms`
 lists the active rules, `/perms allow <rule>` and `/perms deny <rule>` add one
 by hand, and `/perms reload` re-reads the files.
 
+### 13a. Secrets in `.env`
+
+A `.env` is the one file in a project whose *contents* are the secret, and a
+value the model reads does not stay read: it goes to the provider, so a hosted
+model means the key is now their problem too, and it is written into
+`~/.localchat/sessions/*.json` and stays there. One `read_file` puts a key in
+two places nobody would think to check.
+
+So the harness reads the file and the model does not. What it is handed is
+
+```
+STRIPE_KEY={{env:STRIPE_KEY}}
+DATABASE_URL="{{env:DATABASE_URL}}"
+APP_ENV=development
+```
+
+and when it writes that placeholder back - in a `run_cmd`, a `get_url`, a
+`call_api` header, a `run_python` snippet - the harness puts the real value in
+on the way to the tool. `curl -H "Authorization: Bearer {{env:STRIPE_KEY}}"`
+works, and the model has still never seen the key. The approval prompt shows
+the placeholder too, with a line saying which secret is filled in, so approving
+is not a way to find out either.
+
+`APP_ENV` and a port number are left alone: below `SECRET_MIN_LENGTH`, or a
+plain word, or a number, a "secret" is something like `dev`, and hiding it
+would rewrite every tool result that mentions the word.
+
+**A file is never how it gets out, or how it is lost.** A placeholder is
+expanded into what *runs* and never into what is *saved*, so writing
+`{{env:KEY}}` to a file and reading it back gives the model the placeholder
+again - and writing that placeholder over the file that holds the real value is
+refused outright, because it would replace the key with its own name and
+neither the model nor the person would see it happen. Writing
+`.env.example` full of placeholders is fine, and is the case that rule exists
+to keep working.
+
+**What this does not cover.** A secret that is not in one of these files -
+typed into the chat, printed by a command that generates it, pasted by you - is
+not known and is not redacted. This closes the biggest and most routine hole;
+it is not a sandbox and should not be described to anyone as one. `/set
+SECRET_REDACT off` turns it off.
+
 ---
 
 ## 14. Reasoning Models
@@ -1458,6 +1500,9 @@ The settings worth knowing:
 | `MAX_TOOL_CALLS` | 10 | Tool calls per turn before asking whether to continue |
 | `AUTO_ALLOW` | `False` | `True` is `/automode on` from startup - no approval prompts |
 | `PERMISSIONS_ENABLED` | `True` | Whether `.permissions.json` rules are consulted at all |
+| `SECRET_REDACT` | `True` | Whether `.env` values are hidden from the model and pasted back in by the harness (§13a) |
+| `SECRET_MIN_LENGTH` | 8 | Below this a value is a word like `dev`, not a secret, and hiding it would rewrite every result that mentions it |
+| `SECRET_FILES` | `[]` | Extra filenames to treat the way `.env` is treated |
 | `GIT_AUTO_COMMIT` | `True` | A commit per AI edit, so `/undo` has something to take back |
 | `AUTO_VERIFY` | `True` | Run the project's own check after a turn changes a file |
 | `VERIFY_TIMEOUT` | 90 | Seconds one check gets before it is killed and turned off |
@@ -1613,6 +1658,7 @@ The codebase is organized cleanly around the following components:
 - **`git_ops.py`**: A commit per AI edit, and the undo that makes it worth having.
 - **`atomic.py`**: Writing a file so a crash cannot leave half of it behind. Used for sessions, memory, permission rules and the saved API keys.
 - **`terms.py`**: What the harness does to the machine it runs on, shown once before it does it.
+- **`vault.py`**: The `.env` values the model is never told, and the placeholder the harness expands on its way to a tool.
 - **`tests/test_platform.py`**: Checks the waiting-for-input detection on the machine it is run on. Worth running on any new machine, and especially on Windows - see below.
 - **`tests/test_registry.py`**: Fails if the tool table, the system prompt and the handlers stop describing the same tools.
 - **`tests/test_durability.py`**: Atomic writes (including killing a writer mid-write) and the token estimate.
@@ -1631,6 +1677,7 @@ The codebase is organized cleanly around the following components:
 - **`tests/test_hashline_edit.py`**: That `38:ff7|print()` reaches the line it names, that a stale or mistyped anchor is refused rather than applied a few lines off, and that everything which is not an anchor still behaves as it did.
 - **`tests/test_channel.py`**: That a file one harness is changing cannot be written from another, that the refusal names who to ask, that a claim dies with the terminal that took it, and that several processes writing to the board at once lose nothing.
 - **`tests/test_mentions.py`**: What `@` attaches and what it must leave alone - an email address is not a file - that the completion menu reads the real directory, and that the command menu previews what each command does and what may follow it.
+- **`tests/test_vault.py`**: That a `.env` value never reaches the model - not through `read_file`, not through a command that prints it, not through an `@` attachment - that the placeholder reaches the shell as the real key, and that a file is neither how a secret gets out nor how it gets lost.
 - **`tests/test_malformed_state.py`**: What happens when the state is not the shape the code assumed - a message whose content is `null`, a `memory.json` somebody edited by hand, a setting typed as nought - and that `write_file` and `edit_file` replace a file in one step rather than truncating it first, without rewriting its line endings on the way past.
 - **`requirements-lock.txt`**: The exact dependency set the harness was tested against. `requirements.txt` gives the tested floors and a ceiling before the next breaking release.
 - **`mcp_client.py`**: MCP transports (stdio / streamable HTTP / SSE), the JSON-RPC session, tool and resource calls, and the prompt section they are advertised in.

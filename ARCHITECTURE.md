@@ -808,6 +808,7 @@ for t in tests/*.py; do python "$t" || echo "FAILED: $t"; done
 | `test_mcp_lazy.py` | That a big MCP server is announced rather than described, that asking for it hands over the parameters, that a call to an unloaded one still works, and that names and schemas cannot come apart (5.13) |
 | `test_tdd.py` | That `/tdd` reaches a test file however its path is written, refuses in `dispatch_tool`, holds nothing on disk, and lifts itself (§7a) |
 | `test_malformed_state.py` | State that is not the shape the code assumed: a message with no content, a hand-edited `memory.json`, a setting of nought - and that writing a file through a tool is atomic and leaves its line endings alone (5.7) |
+| `test_vault.py` | That a `.env` value never reaches the model by any route, that a placeholder reaches the shell as the real key, and that a file is neither how it gets out nor how it is lost (§8b) |
 | `test_docs.py` | That this file and `README.md` still describe the program that exists |
 | `test_compat.py` | That the commands, settings, tool names and files people build habits on are still there under the same names (5.14) |
 
