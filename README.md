@@ -3,6 +3,12 @@
 [![CI](https://github.com/minjun1177/simple_harness/actions/workflows/ci.yml/badge.svg)](https://github.com/minjun1177/simple_harness/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
+[![PyPI](https://img.shields.io/pypi/v/simple-harness.svg)](https://pypi.org/project/simple-harness/)
+
+```bash
+pip install simple-harness
+simple-harness
+```
 
 ## 1. What It Does
 
@@ -34,6 +40,7 @@ exists to make small models genuinely usable rather than nearly usable.
 - **Session & History Management**: Save, list, load, record, and export conversation transcripts in JSON or Markdown format.
 - **Named Sessions**: Sessions are filed under a readable title instead of a timestamp. The model names each new session after its first exchange (`/autotitle off` to stop it), `/title <name>` renames it by hand, and `/load` accepts either the title or the id.
 - **Resuming from the command line**: `simple-harness --resume <id or title>` reopens a saved conversation, and `-c` reopens the newest one you were last working on *in this directory* - a session records where it was worked, so `-c` in a project picks up that project's thread rather than whatever you did most recently anywhere.
+- **Commands that preview themselves**: Typing `/` opens the command list with what each one does beside it, and typing a space asks the other question - `/mcp ` offers `tools`, `reload`, `connect`, `on`, `off`; `/set ` offers every setting with its current value; `/connect ` offers each provider and whether its key works. What you cannot remember is what comes next, so that is what the menu shows.
 - **`@` file attachments**: Typing `@` opens a list of what is in the directory you are standing in - arrow keys to move, Tab to insert, `/` to descend into a folder. `@src/main.py` sends that file with your message instead of spending a round trip on the model asking for it. Directories arrive as their listing, a path that does not exist is reported without stopping the turn, and one mention cannot swallow the context window (`MENTION_MAX_CHARS`).
 - **`!` shell escape**: A line starting with `!` runs as a shell command - yours, not the model's, so no approval prompt - and its output joins the conversation, so the next question can be about what it printed.
 - **Enhanced Terminal Shell**: Input autocompletion for slash commands and persistent input history across restarts powered by `prompt_toolkit`.
@@ -95,6 +102,15 @@ is.
 
 1. **Install it**:
    ```bash
+   pip install simple-harness
+   ```
+   That puts the `simple-harness` command on your PATH; run it in any
+   directory you want to work in. `python -m simple_harness` does the same
+   thing if you would rather not rely on the PATH.
+
+   To work on the harness itself, install the checkout instead, so an edit
+   takes effect without reinstalling:
+   ```bash
    git clone https://github.com/minjun1177/simple_harness
    cd simple_harness
    pip install -e .
@@ -104,8 +120,9 @@ is.
    pip install -r requirements.txt
    ```
    `get_code_skeleton` and `query_ast_node` need Tree-sitter, which is ten
-   grammar wheels for two tools and so is opt-in: `pip install -e ".[ast]"`.
-   Everything else runs without it.
+   grammar wheels for two tools and so is opt-in: `pip install "simple-harness[ast]"`
+   (or `pip install -e ".[ast]"` from a checkout). Everything else runs
+   without it.
 
 2. **Pull an Ollama Model**:
    ```bash
@@ -1434,6 +1451,7 @@ The settings worth knowing:
 | Setting | Default | What it does |
 | :--- | :--- | :--- |
 | `MODEL` | `gemma4:e4b` | The Ollama model used until `/connect` says otherwise |
+| `OLLAMA_HOST` | `http://localhost:11434` | Where the Ollama daemon is. `/set OLLAMA_HOST http://box:11434` points the harness at another machine - the chat, the model list, the tool-support probe and the summariser all follow it. While this is at its default a `$OLLAMA_HOST` in the environment is honoured instead; changing it here wins over both |
 | `NUM_CTX` | 65536 | Context window asked of Ollama |
 | `NUM_PREDICT` | 6144 | Output cap. Must be an int - every hosted API rejects a float |
 | `NATIVE_TOOLS` | `True` | `False` forces the `<tool_call>` text protocol everywhere |
@@ -1521,13 +1539,13 @@ The interactive terminal supports special slash commands to control options and 
 | `/load <id or title>` | Load and render a past conversation session, found by id or title |
 | `/title` | Show the current session's title and id |
 | `/title <name>` | Retitle the current session and rename its file to match |
-| `/autotitle <on/off>` | Toggle letting the model name a new session after its first exchange |
-| `/automode <on/off>` | Enable or disable approval prompts for tool execution |
-| `/fullcontent <on/off>` | Toggle truncating large file displays |
-| `/record <on/off>` | Toggle automatically recording chat history into session files |
+| `/autotitle [on/off]` | Whether the model names a new session after its first exchange. On its own it says which |
+| `/automode [on/off]` | Whether tools run without asking. Off means every guarded tool waits for you. On its own it says which |
+| `/fullcontent [on/off]` | Whether a file or page reaches the model whole, or cut short. On its own it says which |
+| `/record [on/off]` | Whether conversations are saved to disk at all. On its own it says which |
 | `/export [filename]` | Export current chat history into a Markdown file |
 | `/system <prompt>` | Set a custom system persona or reset to default (`/system reset`) |
-| `/planmode <on/off>` | Require a plan approval before file edits or complex work |
+| `/planmode [on/off]` | Whether the model must submit a plan before it changes anything. On its own it says which |
 | `/skills` | List discovered skills with their descriptions and paths |
 | `/skills reload` | Rescan the skill directories and refresh the system prompt |
 | `/skill <name>` | Load a skill into the current conversation by hand |
@@ -1552,13 +1570,12 @@ Two prefixes act on the message itself rather than being commands:
 | `/perms reload` | Re-read the permission rule files |
 | `/perms allow <rule>` | Add an allow rule, e.g. `/perms allow run_cmd(git *)` |
 | `/perms deny <rule>` | Add a deny rule |
-| `/think <on/off>` | Show or hide a reasoning model's thinking |
-| `/deepthink` | The plan-check-build-review-verify chain, and whether it is on |
-| `/deepthink <on/off>` | Turn that chain on or off |
+| `/think [on/off]` | Whether a reasoning model's thinking is shown. It is never kept in the history either way. On its own it says which |
+| `/deepthink [on/off]` | Whether one request becomes plan, check, build, review, revise and verify. On its own it says which, and lists the stages |
 | `/agents` | Show the other harnesses running in this project, what they hold, and what has been said |
 | `/agents say <text>` | Say something to all of them yourself |
 | `/agents release <path>` | Take a file back from the agent holding it |
-| `/agents <on/off>` | Whether this session appears on the board at all |
+| `/agents [on/off]` | Whether this session appears on the board at all |
 | `/vm` | Show the `run_python` scratch process: whether it is up, what it has run, and the directory it runs in |
 | `/vm reset` | Throw away every variable the model left in it |
 | `/vm stop` | End the process; the next `run_python` starts a fresh one |
@@ -1566,10 +1583,8 @@ Two prefixes act on the message itself rather than being commands:
 | `/set <NAME> <value>` | Change one, e.g. `/set NUM_CTX 32768`. Saved for next time |
 | `/set <NAME> default` | Put it back to what `config.py` says |
 | `/undo` | Take back the last file change the AI committed |
-| `/autocommit` | Whether AI edits are committed, and the recent AI commits |
-| `/autocommit <on/off>` | Turn that on or off |
-| `/autoverify` | Whether an edit is checked against the project's own tests, and any check turned off here |
-| `/autoverify <on/off>` | Turn that on or off |
+| `/autocommit [on/off]` | Whether each file an AI tool changes gets a commit of its own. On its own it says which, and lists the recent ones |
+| `/autoverify [on/off]` | Whether this project's own tests run after an edit, with a failure handed straight back to the model. On its own it says which, and names any check turned off here |
 | `/tdd <request>` | Run one request with this project's test files locked |
 | `/tdd` | Arm that for your next message |
 | `/tdd off` | Lift it without sending anything |
@@ -1615,7 +1630,8 @@ The codebase is organized cleanly around the following components:
 - **`tests/test_tool_reporting.py`**: That a tool result is judged by the marker it *starts* with, not one it happens to contain, and that no library writes an unasked-for paragraph to stderr while a tool is running.
 - **`tests/test_hashline_edit.py`**: That `38:ff7|print()` reaches the line it names, that a stale or mistyped anchor is refused rather than applied a few lines off, and that everything which is not an anchor still behaves as it did.
 - **`tests/test_channel.py`**: That a file one harness is changing cannot be written from another, that the refusal names who to ask, that a claim dies with the terminal that took it, and that several processes writing to the board at once lose nothing.
-- **`tests/test_mentions.py`**: What `@` attaches and what it must leave alone - an email address is not a file - and that the completion menu reads the real directory.
+- **`tests/test_mentions.py`**: What `@` attaches and what it must leave alone - an email address is not a file - that the completion menu reads the real directory, and that the command menu previews what each command does and what may follow it.
+- **`tests/test_malformed_state.py`**: What happens when the state is not the shape the code assumed - a message whose content is `null`, a `memory.json` somebody edited by hand, a setting typed as nought - and that `write_file` and `edit_file` replace a file in one step rather than truncating it first, without rewriting its line endings on the way past.
 - **`requirements-lock.txt`**: The exact dependency set the harness was tested against. `requirements.txt` gives the tested floors and a ceiling before the next breaking release.
 - **`mcp_client.py`**: MCP transports (stdio / streamable HTTP / SSE), the JSON-RPC session, tool and resource calls, and the prompt section they are advertised in.
 - **`websearch.py`**: Multi-source retrieval, page extraction, and BM25 reranking.

@@ -8,6 +8,7 @@ import hashlib
 import inspect
 import requests
 import psutil
+from simple_harness import atomic
 from simple_harness import config
 from simple_harness.config import S, TREE_SITTER_AVAILABLE, _TS_LANGUAGES, _EXT_TO_LANG
 from simple_harness.tui import _fmt_tool_call, _approval_prompt
@@ -172,6 +173,52 @@ def handle_end_process(session_id: str) -> str:
 HASHLINE_DIGITS = 3
 
 _HASHLINE_PATTERN = re.compile(r'^\d+:[0-9a-f]{2,3}\|')
+
+def _existing_newline(filepath: str) -> str:
+    """The line ending the file already uses, or "\\n" for one that is not there.
+
+    Every read here goes through Python's universal newlines, so a CRLF file
+    arrives as `\\n` and the information is gone by the time it is written back.
+    `open(path, "w")` then translates to `os.linesep`, which on Windows turns a
+    file with Unix endings into a file with Windows endings from top to bottom -
+    a one-line edit that shows up in `git diff` as every line changed. Asking
+    the file first is what keeps an edit to the size of the edit.
+    """
+    try:
+        with open(filepath, "rb") as f:
+            head = f.read(65536)
+    except OSError:
+        return "\n"
+    return "\r\n" if b"\r\n" in head else "\n"
+
+
+def _write_file(filepath: str, text: str, newline: str = "\n") -> str:
+    """Replace a file with `text`, all at once or not at all. "" or the problem.
+
+    Through `atomic`, for the reason that module exists: `open(path, "w")`
+    truncates first and writes second, so a crash, a full disk or a Ctrl-C in
+    between leaves the user with half of their file - and every tool here is
+    writing a file somebody has, not one it is creating from nothing.
+
+    A missing parent directory stays an error rather than being created on the
+    way past. `atomic.write_text` makes one because its own callers - settings,
+    sessions, the agent board - own their directories; here the path came from
+    a model, and quietly building `src/utils/helpers/` because it guessed at a
+    layout is how a tree grows directories nobody asked for. `create_dir` is
+    the tool for that, and it asks first.
+    """
+    directory = os.path.dirname(os.path.abspath(filepath))
+    if not os.path.isdir(directory):
+        return (f"[Error] Cannot write file: [Errno 2] No such file or directory: "
+                f"{filepath!r} - {directory} does not exist. create_dir it first.")
+    if newline != "\n":
+        text = text.replace("\n", newline)
+    try:
+        atomic.write_text(filepath, text)
+    except Exception as e:
+        return f"[Error] Cannot write file: {e}"
+    return ""
+
 
 def _line_hash(line: str) -> str:
     return hashlib.md5(line.encode("utf-8")).hexdigest()[:HASHLINE_DIGITS]
@@ -699,11 +746,9 @@ def _edit_by_patch(filepath: str, file_content: str, patch: list,
 
     for number, _, text in patch:
         lines[number - 1] = text
-    try:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-    except Exception as e:
-        return f"[Error] Cannot write file: {e}"
+    problem = _write_file(filepath, "\n".join(lines), _existing_newline(filepath))
+    if problem:
+        return problem
 
     which = ", ".join(str(number) for number, _, _ in patch)
     return (f"[Success] File edited: {filepath} (line{'s' if len(patch) > 1 else ''} "
@@ -784,11 +829,9 @@ def _edit_by_anchor(filepath: str, file_content: str, start: int, end: int,
         return "[System] User denied file edit."
 
     lines[start - 1:end] = replacement
-    try:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-    except Exception as e:
-        return f"[Error] Cannot write file: {e}"
+    problem = _write_file(filepath, "\n".join(lines), _existing_newline(filepath))
+    if problem:
+        return problem
 
     shifted = len(replacement) != count
     note = (" Every line below it has moved." if shifted else "")
@@ -801,7 +844,44 @@ def _edit_by_anchor(filepath: str, file_content: str, start: int, end: int,
             + _echo_region("\n".join(lines), touched, moved=shifted))
 
 
+# A path and a body are the two arguments every file tool takes, and a small
+# model sends the wrong *type* for them often enough to be worth naming: a path
+# as `{"path": "x"}` because it read the schema as nesting, a body as a list of
+# lines because it was thinking in lines. Both used to raise out of the handler
+# on the first `.split` or `.strip`.
+#
+# A body is joined, because a list of lines is unambiguous and refusing it would
+# throw away a write the model got right in every other respect. A path is not:
+# there is no one thing `{"path": "x"}` can safely mean, so it is refused with
+# the shape that was wanted.
+
+def _as_path(value, name: str = "filepath") -> tuple:
+    """(path, complaint). The path as a string, or why it cannot be one."""
+    if isinstance(value, str):
+        return value.strip(), ""
+    if value is None or value == "" or value == {} or value == []:
+        return "", (f"[Error] No '{name}' was given. Send it inside \"arguments\" "
+                    "in the tool call JSON, as a plain string.")
+    return "", (f"[Error] '{name}' must be a plain string path, not "
+                f"{type(value).__name__}. You sent {json.dumps(value, ensure_ascii=False, default=str)[:120]}. "
+                f'Send it as "{name}": "path/to/file".')
+
+
+def _as_text(value) -> str:
+    """A body as text, allowing for the model that sent it a line at a time."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return "\n".join(_as_text(item) for item in value)
+    if value is None:
+        return ""
+    return str(value)
+
+
 def handle_read_file(filepath: str) -> str:
+    filepath, complaint = _as_path(filepath)
+    if complaint:
+        return complaint
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             content = f.read()
@@ -812,11 +892,11 @@ def handle_read_file(filepath: str) -> str:
         return f"[Error] Cannot read file: {e}"
 
 def handle_write_file(filepath: str, content: str) -> str:
-    if not filepath:
-        return ("[Error] No 'filepath' was given. Send it inside \"arguments\" in the "
-                "tool call JSON.")
+    filepath, complaint = _as_path(filepath)
+    if complaint:
+        return complaint
 
-    content = _strip_hashlines(content)
+    content = _strip_hashlines(_as_text(content))
 
     # A write with no body is a malformed call, not a request for an empty file -
     # the body went missing between the model and here. Saying so lets the model
@@ -832,12 +912,10 @@ def handle_write_file(filepath: str, content: str) -> str:
     approved = _approval_prompt("Write File", [("path", filepath), ("preview", preview)],
                                 rule=f"write_file({filepath})")
     if not approved: return "[System] User denied file write."
-    try:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(content)
-        return f"[Success] File written: {filepath}"
-    except Exception as e:
-        return f"[Error] Cannot write file: {e}"
+    problem = _write_file(filepath, content, _existing_newline(filepath))
+    if problem:
+        return problem
+    return f"[Success] File written: {filepath}"
 
 def handle_edit_file(filepath: str, old_content: str, new_content: str) -> str:
     """Replace part of a file. Three ways of saying which part, in this order.
@@ -852,6 +930,11 @@ def handle_edit_file(filepath: str, old_content: str, new_content: str) -> str:
     3. Anything else in `old_content` is matched as literal text, exactly as it
        always was.
     """
+    filepath, complaint = _as_path(filepath)
+    if complaint:
+        return complaint
+    old_content, new_content = _as_text(old_content), _as_text(new_content)
+
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             file_content = f.read()
@@ -894,21 +977,23 @@ def handle_edit_file(filepath: str, old_content: str, new_content: str) -> str:
     if not approved: return "[System] User denied file edit."
 
     new_file_content = file_content.replace(old_content, new_content, 1)
-    try:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(new_file_content)
-        # A text match names no lines, so where it landed is worked out from
-        # how much of the file came before it.
-        at = file_content.index(old_content)
-        first = file_content.count("\n", 0, at) + 1
-        touched = list(range(first, first + max(1, new_content.count("\n") + 1)))
-        shifted = new_content.count("\n") != old_content.count("\n")
-        return (f"[Success] File edited: {filepath}"
-                + _echo_region(new_file_content, touched, moved=shifted))
-    except Exception as e:
-        return f"[Error] Cannot write file: {e}"
+    problem = _write_file(filepath, new_file_content, _existing_newline(filepath))
+    if problem:
+        return problem
+
+    # A text match names no lines, so where it landed is worked out from
+    # how much of the file came before it.
+    at = file_content.index(old_content)
+    first = file_content.count("\n", 0, at) + 1
+    touched = list(range(first, first + max(1, new_content.count("\n") + 1)))
+    shifted = new_content.count("\n") != old_content.count("\n")
+    return (f"[Success] File edited: {filepath}"
+            + _echo_region(new_file_content, touched, moved=shifted))
 
 def handle_delete_file(filepath: str) -> str:
+    filepath, complaint = _as_path(filepath)
+    if complaint:
+        return complaint
     approved = _approval_prompt("Delete File", [("path", filepath)], rule=f"delete_file({filepath})")
     if not approved: return "[System] User denied file deletion."
     try:
@@ -918,6 +1003,12 @@ def handle_delete_file(filepath: str) -> str:
         return f"[Error] Cannot delete file: {e}"
 
 def handle_copy_file(src: str, dst: str) -> str:
+    src, complaint = _as_path(src, "src")
+    if complaint:
+        return complaint
+    dst, complaint = _as_path(dst, "dst")
+    if complaint:
+        return complaint
     approved = _approval_prompt("Copy File", [("from", src), ("to", dst)], rule=f"copy_file({src})")
     if not approved: return "[System] User denied file copy."
     try:
@@ -927,6 +1018,9 @@ def handle_copy_file(src: str, dst: str) -> str:
         return f"[Error] Cannot copy file: {e}"
 
 def handle_create_dir(dirpath: str) -> str:
+    dirpath, complaint = _as_path(dirpath, "dirpath")
+    if complaint:
+        return complaint
     approved = _approval_prompt("Create Directory", [("path", dirpath)], rule=f"create_dir({dirpath})")
     if not approved: return "[System] User denied directory creation."
     try:
@@ -935,15 +1029,51 @@ def handle_create_dir(dirpath: str) -> str:
     except Exception as e:
         return f"[Error] Cannot create directory: {e}"
 
-def handle_get_url(url: str) -> str:
+# Ceiling on a network body read into memory. `response.text` reads whatever
+# the server chose to send, and a model hands `get_url` whatever URL it found -
+# so a link that turns out to point at a disk image was the harness being
+# killed by the OOM reaper rather than an error anybody could read. Far above
+# any page worth reading, and far below what hurts.
+NETWORK_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _bounded_text(response) -> tuple:
+    """A streamed response body as text, stopping at the ceiling. (text, cut)."""
+    chunks, total = [], 0
+    for chunk in response.iter_content(chunk_size=65536):
+        if not chunk:
+            continue
+        chunks.append(chunk)
+        total += len(chunk)
+        if total >= NETWORK_MAX_BYTES:
+            break
+    raw = b"".join(chunks)[:NETWORK_MAX_BYTES]
+    # `response.encoding`, never `apparent_encoding`: the latter reads
+    # `response.content`, which on a streamed response means downloading the
+    # whole thing again - the exact thing this exists to avoid.
     try:
-        response = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-        response.raise_for_status()
-        content_type = response.headers.get("Content-Type", "")
-        if "text/html" in content_type:
-            content = strip_html(response.text)
-        else:
-            content = response.text
+        return raw.decode(response.encoding or "utf-8", "replace"), total >= NETWORK_MAX_BYTES
+    except LookupError:
+        return raw.decode("utf-8", "replace"), total >= NETWORK_MAX_BYTES
+
+
+def handle_get_url(url: str) -> str:
+    url, complaint = _as_path(url, "url")
+    if complaint:
+        return complaint
+    try:
+        response = requests.get(url, timeout=15, stream=True,
+                                headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            response.raise_for_status()
+            content_type = response.headers.get("Content-Type", "")
+            body, cut = _bounded_text(response)
+        finally:
+            response.close()
+        content = strip_html(body) if "text/html" in content_type else body
+        if cut:
+            content += (f"\n...[the page is larger than {NETWORK_MAX_BYTES // (1024 * 1024)}MB; "
+                        "only the beginning was read]")
         if not config.RETURN_ALL_FILE_CONTENT and len(content) > config.FILE_MAX_DISPLAY_LENGTH:
             content = content[:config.FILE_MAX_DISPLAY_LENGTH] + "\n...[Too long]..."
         return content
@@ -1057,6 +1187,9 @@ def _format_answers(answers: list[tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 def handle_list_dir(dirpath: str) -> str:
+    dirpath, complaint = _as_path(dirpath, "dirpath")
+    if complaint:
+        return complaint
     if not os.path.exists(dirpath):
         return f"[Error] Directory not found: {dirpath}"
     try:
@@ -1106,8 +1239,11 @@ def handle_get_system_info() -> str:
                 pass
         
         top_processes = sorted(processes, key=lambda x: x['memory_percent'] or 0, reverse=True)[:5]
+        # `or 0`, the same way the sort key does it: psutil reports None for a
+        # process whose memory it could not read, and formatting that as a
+        # float turned the whole of get_system_info into one [Error] line.
         proc_lines = [
-            f"  - PID {p['pid']}: {p['name']} (RAM: {p['memory_percent']:.1f}%)"
+            f"  - PID {p['pid']}: {p['name']} (RAM: {p['memory_percent'] or 0:.1f}%)"
             for p in top_processes
         ]
 
@@ -1209,18 +1345,30 @@ def handle_call_api(url: str, method: str, headers: str = "", payload: str = "")
             elif isinstance(payload, dict):
                 req_body = payload
 
+        # Streamed and capped for the same reason `get_url` is: an endpoint
+        # that answers with a hundred megabytes should be an error the model
+        # reads, not the harness going away.
+        common = {"headers": req_headers, "timeout": 30, "stream": True}
+        body_args = {"json": req_body if isinstance(req_body, dict) else None,
+                     "data": req_body if isinstance(req_body, str) else None}
         if method == "GET":
-            resp = requests.get(url, headers=req_headers, timeout=30)
+            resp = requests.get(url, **common)
         elif method == "POST":
-            resp = requests.post(url, headers=req_headers, json=req_body if isinstance(req_body, dict) else None, data=req_body if isinstance(req_body, str) else None, timeout=30)
+            resp = requests.post(url, **common, **body_args)
         elif method == "PUT":
-            resp = requests.put(url, headers=req_headers, json=req_body if isinstance(req_body, dict) else None, data=req_body if isinstance(req_body, str) else None, timeout=30)
+            resp = requests.put(url, **common, **body_args)
         elif method == "PATCH":
-            resp = requests.patch(url, headers=req_headers, json=req_body if isinstance(req_body, dict) else None, data=req_body if isinstance(req_body, str) else None, timeout=30)
-        elif method == "DELETE":
-            resp = requests.delete(url, headers=req_headers, timeout=30)
+            resp = requests.patch(url, **common, **body_args)
+        else:                                   # DELETE - the list is checked above
+            resp = requests.delete(url, **common)
 
-        content = resp.text
+        try:
+            content, cut = _bounded_text(resp)
+        finally:
+            resp.close()
+        if cut:
+            content += (f"\n...[the response is larger than "
+                        f"{NETWORK_MAX_BYTES // (1024 * 1024)}MB; only the beginning was read]")
         if not config.RETURN_ALL_FILE_CONTENT and len(content) > config.FILE_MAX_DISPLAY_LENGTH:
             content = content[:config.FILE_MAX_DISPLAY_LENGTH] + "\n...[Too long]..."
 
@@ -1844,6 +1992,24 @@ def dispatch_tool(function_name: str, arguments: dict) -> str | None:
     config.POLICY_AUTO_ALLOW = verdict == "allow"
     try:
         result = _run_tool(function_name, arguments)
+    except KeyboardInterrupt:
+        # The person stopping a tool is not a tool that went wrong. It belongs
+        # to the turn loop, which knows how to end.
+        raise
+    except Exception as error:
+        # A handler that raises used to escape all the way to `app.cli`, where
+        # the whole turn ended on one line of red with no tool result at all -
+        # so the model was never told, and the conversation lost the thread of
+        # what it had been doing. The same reasoning as the unknown-tool case
+        # below: hand the model the failure and let it correct itself.
+        #
+        # A malformed argument is what actually reaches this. Small models send
+        # `{"filepath": {"path": "x"}}` and `{"content": ["a", "b"]}` often
+        # enough that the handlers coerce what they can, and this is the floor
+        # under everything they cannot.
+        result = (f"[Error] '{function_name}' raised {type(error).__name__}: {error}. "
+                  "Nothing was completed. Check the arguments against the tool's "
+                  "parameters and call it again.")
     finally:
         config.POLICY_AUTO_ALLOW = False
     written = _paths_written(function_name, arguments, result)

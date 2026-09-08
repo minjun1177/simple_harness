@@ -106,7 +106,7 @@ async def _work(task: str, context: str, depth: int) -> str:
                             native_tools, native_enabled, _from_native,
                             _render_call, NATIVE_ERROR)
     from simple_harness.tools import dispatch_tool
-    from simple_harness.tui import _fmt_tool_call, _fmt_tool_result
+    from simple_harness.tui import _fmt_tool_result
 
     messages = [{"role": "system", "content": prompt(depth, native_enabled())},
                 {"role": "user", "content": brief(task, context)}]
@@ -158,7 +158,11 @@ async def _work(task: str, context: str, depth: int) -> str:
                 if result is None:
                     result = (f"[Error] There is no tool named '{name}'. Use only "
                               "the tools listed in your system prompt.")
-                _fmt_tool_result(name, result)
+            # Outside the branch: a call that was refused or could not be read
+            # is exactly the one the person watching needs to see, and showing
+            # only the results that ran left a sub-agent looking idle while it
+            # spent its budget knocking on a door it does not have.
+            _fmt_tool_result(name, result)
             messages.append({"role": "user",
                              "content": f"[Tool Result for '{name}']:\n{result}"})
 

@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import threading
 import time
 
@@ -212,6 +213,106 @@ def _cache_tail(conversation: list) -> list:
     return marked
 
 
+# ---------------------------------------------------------------------------
+# what a provider said when it refused
+# ---------------------------------------------------------------------------
+#
+# An API key is the thing that goes wrong most often here, and it is also the
+# thing this used to be worst at reporting. `raise_for_status` gives the status
+# line and discards the body, so "Incorrect API key provided: sk-proj-…" - which
+# names the key and links the page to fix it - became "401 Client Error:
+# Unauthorized". The streaming path did keep the body and then cut it at 400
+# characters, which is enough for a short message and not for a long one, and
+# `/connect` cut whatever survived that to 160.
+#
+# All three hosted APIs answer an error the same way, so one reader serves all
+# of them:
+#
+#   Anthropic  {"type": "error", "error": {"type": …, "message": …}}
+#   OpenAI     {"error": {"message": …, "type": …, "code": …}}
+#   Gemini     {"error": {"code": …, "message": …, "status": …}}
+
+ERROR_DETAIL_CHARS = 2000       # a message the provider wrote: show it whole
+RAW_DETAIL_CHARS = 400          # an HTML page nobody wrote for a person: show a little
+
+_TAGS = re.compile(r"<[^>]+>")
+_TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.DOTALL)
+
+
+def _error_detail(response, limit: int = ERROR_DETAIL_CHARS) -> str:
+    """The readable part of a failed response's body.
+
+    Two very different things arrive here and they get different room. A
+    provider's own error message is a sentence written to be read, and is worth
+    every character - that is the one that was being cut. A 502 page from a
+    proxy in front of the API is markup, repeated boilerplate and no
+    information beyond its title, and printing all of it would bury the request
+    that failed under thirty lines of nothing.
+    """
+    try:
+        body = response.text or ""
+    except Exception:
+        return ""
+
+    detail = ""
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError):
+        payload = None
+
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            detail = str(error.get("message") or "").strip()
+            label = error.get("code") or error.get("type") or error.get("status") or ""
+            if detail and label:
+                detail = f"{detail} [{label}]"
+        elif isinstance(error, str):
+            detail = error.strip()
+        if not detail:
+            for key in ("message", "detail", "error_description"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    detail = value.strip()
+                    break
+    if detail:
+        return _cut(detail, limit)
+
+    # Not JSON, or JSON with nothing named in it. The title of an error page is
+    # usually the whole of what it has to say ("502 Bad Gateway"), so it leads.
+    title = _TITLE.search(body)
+    stripped = " ".join(_TAGS.sub(" ", body).split())
+    if title:
+        heading = " ".join(title.group(1).split())
+        rest = stripped[len(heading):].strip() if stripped.startswith(heading) else stripped
+        return _cut(f"{heading} - {rest}" if rest else heading, RAW_DETAIL_CHARS)
+    return _cut(stripped, RAW_DETAIL_CHARS)
+
+
+def _cut(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + f"… (cut from {len(text)} characters)"
+
+
+def _key_hint(provider, status: int) -> str:
+    """The sentence that turns a status code into something to actually do."""
+    if status in (401, 403):
+        where = " or ".join(provider.key_env) if provider.key_env else "the API key"
+        return (f"\n  This is an API key problem. The key came from "
+                f"{provider.key_source or 'nowhere - none is set'}; set {where} in "
+                f"the environment, or run /connect to paste one. "
+                f"/connect forget {provider.name} deletes a saved key.")
+    if status == 429:
+        return ("\n  Rate limited, or the account is out of credit - the message "
+                "above says which. Waiting fixes the first; only the provider's "
+                "billing page fixes the second.")
+    if status == 404:
+        return (f"\n  Check the model id: /models lists what {provider.label} "
+                f"actually offers.")
+    return ""
+
+
 def _as_stream(make_chunks):
     """Turn a blocking generator into an async one, off the event loop.
 
@@ -312,18 +413,34 @@ class Provider:
 
     # -- shared helpers ----------------------------------------------------
 
+    def _failed(self, response) -> str:
+        """Why a request was refused, in the words the provider used."""
+        detail = _error_detail(response)
+        return (f"{self.label} returned HTTP {response.status_code}"
+                + (f": {detail}" if detail else "")
+                + _key_hint(self, response.status_code))
+
     def _get_json(self, url: str, headers: dict) -> dict:
         response = _requests().get(url, headers=headers, timeout=30)
-        response.raise_for_status()
-        return response.json()
+        # Not `raise_for_status`, which reports the status line and throws the
+        # body away - and the body is the whole of what a person needs here.
+        # This is the call `/connect` and `/models` make, so it is the first
+        # place a wrong API key shows up, and it used to show up as
+        # "401 Client Error: Unauthorized" with no mention of a key at all.
+        if response.status_code >= 400:
+            raise RuntimeError(self._failed(response))
+        try:
+            return response.json()
+        except ValueError as error:
+            raise RuntimeError(f"{self.label} sent something that is not JSON "
+                               f"({error}): {_error_detail(response, 400)}")
 
     def _post_sse(self, url: str, headers: dict, payload: dict):
         response = _requests().post(url, headers=headers,
                                     data=json.dumps(payload).encode("utf-8"),
                                     stream=True, timeout=HTTP_TIMEOUT)
         if response.status_code >= 400:
-            detail = (response.text or "")[:400].strip()
-            raise RuntimeError(f"{self.label} returned HTTP {response.status_code}: {detail}")
+            raise RuntimeError(self._failed(response))
         return response
 
 
@@ -333,7 +450,24 @@ class Provider:
 _ollama_capabilities: dict = {}
 
 
-def ollama_supports_tools(model: str) -> bool:
+def ollama_client(host: str = "", timeout: float | None = None):
+    """A synchronous Ollama client pointed at `host`.
+
+    One place that knows how to build one, because three callers used to reach
+    for `ollama.Client()` with no host at all - so pointing the harness at
+    another machine moved the chat and left the model list, the capability
+    probe and the summariser's sizing behind, talking to localhost.
+    """
+    import ollama
+    arguments = {}
+    if host:
+        arguments["host"] = host
+    if timeout is not None:
+        arguments["timeout"] = timeout
+    return ollama.Client(**arguments)
+
+
+def ollama_supports_tools(model: str, host: str = "") -> bool:
     """Whether this local model was built with a tool-calling template.
 
     Ollama reports it outright, and it is worth asking: a model whose template
@@ -347,18 +481,21 @@ def ollama_supports_tools(model: str) -> bool:
     """
     if not model:
         return False
-    if model in _ollama_capabilities:
-        return _ollama_capabilities[model]
+    # Keyed by host as well: the same model name on another machine is another
+    # model, and answering from a cache filled against localhost is how the
+    # harness would decide a model has no tool support it does have.
+    key = (host, model)
+    if key in _ollama_capabilities:
+        return _ollama_capabilities[key]
     supported = False
     try:
-        import ollama
-        shown = ollama.Client(timeout=2.0).show(model)
+        shown = ollama_client(host, timeout=2.0).show(model)
         capabilities = (shown.get("capabilities") if isinstance(shown, dict)
                         else getattr(shown, "capabilities", None)) or []
         supported = "tools" in capabilities
     except Exception:
         supported = False
-    _ollama_capabilities[model] = supported
+    _ollama_capabilities[key] = supported
     return supported
 
 
@@ -406,12 +543,28 @@ class OllamaProvider(Provider):
 
     @property
     def host(self) -> str:
-        return str(self.settings.get("base_url") or "").rstrip("/")
+        """Where the daemon is, most explicit first.
+
+        A `base_url` saved by `/connect` is the narrowest instruction, then
+        `OLLAMA_HOST` changed with `/set`, then the environment variable the
+        Ollama tools themselves read, then the default. The setting is checked
+        against its default rather than for emptiness so that leaving it alone
+        does not silently override a `$OLLAMA_HOST` somebody already relies on.
+        """
+        from simple_harness import config
+        saved = str(self.settings.get("base_url") or "").strip()
+        if saved:
+            return saved.rstrip("/")
+        chosen = str(getattr(config, "OLLAMA_HOST", "") or "").strip()
+        default = config.defaults().get("OLLAMA_HOST", "")
+        if chosen and chosen != default:
+            return chosen.rstrip("/")
+        return (os.environ.get("OLLAMA_HOST") or chosen or default).strip().rstrip("/")
 
     @property
     def supports_native_tools(self) -> bool:
         """Unlike the hosted providers, this depends on the model, not the API."""
-        return ollama_supports_tools(self.model)
+        return ollama_supports_tools(self.model, self.host)
 
     def encode_tools(self, schemas: list) -> list:
         # Ollama takes OpenAI's shape.
@@ -424,8 +577,7 @@ class OllamaProvider(Provider):
         return ollama.AsyncClient(host=self.host) if self.host else ollama.AsyncClient()
 
     def list_models(self) -> list:
-        import ollama
-        listing = ollama.list() if not self.host else ollama.Client(host=self.host).list()
+        listing = ollama_client(self.host).list()
         entries = listing.get("models", []) if isinstance(listing, dict) \
             else getattr(listing, "models", [])
         models = []

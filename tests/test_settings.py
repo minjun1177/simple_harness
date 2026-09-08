@@ -203,6 +203,48 @@ check("with exactly one blank line under the rule",
 
 shutil.rmtree(HOME, ignore_errors=True)
 
+# ---------------------------------------------------------------------------
+print("\n--- /set groups by subject, and says when it has stopped ---")
+# The leftovers used to print with no heading of their own, straight under the
+# last group's rows - which put a dozen settings that have nothing to do with
+# the scratch VM under `vm`, with the heading above them the only thing saying
+# otherwise. And a bare name counted as a loner even when its own family was
+# right beside it, so `DEEPTHINK` and `DEEPTHINK_MAX_PASSES` were two groups.
+import contextlib                                                   # noqa: E402
+import io                                                           # noqa: E402
+import re                                                           # noqa: E402
+from simple_harness import tui                                      # noqa: E402
+
+buffer = io.StringIO()
+with contextlib.redirect_stdout(buffer):
+    tui._show_settings()
+plain = re.sub(r"\x1b\[[0-9;]*m", "", buffer.getvalue())
+
+group, under = "", {}
+for line in plain.splitlines():
+    heading = re.match(r"^  ([a-z][a-z ]*)$", line)
+    row = re.match(r"^  [ \u2022] ([A-Z][A-Z0-9_]*)\s", line)
+    if heading:
+        group = heading.group(1).strip()
+    elif row:
+        under[row.group(1)] = group
+
+check("every setting is listed", len(under) > 40, f"{len(under)} rows")
+in_vm = sorted(name for name, where in under.items() if where == "vm")
+check("the vm group holds only vm settings",
+      bool(in_vm) and all(name.startswith("VM_") for name in in_vm), str(in_vm))
+homeless = sorted(name for name, where in under.items() if not where)
+check("nothing is left under no heading at all", not homeless, str(homeless))
+check("the leftovers are named rather than left looking like the group above",
+      "everything else" in under.values())
+check("a bare name groups with its own family",
+      under.get("DEEPTHINK") == "deepthink"
+      and under.get("DEEPTHINK_MAX_PASSES") == "deepthink",
+      f"{under.get('DEEPTHINK')} / {under.get('DEEPTHINK_MAX_PASSES')}")
+check("and where the Ollama daemon lives is a setting like any other",
+      "OLLAMA_HOST" in under)
+
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S): {failures}")

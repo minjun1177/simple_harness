@@ -73,15 +73,32 @@ try:
     from prompt_toolkit.completion import merge_completers
 
     class SlashCommandCompleter(Completer):
-        def __init__(self, commands):
-            self.commands = commands
+        """The commands, with what each one does shown beside it.
+
+        It used to offer bare names and nothing else: a menu of forty words
+        with no hint of what any of them did, and it stopped the moment a space
+        was typed - so `/mcp ` and `/set ` , where the thing you cannot
+        remember is exactly what comes next, offered nothing at all.
+
+        What to suggest is not decided here. `suggest(text)` is handed the line
+        so far and answers with (what to insert, what to show, what it does),
+        which keeps the command table in `tui` where `/help` reads it too.
+        """
+
+        def __init__(self, suggest):
+            self.suggest = suggest
 
         def get_completions(self, document, complete_event):
             text = document.text_before_cursor
-            if text.startswith('/') and ' ' not in text:
-                for cmd in self.commands:
-                    if cmd.startswith(text):
-                        yield Completion(cmd, start_position=-len(text))
+            if not text.startswith("/") or "\n" in text:
+                return
+            try:
+                rows = self.suggest(text)
+            except Exception:
+                return          # a menu is a convenience; it never stops typing
+            for insert, shown, meta in rows:
+                yield Completion(insert, start_position=-len(text),
+                                 display=shown, display_meta=meta)
 
     # `@` at the start of a word opens this, and it lists what is actually in
     # the directory being typed - so the path is picked from disk rather than
@@ -132,6 +149,42 @@ try:
                     display_meta="dir" if is_dir else _entry_size(os.path.join(base, name)),
                 )
 
+    # `!` at the front means the line is a command for this machine rather than
+    # a message for the model - two very different things typed into one box.
+    # It used to look identical to a message until Enter, and the first sign
+    # that a line had run as a shell command was the shell command running.
+    from prompt_toolkit.application import get_app
+    from prompt_toolkit.lexers import Lexer
+
+    SHELL_PREFIX = "!"
+
+    def typing_shell() -> bool:
+        """Whether the line being typed now is a `!` command."""
+        try:
+            return get_app().current_buffer.text.lstrip().startswith(SHELL_PREFIX)
+        except Exception:
+            return False        # no application running: it is not being typed
+
+    class ShellLineLexer(Lexer):
+        """Colour the whole line while it is a shell command.
+
+        A lexer rather than anything cleverer because prompt_toolkit already
+        re-runs it on every keystroke, so the colour appears the moment the
+        `!` is typed and goes the moment it is deleted.
+        """
+
+        def __init__(self, style: str):
+            self.style = style
+
+        def lex_document(self, document):
+            shell = document.text.lstrip().startswith(SHELL_PREFIX)
+            style = self.style if shell else ""
+
+            def get_line(number):
+                return [(style, document.lines[number])]
+
+            return get_line
+
     def _entry_size(path) -> str:
         try:
             size = os.path.getsize(path)
@@ -153,6 +206,16 @@ from simple_harness.systemprompt import titleprompt as ttlp
 
 
 MODEL = "gemma4:e4b"
+
+# Where the local Ollama daemon is. It was `localhost:11434` with no way to say
+# otherwise: an Ollama on another machine, on another port, or behind a tunnel
+# could only be reached by editing this file. `/set OLLAMA_HOST http://box:11434`
+# is what that should have been all along.
+#
+# `$OLLAMA_HOST` still wins while this is at its default, because that is the
+# variable the Ollama tools themselves read and it would be rude to ignore it;
+# changing this setting is an explicit instruction and wins over both.
+OLLAMA_HOST = "http://localhost:11434"
 
 CURRENT_OS = platform.system()
 
@@ -667,7 +730,15 @@ def load_saved_settings() -> list:
         if problem:
             continue
         globals()[name] = parsed
-        _saved[name] = parsed
+        # Only a *deviation* is kept, which is the whole point of the file (see
+        # the note above): re-recording a value that has since become the
+        # default would pin it there and stop a later version's better default
+        # from ever reaching anyone who once changed the setting and changed it
+        # back through a version where the two happened to differ.
+        if parsed == _DEFAULTS.get(name):
+            _saved.pop(name, None)
+        else:
+            _saved[name] = parsed
         applied.append(name)
     return applied
 

@@ -13,10 +13,21 @@ def load_memory() -> dict:
     if os.path.exists(config.MEMORY_FILE):
         try:
             with open(config.MEMORY_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                loaded = json.load(f)
+            # `memory.json` is a plain file in the user's own directory and is
+            # edited by hand often enough to matter. Anything that is not a
+            # table of entries reads as no memories rather than as an
+            # AttributeError from inside a tool call.
+            return loaded if isinstance(loaded, dict) else {}
         except (json.JSONDecodeError, IOError):
             return {}
     return {}
+
+
+def _entry(memory: dict, memory_id: str) -> dict:
+    """One memory as a record, whatever shape it is stored in."""
+    value = memory.get(memory_id)
+    return value if isinstance(value, dict) else {"content": str(value or "")}
 
 def save_memory(memory: dict) -> None:
     atomic.write_json(config.MEMORY_FILE, memory)
@@ -37,9 +48,10 @@ def handle_get_memory_list() -> str:
     if not memory:
         return "[Memory] No memories stored."
     lines = []
-    for i, (mid, data) in enumerate(memory.items(), 1):
+    for i, mid in enumerate(memory, 1):
+        data = _entry(memory, mid)
         created = data.get("created_at", "unknown")
-        preview = data.get("content", "")[:50]
+        preview = str(data.get("content", ""))[:50]
         lines.append(f"{i}. {mid} ({created}) - {preview}")
     return "\n".join(lines)
 
@@ -49,7 +61,7 @@ def handle_read_memory(memory_id: str) -> str:
     memory = load_memory()
     if memory_id not in memory:
         return f"[Error] Memory '{memory_id}' not found."
-    data = memory[memory_id]
+    data = _entry(memory, memory_id)
     return f"[Memory: {memory_id}]\nContent: {data.get('content', '')}\nCreated: {data.get('created_at', 'unknown')}"
 
 def handle_delete_memory(memory_id: str) -> str:
@@ -68,7 +80,15 @@ def handle_edit_memory(memory_id: str, new_content: str) -> str:
     memory = load_memory()
     if memory_id not in memory:
         return f"[Error] Memory '{memory_id}' not found."
-    memory[memory_id]["content"] = new_content
+    # An entry written by an older version is a bare string, not a record, and
+    # subscripting one raises rather than editing it. Rewriting it whole is the
+    # same edit and brings it up to the current shape.
+    entry = memory[memory_id]
+    if isinstance(entry, dict):
+        entry["content"] = new_content
+    else:
+        memory[memory_id] = {"content": new_content,
+                             "created_at": datetime.datetime.now().isoformat()}
     save_memory(memory)
     return f"[Success] Memory edited: '{memory_id}'"
 

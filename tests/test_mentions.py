@@ -123,9 +123,94 @@ try:
         check("a directory that does not exist offers nothing", offer("@nope/") == [])
 
         print("\n--- the slash completer is untouched ---")
-        slash = config.SlashCommandCompleter(["/help", "/clear", "/connect"])
+        # It takes a function now rather than a list of names, because the menu
+        # says what each command does and what may follow it. A fixed one here
+        # keeps this test about the two completers coexisting.
+        def suggest(text):
+            return [(name, name, f"does {name[1:]}")
+                    for name in ("/help", "/clear", "/connect")
+                    if name.startswith(text)]
+
+        slash = config.SlashCommandCompleter(suggest)
         got = [c.text for c in slash.get_completions(Document("/c", 2), None)]
         check("it still completes commands", got == ["/clear", "/connect"], str(got))
+        described = list(slash.get_completions(Document("/c", 2), None))
+        check("and says what each one does",
+              all(str(c.display_meta) for c in described))
+        # A menu is a convenience; nothing it does may stop a line being typed.
+        exploding = config.SlashCommandCompleter(lambda text: 1 / 0)
+        check("a suggester that raises yields nothing rather than raising",
+              list(exploding.get_completions(Document("/c", 2), None)) == [])
+
+        print("\n--- and the menu previews what comes next ---")
+        # The menu used to offer forty bare words with no hint of what any did,
+        # and it stopped at the first space - so `/mcp ` and `/set `, where
+        # what you cannot remember is exactly what comes next, offered nothing.
+        from simple_harness import tui                              # noqa: E402
+
+        def shown(text):
+            return {display for _, display, _ in tui.complete_command(text)}
+
+        def inserted(text):
+            return {insert for insert, _, _ in tui.complete_command(text)}
+
+        top = tui.complete_command("/")
+        check("typing / offers every command", len(top) > 25, str(len(top)))
+        check("each with what it does", all(meta.strip() for _, _, meta in top))
+        check("including the second spelling of /exit", "/quit" in inserted("/"))
+
+        check("a space asks the other question", "/vm reset" in inserted("/vm "))
+        check("and narrows as you type", inserted("/vm r") == {"/vm reset"},
+              str(inserted("/vm r")))
+        check("alternatives are offered one by one, not as one row",
+              {"/mcp tools", "/mcp prompts", "/mcp all"} <= inserted("/mcp "),
+              str(sorted(inserted("/mcp "))))
+        check("and each shows its own spelling",
+              "/mcp tools [name]" in shown("/mcp ") and
+              "/mcp tools|prompts|all [name]" not in shown("/mcp "),
+              str(sorted(shown("/mcp "))))
+        check("a switch offers on and off",
+              {"/deepthink on", "/deepthink off"} == inserted("/deepthink "),
+              str(inserted("/deepthink ")))
+        check("a placeholder is shown but never completed",
+              "/perms allow" in inserted("/perms ")
+              and "/perms allow <rule>" in shown("/perms "),
+              str(sorted(shown("/perms "))))
+
+        # The names nobody remembers are the ones worth completing.
+        check("/set offers the settings", "/set NUM_CTX" in inserted("/set "))
+        check("with their current value", any(
+            "65,536" in meta for insert, _, meta in tui.complete_command("/set NUM_CTX")))
+        check("/connect offers the providers",
+              "/connect anthropic" in inserted("/connect "))
+        check("and says whether each can be used", any(
+            "API key" in meta for _, _, meta in tui.complete_command("/connect anth")))
+
+        check("free text is never completed over", tui.complete_command("/tdd fix it") == [])
+        check("nor is an ordinary message", tui.complete_command("hello there") == [])
+
+        print("\n--- and a `!` line says it is a shell command before Enter ---")
+        # One box takes a message for the model and, behind a `!`, a command
+        # for this machine. They looked identical while being typed, so the
+        # first sign that a line had run as a shell command was it running.
+        from simple_harness import app                               # noqa: E402
+
+        lexer = config.ShellLineLexer(app.SHELL_STYLE)
+
+        def styled(text):
+            return lexer.lex_document(Document(text, len(text)))(0)[0][0]
+
+        check("an ordinary message is not coloured", styled("hello there") == "")
+        check("a slash command is not either", styled("/help") == "")
+        check("a ! command is", styled("!ls -al") == app.SHELL_STYLE, styled("!ls -al"))
+        check("leading spaces do not hide it",
+              styled("  !git status") == app.SHELL_STYLE)
+
+        # The banner reads the buffer of the running application; with none
+        # running there is nothing being typed, so it must say so rather than
+        # raise from inside a redraw.
+        check("with no application, nothing is being typed", not config.typing_shell())
+        check("so the prompt is the ordinary one", "Shell" not in app._prompt_message())
     else:
         print("\n  [skip] prompt_toolkit is not installed; the menu is not testable here")
 

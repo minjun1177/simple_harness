@@ -797,7 +797,7 @@ for t in tests/*.py; do python "$t" || echo "FAILED: $t"; done
 | `test_tool_parsing.py` | The text protocol's repair engine: the shapes it reads, and the ones it refuses |
 | `test_resume.py` | That `--resume` and `-c` resolve on the command line, and refuse rather than guess |
 | `test_tool_reporting.py` | That the result markers are read as anchors (5.9), and that nothing warns onto stderr mid-tool |
-| `test_mentions.py` | What `@` attaches, what it refuses to, and that the menu reads the real directory |
+| `test_mentions.py` | What `@` attaches, what it refuses to, that the menu reads the real directory, and that the command menu previews what each command does and what may follow it |
 | `test_channel.py` | That another harness's file cannot be written from here, that a claim dies with its terminal, and that concurrent writes to the board lose nothing (5.11, §8) |
 | `test_hashline_edit.py` | That an anchor reaches the line it names, and that a stale one is refused rather than applied a few lines off (5.12) |
 | `test_vm.py` | That `run_python` takes its code as a raw block, remembers between calls, and says the namespace is gone every way it can die (§8a) |
@@ -807,6 +807,7 @@ for t in tests/*.py; do python "$t" || echo "FAILED: $t"; done
 | `test_verify.py` | That auto-verify picks the right check, runs it once per turn, refuses one it cannot run, and turns off a suite that will not finish (§7a) |
 | `test_mcp_lazy.py` | That a big MCP server is announced rather than described, that asking for it hands over the parameters, that a call to an unloaded one still works, and that names and schemas cannot come apart (5.13) |
 | `test_tdd.py` | That `/tdd` reaches a test file however its path is written, refuses in `dispatch_tool`, holds nothing on disk, and lifts itself (§7a) |
+| `test_malformed_state.py` | State that is not the shape the code assumed: a message with no content, a hand-edited `memory.json`, a setting of nought - and that writing a file through a tool is atomic and leaves its line endings alone (5.7) |
 | `test_docs.py` | That this file and `README.md` still describe the program that exists |
 | `test_compat.py` | That the commands, settings, tool names and files people build habits on are still there under the same names (5.14) |
 

@@ -785,6 +785,24 @@ MAX_REFUSALS_IN_A_ROW = 3
 MAX_VERIFY_FAILURES = 3
 
 
+def _last_said(messages: list[dict]) -> str:
+    """The most recent thing the model actually said, with its calls stripped.
+
+    What a turn hands back when it is cut short: the answer so far, rather than
+    the tool result that happens to be last in the list.
+    """
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        spoken = re.sub(r"<tool_call>.*?</tool_call>", "", content, flags=re.DOTALL).strip()
+        if spoken:
+            return spoken
+    return ""
+
+
 async def chat_turn(messages: list[dict]) -> str:
     call_count = 0
     parse_failures = 0
@@ -805,14 +823,22 @@ async def chat_turn(messages: list[dict]) -> str:
         # Text a console mangled cannot be encoded, so one bad character would
         # fail this request and every later one. Repair it before it is sent.
         config.repair_messages(messages)
-        if call_count > 0 and call_count % config.MAX_TOOL_CALLS == 0:
-            print(f"\n  {S.WARN}⚠  Tool call limit ({config.MAX_TOOL_CALLS}) reached.{S.R}")
+        # `> 0` on the limit as well as on the count: `/set MAX_TOOL_CALLS 0` is
+        # a number the settings accept, and dividing by it ended the turn in a
+        # ZeroDivisionError rather than in an answer. Nought means no ceiling.
+        limit = int(getattr(config, "MAX_TOOL_CALLS", 10) or 0)
+        if limit > 0 and call_count > 0 and call_count % limit == 0:
+            print(f"\n  {S.WARN}⚠  Tool call limit ({limit}) reached.{S.R}")
             try:
                 user_choice = input(f"  {S.WARN}Continue? {S.MUTED}[{S.OK}y{S.MUTED}/{S.ERR}n{S.MUTED}]{S.R} {S.WARN}›{S.R} ").strip().lower()
-            except:
+            except (EOFError, KeyboardInterrupt):
                 user_choice = "n"
             if user_choice != 'y':
-                return messages[-2]["content"] if len(messages) >= 2 else "Tool usage stopped."
+                # The last thing the *model* said, not `messages[-2]`, which at
+                # this point in the loop is whatever tool result happens to sit
+                # there - so stopping a long tool loop used to hand back
+                # "[Tool Result for 'read_file']: ..." as the answer.
+                return _last_said(messages) or "Tool usage stopped."
                 
         native_calls: list = []
         use_native = native_enabled()

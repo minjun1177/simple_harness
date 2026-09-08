@@ -24,7 +24,7 @@ from simple_harness.config import S
 from simple_harness.systemprompt import systemprompt as _build_system_prompt
 from simple_harness.tui import (_welcome, _show_help, _show_skills, _show_mcp, _show_perms,
                                 _show_settings, _fmt_setting, _fmt_tool_call, _fmt_tool_result,
-                                display_usage_graph, _hr)
+                                display_usage_graph, _hr, complete_command)
 from simple_harness.renderer import _render_full
 from simple_harness.session import (save_session, load_session, list_sessions, find_sessions,
                      latest_in_dir, rename_session, generate_session_title, clean_title)
@@ -85,22 +85,34 @@ def _adopt_session(loaded) -> list[dict]:
 
 
 def _replay_session(messages: list[dict]) -> None:
-    """Print a resumed conversation the way it looked while it was happening."""
+    """Print a resumed conversation the way it looked while it was happening.
+
+    Every field is read defensively. This runs against a file, and a file
+    written by another version - or one repaired after a crash - is allowed to
+    be missing a `content` that was never optional here. Failing to *replay* a
+    conversation must not be what stops it being resumed.
+    """
     for msg in messages:
-        if msg["role"] == "system":
+        if not isinstance(msg, dict):
             continue
-        elif msg["role"] == "user":
-            if msg["content"].startswith("[Tool Result for '"):
-                m = re.match(r"\[Tool Result for '([^']+)'\]:\n(.*)", msg["content"], re.DOTALL)
+        role = msg.get("role")
+        content = msg.get("content")
+        if not isinstance(content, str):
+            content = ""
+        if role == "system":
+            continue
+        elif role == "user":
+            if content.startswith("[Tool Result for '"):
+                m = re.match(r"\[Tool Result for '([^']+)'\]:\n(.*)", content, re.DOTALL)
                 if m:
                     _fmt_tool_result(m.group(1), m.group(2))
                 continue
-            print(f"  {S.USER_CLR}{S.BOLD}❯{S.R} {msg['content']}")
-        elif msg["role"] == "assistant":
-            for name, arguments in parse_tool_calls(msg["content"], quiet=True):
+            print(f"  {S.USER_CLR}{S.BOLD}❯{S.R} {content}")
+        elif role == "assistant":
+            for name, arguments in parse_tool_calls(content, quiet=True):
                 _fmt_tool_call(name, arguments)
 
-            c = re.sub(r'<tool_call>.*?</tool_call>', '', msg["content"], flags=re.DOTALL)
+            c = re.sub(r'<tool_call>.*?</tool_call>', '', content, flags=re.DOTALL)
             c = strip_thinking(c)
             if c:
                 print(_render_full(c))
@@ -173,11 +185,26 @@ def _connect_mcp_servers() -> list:
     return [s for s in pending if s.state == "failed"]
 
 
+def _wrapped(text: str, indent: int = 6) -> list:
+    """A message broken to the terminal's width, so none of it is lost."""
+    import textwrap
+    width = max(30, config.tw() - indent)
+    lines = []
+    for paragraph in str(text or "").splitlines() or [""]:
+        lines.extend(textwrap.wrap(paragraph.strip(), width) or [""])
+    return lines
+
+
 def _report_mcp_problems(failed: list) -> None:
     for problem in getattr(mcp_client.load_servers, "errors", []):
         print(f"  {S.ERR}✗ {problem}{S.R}")
     for server in failed:
-        print(f"  {S.WARN}⚠ MCP server '{server.name}' failed: {server.error[:200]}{S.R}")
+        # Wrapped rather than cut at 200: what a server says when it will not
+        # start is a missing binary, a bad token or a path that is not there,
+        # and all three read at the end of the sentence.
+        print(f"  {S.WARN}⚠ MCP server '{server.name}' failed:{S.R}")
+        for line in _wrapped(server.error):
+            print(f"  {S.MUTED}  {line}{S.R}")
     if failed:
         print(f"  {S.MUTED}  Run {S.ACCENT}/mcp{S.MUTED} for details, {S.ACCENT}/mcp reload{S.MUTED} to retry.{S.R}\n")
 
@@ -260,6 +287,22 @@ async def _watch_channel() -> None:
             return
 
 
+# One box takes two completely different things: a message for the model, and -
+# behind a `!` - a command for this machine. They used to look identical while
+# being typed, and the first sign that a line was a shell command was the shell
+# command running. So the box says which it is, before Enter rather than after.
+SHELL_STYLE = "fg:#fabd2f"          # S.WARN, in the spelling prompt_toolkit takes
+
+
+def _prompt_message() -> str:
+    """The prompt, which says `Shell` over itself while a `!` is being typed."""
+    if getattr(config, "typing_shell", None) and config.typing_shell():
+        return (f"  {S.WARN}{S.BOLD}Shell{S.R}{S.MUTED} - runs on this machine as "
+                f"you; not sent to the model{S.R}\n"
+                f"  {S.WARN}{S.BOLD}❯{S.R} ")
+    return f"  {S.USER_CLR}{S.BOLD}❯{S.R} "
+
+
 async def _read_line(session_pt) -> str:
     """One line from the person, with the channel watched while they type."""
     if session_pt is None:
@@ -270,17 +313,18 @@ async def _read_line(session_pt) -> str:
     # `ANSI` lives behind the prompt_toolkit guard in `config`, so it is reached
     # the same way `main` reaches it rather than imported at module level.
     ANSI = config.ANSI
+    # A callable, so prompt_toolkit asks again on every keystroke and the
+    # banner appears with the `!` rather than on the next line.
+    message = lambda: ANSI(_prompt_message())          # noqa: E731
     watcher = asyncio.ensure_future(_watch_channel())
     # `patch_stdout` is what lets the watcher print *above* the prompt rather
     # than through the middle of what is being typed.
     keep_prompt_intact = getattr(config, "patch_stdout", None)
     try:
         if keep_prompt_intact is None:
-            return (await session_pt.prompt_async(
-                ANSI(f"  {S.USER_CLR}{S.BOLD}❯{S.R} "))).strip()
+            return (await session_pt.prompt_async(message)).strip()
         with keep_prompt_intact():
-            return (await session_pt.prompt_async(
-                ANSI(f"  {S.USER_CLR}{S.BOLD}❯{S.R} "))).strip()
+            return (await session_pt.prompt_async(message)).strip()
     finally:
         watcher.cancel()
 
@@ -294,14 +338,14 @@ def _agents_command(rest: str) -> None:
 
     if verb in ("on", "off") and not argument:
         config.CHANNEL_ENABLED = verb == "on"
-        if config.CHANNEL_ENABLED:
-            agent_id = channel.join(_agent_label())
-            print(f"  {S.OK}✓ Agent channel is ON.{S.MUTED} This session is "
-                  f"{agent_id or 'unregistered'}.{S.R}\n")
-        else:
+        agent_id = channel.join(_agent_label()) if config.CHANNEL_ENABLED else ""
+        if not config.CHANNEL_ENABLED:
             channel.leave()
-            print(f"  {S.INFO}✓ Agent channel is OFF.{S.MUTED} Other agents can "
-                  f"no longer see this session, and its claims are released.{S.R}\n")
+        _switch("/agents", verb, config.CHANNEL_ENABLED, "Agent channel",
+                "this session appears on the board other agents here can see",
+                on_note=f"This session is {agent_id or 'unregistered'}.",
+                off_note="Other agents can no longer see this session, and its "
+                         "claims are released.")
         return
 
     if verb == "say":
@@ -327,6 +371,40 @@ def _agents_command(rest: str) -> None:
         return
 
     _show_agents()
+
+
+def _switch(command: str, argument: str, now: bool, label: str, what: str,
+            on_note: str = "", off_note: str = "", extra=()) -> bool | None:
+    """One on/off command, worded and spaced like every other one.
+
+    Three of these - `/autocommit`, `/autoverify`, `/deepthink` - already
+    answered a bare `/x` by saying what the switch is for and where it stands,
+    which is what somebody typing it wants to know. The other six answered with
+    `✗ Usage: /x <on/off>` and nothing else: an error, for a command that was
+    not wrong, with no hint of what it even switches. They also skipped the
+    blank line every other command in this loop ends on, so the next prompt sat
+    flush against the confirmation.
+
+    Returns the new value, or None when nothing changed.
+    """
+    argument = (argument or "").strip().lower()
+    if argument in ("on", "off"):
+        value = argument == "on"
+        note = on_note if value else off_note
+        print(f"  {S.INFO}✓ {label} is {'ON' if value else 'OFF'}.{S.R}"
+              + (f"{S.MUTED} {note}{S.R}" if note else ""))
+        print()
+        return value
+
+    if argument:
+        print(f"  {S.ERR}✗ '{argument}' is not on or off.{S.R}")
+    print(f"  {S.INFO}{label} is {S.BOLD}{'ON' if now else 'OFF'}{S.R}"
+          f"{S.MUTED} - {what}{S.R}")
+    for line in extra:
+        print(f"  {S.MUTED}{line}{S.R}")
+    print(f"  {S.MUTED}Usage: {command} <on/off>{S.R}")
+    print()
+    return None
 
 
 _TDD_LABEL = "/tdd"
@@ -493,13 +571,21 @@ async def main(resume_id: str = "") -> None:
         paths.ensure_home()          # FileHistory opens its file straight away
         from simple_harness.config import (SlashCommandCompleter, PathMentionCompleter,
                                       merge_completers, PromptSession, FileHistory)
+        # Driven by the same table `/help` renders, so the menu and the help
+        # cannot disagree about what exists - which is how several commands
+        # ended up working, completable and undocumented - and so the menu can
+        # say what each one does and what may follow it.
         completer = merge_completers([
-            SlashCommandCompleter(['/help', '/clear', '/usage', '/model', '/models', '/exit', '/quit', '/sessions', '/load', '/title', '/autotitle', '/automode', '/fullcontent', '/record', '/export', '/system', '/planmode', '/skills', '/skill', '/mcp', '/perms', '/think', '/connect', '/undo', '/autocommit', '/autoverify', '/tdd', '/deepthink', '/agents', '/vm', '/set']),
+            SlashCommandCompleter(complete_command),
             PathMentionCompleter(),
         ])
         session_pt = PromptSession(
             history=FileHistory(config.HISTORY_FILE),
             completer=completer,
+            # What colours the line itself once it starts with `!`. The banner
+            # above comes from `_prompt_message`; between them, a command for
+            # this machine never looks like a message for the model.
+            lexer=config.ShellLineLexer(SHELL_STYLE),
             # The menu has to open on its own for `@` to be discoverable: nobody
             # presses Tab after a character they have not been told completes.
             complete_while_typing=True,
@@ -563,6 +649,10 @@ async def main(resume_id: str = "") -> None:
             config.token_history.clear()
             config.turn_index = 0
             config.LOADED_SKILLS.clear()
+            # The prompt was just rebuilt for an empty set of loaded servers,
+            # so what it was built for has to move with it - otherwise the next
+            # message sees a difference that is not there and rebuilds again.
+            mcp_servers_in_prompt = sorted(config.LOADED_MCP_SERVERS)
             print("\033[2J\033[H", end="")
             _welcome()
             print(f"  {S.OK}✓ Conversation and usage cleared.{S.R}\n")
@@ -580,7 +670,7 @@ async def main(resume_id: str = "") -> None:
                     detail = f"  {S.GRAY}({entry['detail']}){S.R}" if entry.get("detail") else ""
                     print(f"  {S.ACCENT}{i:3}.{S.R} {S.WHITE}{entry['name']}{S.R}{detail}{marker}")
             except Exception as e:
-                print(f"  {S.ERR}\u2717 Failed to list models: {e}{S.R}")
+                connect._print_problem("Failed to list models", e)
             print()
             continue
         if cmd == "/model":
@@ -640,46 +730,45 @@ async def main(resume_id: str = "") -> None:
             current_session_id = rename_session(current_session_id, new_title)
             print(f"  {S.OK}✓ Session titled: {config.SESSION_TITLE}{S.R} {S.MUTED}({current_session_id or 'saved on next message'}){S.R}\n")
             continue
-        if cmd.startswith("/autotitle"):
-            parts = cmd.split(" ", 1)
-            if len(parts) < 2 or parts[1] not in ("on", "off"):
-                print(f"  {S.ERR}✗ Usage: /autotitle <on/off>  (currently {'on' if config.AUTO_TITLE else 'off'}){S.R}\n")
-                continue
-            config.AUTO_TITLE = parts[1] == "on"
-            print(f"  {S.INFO}✓ Auto session titling is {'ON' if config.AUTO_TITLE else 'OFF'}.{S.R}")
+        if cmd == "/autotitle" or cmd.startswith("/autotitle "):
+            chosen = _switch(
+                "/autotitle", user_input[len("/autotitle"):], config.AUTO_TITLE,
+                "Auto session titling",
+                "the model names a new session after its first exchange",
+                on_note="New sessions are named for you; /title renames one.",
+                off_note="New sessions stay untitled until you name them with /title.")
+            if chosen is not None:
+                config.AUTO_TITLE = chosen
             continue
-        if cmd.startswith("/automode"):
-            parts = cmd.split(" ", 1)
-            if len(parts) < 2 or not parts[1] in ("on", "off"):
-                print(f"  {S.ERR}✗ Usage: /automode <on/off>{S.R}\n")
-                continue
-            if parts[1] == "on":
-                config.AUTO_ALLOW = True
-            if parts[1] == "off":
-                config.AUTO_ALLOW = False
-            print(f"  {S.INFO}✓ Automode has been on.{S.R}" if parts[1] == "on" else f"  {S.INFO}✓ Automode has been off.{S.R}")
+        if cmd == "/automode" or cmd.startswith("/automode "):
+            chosen = _switch(
+                "/automode", user_input[len("/automode"):], config.AUTO_ALLOW,
+                "Automode",
+                "every guarded tool runs without stopping to ask you first",
+                on_note="Tools run without asking. /perms is the finer-grained way.",
+                off_note="Every guarded tool waits for your approval again.")
+            if chosen is not None:
+                config.AUTO_ALLOW = chosen
             continue
-        if cmd.startswith("/fullcontent"):
-            parts = cmd.split(" ", 1)
-            if len(parts) < 2 or not parts[1] in ("on", "off"):
-                print(f"  {S.ERR}✗ Usage: /fullcontent <on/off>{S.R}\n")
-                continue
-            if parts[1] == "on":
-                config.RETURN_ALL_FILE_CONTENT = True
-            if parts[1] == "off":
-                config.RETURN_ALL_FILE_CONTENT = False
-            print(f"  {S.INFO}✓ Full content mode has been turned on.{S.R}" if parts[1] == "on" else f"  {S.INFO}✓ Full content mode has been turned off.{S.R}")
+        if cmd == "/fullcontent" or cmd.startswith("/fullcontent "):
+            chosen = _switch(
+                "/fullcontent", user_input[len("/fullcontent"):],
+                config.RETURN_ALL_FILE_CONTENT, "Full content",
+                "a file or page reaches the model whole rather than cut short",
+                on_note="read_file and get_url hand over the whole thing.",
+                off_note=f"They stop at {config.FILE_MAX_DISPLAY_LENGTH} characters.")
+            if chosen is not None:
+                config.RETURN_ALL_FILE_CONTENT = chosen
             continue
-        if cmd.startswith("/record"):
-            parts = cmd.split(" ", 1)
-            if len(parts) < 2 or not parts[1] in ("on", "off"):
-                print(f"  {S.ERR}✗ Usage: /record <on/off>{S.R}\n")
-                continue
-            if parts[1] == "on":
-                config.SAVE_CHAT_HISTORY = True
-            if parts[1] == "off":
-                config.SAVE_CHAT_HISTORY = False
-            print(f"  {S.INFO}✓ Chat history recording is ON.{S.R}" if parts[1] == "on" else f"  {S.INFO}✓ Chat history recording is OFF.{S.R}")
+        if cmd == "/record" or cmd.startswith("/record "):
+            chosen = _switch(
+                "/record", user_input[len("/record"):], config.SAVE_CHAT_HISTORY,
+                "Chat history recording",
+                f"conversations are saved under {config.SESSION_DIR}",
+                on_note="This conversation is saved as you go; /sessions lists them.",
+                off_note="Nothing more is written to disk for this conversation.")
+            if chosen is not None:
+                config.SAVE_CHAT_HISTORY = chosen
             continue
         if cmd.startswith("/export"):
             parts = cmd.split(" ", 1)
@@ -717,13 +806,15 @@ async def main(resume_id: str = "") -> None:
                 print(f"  {S.INFO}✓ System prompt updated.{S.R}")
                 print(f"  {S.WARN}⚠ To ensure the persona is applied correctly, please clear the previous conversation with /clear.{S.R}\n")
             continue
-        if cmd.startswith("/planmode"):
-            parts = cmd.split(" ", 1)
-            if len(parts) < 2 or parts[1] not in ("on", "off"):
-                print(f"  {S.ERR}✗ Usage: /planmode <on/off>{S.R}\n")
-                continue
-            config.PLANMODE = True if parts[1] == "on" else False
-            print(f"  {S.INFO}✓ Plan mode is {'ON' if config.PLANMODE else 'OFF'}.{S.R}")
+        if cmd == "/planmode" or cmd.startswith("/planmode "):
+            chosen = _switch(
+                "/planmode", user_input[len("/planmode"):], config.PLANMODE,
+                "Plan mode",
+                "the model must submit a plan for approval before it changes anything",
+                on_note="It calls submit_plan_for_approval first and waits for you.",
+                off_note="It goes straight at the work again.")
+            if chosen is not None:
+                config.PLANMODE = chosen
             continue
         if cmd == "/skills" or cmd.startswith("/skills "):
             arg = user_input.split(" ", 1)[1].strip().lower() if " " in user_input else ""
@@ -748,6 +839,7 @@ async def main(resume_id: str = "") -> None:
             _fmt_tool_call("use_skill", {"skill_name": skill["name"]})
             result = skills.handle_use_skill(skill["name"])
             _fmt_tool_result("use_skill", result)
+            print()             # one blank line, like every other command here
             messages.append({"role": "user", "content": f"[Tool Result for 'use_skill']:\n{result}"})
             current_session_id = save_session(messages, current_session_id)
             continue
@@ -783,7 +875,10 @@ async def main(resume_id: str = "") -> None:
                         if server.state == "connected":
                             print(f"  {S.OK}✓ '{server.name}' connected: {len(server.tools)} tool(s).{S.R}\n")
                         else:
-                            print(f"  {S.ERR}✗ '{server.name}' is {server.state}: {server.error[:200]}{S.R}\n")
+                            print(f"  {S.ERR}✗ '{server.name}' is {server.state}:{S.R}")
+                            for line in _wrapped(server.error):
+                                print(f"  {S.MUTED}  {line}{S.R}")
+                            print()
             elif sub == "resources":
                 print()
                 print(mcp_client.list_resources_text(args[0] if args else ""))
@@ -817,7 +912,10 @@ async def main(resume_id: str = "") -> None:
                 else:
                     mcp_client.shutdown()
                 _refresh_system_prompt(messages)
-                print(f"  {S.INFO}✓ MCP is {'ON' if config.MCP_ENABLED else 'OFF'}.{S.R}\n")
+                _switch("/mcp", sub, config.MCP_ENABLED, "MCP",
+                        "the attached servers' tools are offered to the model",
+                        on_note=f"{mcp_client.status_summary()}. /mcp lists them.",
+                        off_note="No server's tools reach the model, and none is running.")
             else:
                 print(f"  {S.ERR}✗ Usage: /mcp [tools|prompts|all|resources|reload|connect <name>|prompt <server> <name>|on|off]{S.R}\n")
 
@@ -851,14 +949,14 @@ async def main(resume_id: str = "") -> None:
                 print(f"  {S.ERR}✗ Usage: /perms [reload|allow <rule>|deny <rule>]{S.R}\n")
             continue
         if cmd == "/think" or cmd.startswith("/think "):
-            parts = cmd.split(" ", 1)
-            if len(parts) < 2 or parts[1].strip() not in ("on", "off"):
-                state = "shown" if config.SHOW_THINKING else "hidden"
-                print(f"  {S.ERR}✗ Usage: /think <on/off>  (a model's reasoning is currently {state}){S.R}\n")
-                continue
-            config.SHOW_THINKING = parts[1].strip() == "on"
-            print(f"  {S.INFO}✓ Model reasoning is {'SHOWN' if config.SHOW_THINKING else 'HIDDEN'}."
-                  f"{S.MUTED} It is never kept in the conversation history.{S.R}\n")
+            chosen = _switch(
+                "/think", user_input[len("/think"):], config.SHOW_THINKING,
+                "Model reasoning",
+                "a reasoning model's scratch work is shown as it arrives",
+                on_note="It is shown dimmed, and still never kept in the history.",
+                off_note="It is hidden. It was never kept in the history either way.")
+            if chosen is not None:
+                config.SHOW_THINKING = chosen
             continue
 
         if cmd == "/undo":
@@ -868,84 +966,64 @@ async def main(resume_id: str = "") -> None:
             continue
 
         if cmd == "/autocommit" or cmd.startswith("/autocommit "):
-            parts = cmd.split(" ", 1)
-            setting = parts[1].strip() if len(parts) > 1 else ""
-            if setting not in ("on", "off"):
-                state = "ON" if config.GIT_AUTO_COMMIT else "OFF"
-                print(f"  {S.INFO}Auto-commit is {S.BOLD}{state}{S.R}"
-                      f"{S.MUTED} - each file an AI tool changes is committed on its own.{S.R}")
-                if not git_ops.repo_root():
-                    print(f"  {S.MUTED}This directory is not a git repository, so nothing "
-                          f"is committed either way.{S.R}")
-                recent = git_ops.recent_ai_commits(5)
-                for commit in recent:
-                    print(f"  {S.MUTED}│{S.R} {S.GRAY}{commit['sha']}{S.R} "
-                          f"{commit['subject']} {S.MUTED}({commit['when']}){S.R}")
-                if recent:
-                    print(f"  {S.MUTED}╰─ /undo takes the newest one back{S.R}")
-                print(f"  {S.MUTED}Usage: /autocommit <on/off>{S.R}\n")
-                continue
-            config.GIT_AUTO_COMMIT = setting == "on"
-            print(f"  {S.INFO}✓ Auto-commit is "
-                  f"{'ON' if config.GIT_AUTO_COMMIT else 'OFF'}."
-                  f"{S.MUTED} {'Each AI edit gets its own commit; /undo takes one back.' if config.GIT_AUTO_COMMIT else 'AI edits are no longer committed for you.'}{S.R}\n")
+            standing = []
+            if not git_ops.repo_root():
+                standing.append("This directory is not a git repository, so nothing "
+                                "is committed either way.")
+            recent = git_ops.recent_ai_commits(5)
+            standing += [f"│ {c['sha']}  {c['subject']}  ({c['when']})" for c in recent]
+            if recent:
+                standing.append("╰─ /undo takes the newest one back")
+            chosen = _switch(
+                "/autocommit", user_input[len("/autocommit"):], config.GIT_AUTO_COMMIT,
+                "Auto-commit",
+                "each file an AI tool changes is committed on its own",
+                on_note="Each AI edit gets its own commit; /undo takes one back.",
+                off_note="AI edits are no longer committed for you.",
+                extra=standing)
+            if chosen is not None:
+                config.GIT_AUTO_COMMIT = chosen
             continue
 
         if cmd == "/autoverify" or cmd.startswith("/autoverify "):
-            parts = cmd.split(" ", 1)
-            setting = parts[1].strip() if len(parts) > 1 else ""
-            if setting not in ("on", "off"):
-                state = "ON" if config.AUTO_VERIFY else "OFF"
-                print(f"  {S.INFO}Auto-verify is {S.BOLD}{state}{S.R}"
-                      f"{S.MUTED} - after a turn changes a file, this project's "
-                      f"own check is run and a failure goes back to the model.{S.R}")
-                for (name, root), reason in verify.turned_off().items():
-                    print(f"  {S.MUTED}│{S.R} {S.GRAY}{name}{S.R} in "
-                          f"{os.path.basename(root) or root}: {reason}")
-                print(f"  {S.MUTED}It runs only a check the project already "
-                      f"declares - {', '.join(c.name for c in verify.CHECKS)} - "
-                      f"and never invents one.{S.R}")
-                print(f"  {S.MUTED}Usage: /autoverify <on/off>{S.R}\n")
-                continue
-            config.AUTO_VERIFY = setting == "on"
-            if config.AUTO_VERIFY:
+            standing = [f"│ {name} in {os.path.basename(root) or root}: {reason}"
+                        for (name, root), reason in verify.turned_off().items()]
+            standing.append("It runs only a check the project already declares - "
+                            f"{', '.join(c.name for c in verify.CHECKS)} - and "
+                            "never invents one.")
+            chosen = _switch(
+                "/autoverify", user_input[len("/autoverify"):], config.AUTO_VERIFY,
+                "Auto-verify",
+                "after a turn changes a file, this project's own check is run and "
+                "a failure goes back to the model",
+                on_note=("An edit that breaks the project's check comes back to the "
+                         f"model with the error, up to {llm_client.MAX_VERIFY_FAILURES} times."),
+                off_note="Nothing is run after an edit; checking the work is yours again.",
+                extra=standing)
+            if chosen is not None:
+                config.AUTO_VERIFY = chosen
                 # `on` after one turned itself off has to mean "try it again",
                 # or the command would report ON and still run nothing.
-                verify.reset()
-                print(f"  {S.INFO}✓ Auto-verify is ON.{S.MUTED} An edit that breaks "
-                      f"the project's check comes back to the model with the error, "
-                      f"up to {llm_client.MAX_VERIFY_FAILURES} times.{S.R}\n")
-            else:
-                print(f"  {S.INFO}✓ Auto-verify is OFF.{S.MUTED} Nothing is run "
-                      f"after an edit; checking the work is yours again.{S.R}\n")
+                if chosen:
+                    verify.reset()
             continue
 
         if cmd == "/deepthink" or cmd.startswith("/deepthink "):
-            parts = cmd.split(" ", 1)
-            setting = parts[1].strip() if len(parts) > 1 else ""
-            if setting not in ("on", "off"):
-                state = "ON" if config.DEEPTHINK else "OFF"
-                print(f"  {S.INFO}Deepthink is {S.BOLD}{state}{S.R}"
-                      f"{S.MUTED} - one request becomes "
-                      f"{len(deepthink.STAGES)} turns:{S.R}")
-                for i, stage in enumerate(deepthink.STAGES, 1):
-                    print(f"  {S.MUTED}│{S.R} {S.GRAY}{i}.{S.R} {stage.title}")
-                print(f"  {S.MUTED}├─ a request that needs no changes stops "
-                      f"after the first.{S.R}")
-                print(f"  {S.MUTED}╰─ a final check that says it is not done "
-                      f"starts again at 1, up to "
-                      f"{config.DEEPTHINK_MAX_PASSES} times.{S.R}")
-                print(f"  {S.MUTED}Usage: /deepthink <on/off>{S.R}\n")
-                continue
-            config.DEEPTHINK = setting == "on"
-            if config.DEEPTHINK:
-                print(f"  {S.INFO}✓ Deepthink is ON.{S.MUTED} Say what you want built "
-                      f"and it will plan, argue with the plan, build it, review the "
-                      f"diff, then run it - and plan again if that check says it "
-                      f"is not done.{S.R}\n")
-            else:
-                print(f"  {S.INFO}✓ Deepthink is OFF.{S.MUTED} Back to one turn per "
-                      f"request.{S.R}\n")
+            standing = [f"│ {i}. {stage.title}"
+                        for i, stage in enumerate(deepthink.STAGES, 1)]
+            standing.append("├─ a request that needs no changes stops after the first.")
+            standing.append("╰─ a final check that says it is not done starts again "
+                            f"at 1, up to {config.DEEPTHINK_MAX_PASSES} times.")
+            chosen = _switch(
+                "/deepthink", user_input[len("/deepthink"):], config.DEEPTHINK,
+                "Deepthink",
+                f"one request becomes {len(deepthink.STAGES)} turns",
+                on_note="Say what you want built and it will plan, argue with the "
+                        "plan, build it, review the diff, then run it.",
+                off_note="Back to one turn per request.",
+                extra=standing)
+            if chosen is not None:
+                config.DEEPTHINK = chosen
             continue
 
         if cmd == "/agents" or cmd.startswith("/agents "):
@@ -976,9 +1054,11 @@ async def main(resume_id: str = "") -> None:
             if not rest:
                 _arm_tdd()
                 print(f"  {S.MUTED}Send your request now, or /tdd off to lift "
-                      f"it.{S.R}\n")
+                      f"it.{S.R}")
+                print()
                 continue
             _arm_tdd()
+            print()
             user_input = rest          # and on to the fall-through below
 
         # Every slash command has had its turn and continued; what is left is a
@@ -1067,7 +1147,11 @@ async def main(resume_id: str = "") -> None:
                     print(f"  {S.MUTED}✎ session titled: {S.GRAY}{config.SESSION_TITLE}{S.R}\n")
 
         except Exception as e:
-            print(f"\n  {S.ERR}✗ Error: {e}{S.R}\n")
+            # Wrapped rather than run off the edge: this catches a provider
+            # refusing the request, and that message names the key, the quota
+            # or the model id that has to change.
+            print()
+            connect._print_problem("Error", e)
         finally:
             # `/tdd` is armed for one request and lifts itself here - including
             # when the turn ended in an error or the user interrupted it. A

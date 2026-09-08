@@ -163,7 +163,14 @@ def _acquire() -> int | None:
         try:
             abandoned = time.time() - os.path.getmtime(path) > _LOCK_STALE
         except OSError:
-            continue                 # it went away between the two calls: try again
+            # It went away between the two calls, or it cannot be stat'd at
+            # all. Either way this must not become a tight loop: the deadline
+            # is what turns "cannot read the lock" into "write anyway" rather
+            # than into a prompt that never comes back.
+            if time.time() > give_up:
+                return None
+            time.sleep(0.05)
+            continue
         if abandoned or time.time() > give_up:
             _unlink(path)
             if time.time() > give_up:

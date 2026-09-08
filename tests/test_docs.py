@@ -72,16 +72,52 @@ check("app.py defines commands", len(commands) > 15, f"{len(commands)} found")
 check("README documents every one",
       not [c for c in commands if f"`{c}" not in README],
       str([c for c in commands if f"`{c}" not in README]))
-completer = re.search(r"SlashCommandCompleter\(\[(.*?)\]\)", APP, re.S)
-check("the tab-completion list exists", completer is not None)
-if completer:
-    completable = set(re.findall(r"'(/[a-z]+)'", completer.group(1)))
-    check("every command is tab-completable",
-          not [c for c in commands if c not in completable],
-          str([c for c in commands if c not in completable]))
-helped = set(re.findall(r'\("(/[a-z]+)', TUI))
+# The menu and `/help` are now rendered from one table, so the question is no
+# longer "do these two hand-written lists agree" but "does that table cover
+# every command app.py answers". `command_names()` is what the menu is built
+# from, so asking it is asking the menu.
+from simple_harness import tui                                      # noqa: E402
+
+completable = {insert for insert, _, _ in tui.complete_command("/")}
+check("the tab-completion menu is built from the command table",
+      "SlashCommandCompleter(complete_command)" in APP and len(completable) > 15,
+      f"{len(completable)} names")
+check("and every suggestion says what it does",
+      not [i for i, _, meta in tui.complete_command("/") if not meta.strip()],
+      str([i for i, _, meta in tui.complete_command("/") if not meta.strip()]))
+check("every command is tab-completable",
+      not [c for c in commands if c not in completable],
+      str([c for c in commands if c not in completable]))
+helped = set(name.split()[0] for name, _ in tui.COMMANDS)
 check("every command is in /help", not [c for c in commands if c not in helped],
       str([c for c in commands if c not in helped]))
+check("and every row in the table describes something",
+      not [name for name, desc in tui.COMMANDS if not desc.strip()],
+      str([name for name, desc in tui.COMMANDS if not desc.strip()]))
+# The table is the help, so a row naming a command app.py does not answer is a
+# promise nothing keeps.
+check("no row promises a command that does not exist",
+      not [c for c in helped if c not in commands and c not in ("/exit",)],
+      str([c for c in helped if c not in commands and c not in ("/exit",)]))
+
+# Every on/off command reads the same way, or none of them does. Six answered a
+# bare `/x` with "✗ Usage:" and no word about what the switch was even for,
+# while three explained themselves - and the six also skipped the blank line
+# the rest of the loop ends on. `/mcp` and `/agents` take `on`/`off` too but
+# are not only switches: a bare one shows a screen of its own, so they have
+# more than one row for good reason and are checked apart from the rest.
+NOT_ONLY_SWITCHES = ("/mcp", "/agents")
+switches = [name.split()[0] for name, _ in tui.COMMANDS if "[on/off]" in name]
+check("every switch is spelled the same way in /help", len(switches) >= 8, str(switches))
+
+pure = [s for s in switches if s not in NOT_ONLY_SWITCHES]
+doubled = [s for s in pure if sum(1 for n, _ in tui.COMMANDS if n.split()[0] == s) > 1]
+check("a switch is one row, not one to read and one to set", not doubled, str(doubled))
+
+undelegated = [s for s in switches
+               if re.search(rf'_switch\(\s*\n?\s*"{re.escape(s)}"', APP) is None]
+check("and each goes through the one shared switch", not undelegated,
+      str(undelegated))
 
 print("\n--- the settings README documents still exist ---")
 documented_settings = set(re.findall(r"^\| `([A-Z][A-Z0-9_]+)` \|", README, re.M))

@@ -287,7 +287,8 @@ def loaded_skill_names(messages: list[dict]) -> list[str]:
 
     Used to rebuild the loaded-skill state when a saved session is restored.
     """
-    blob = "\n".join(m.get("content", "") for m in messages)
+    blob = "\n".join(m.get("content") for m in messages
+                     if isinstance(m.get("content"), str))
     return [s["name"] for s in list_skills() if f"[Skill: {s['name']}]\nSource:" in blob]
 
 

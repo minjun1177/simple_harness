@@ -91,7 +91,10 @@ def require(stream=None) -> bool:
     out = stream or sys.stdout
     print("\n" + TEXT + "\n", file=out)
 
-    if not sys.stdin.isatty():
+    # `sys.stdin` is None under pythonw and in some embedded launchers, where
+    # asking `isatty()` is itself the crash - before the program has printed
+    # anything a person could act on.
+    if sys.stdin is None or not sys.stdin.isatty():
         print(f"Agree once in a terminal, or set {ACCEPT_ENV}=1 to agree here.\n",
               file=out)
         return False

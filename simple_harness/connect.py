@@ -12,10 +12,26 @@ takes arguments for the times you already know what you want:
 """
 
 import os
+import textwrap
 
 from simple_harness import config
 from simple_harness import providers
-from simple_harness.config import S, _hr
+from simple_harness.config import S, _hr, tw
+
+
+def _print_problem(what: str, error) -> None:
+    """A failure, in full, wrapped to the terminal rather than cut off.
+
+    Providers answer a refused request with a sentence that names the reason
+    and often the page that fixes it. Cutting that to fit one line removed the
+    half worth reading, which is the half at the end.
+    """
+    print(f"  {S.ERR}✗ {what}:{S.R}")
+    width = max(30, tw() - 6)
+    for paragraph in str(error).splitlines() or [""]:
+        for line in textwrap.wrap(paragraph.strip(), width) or [""]:
+            print(f"  {S.MUTED}  {line}{S.R}")
+    print()
 
 
 def _ask(prompt: str) -> str:
@@ -144,7 +160,11 @@ def _pick_model(name: str) -> str:
     try:
         models = provider.list_models()
     except Exception as error:
-        print(f"\r\033[K  {S.ERR}✗ Could not list models: {str(error)[:160]}{S.R}\n")
+        # Wrapped, not cut. This is where a wrong API key is normally met, and
+        # the sentence that says which key and how to fix it is longer than any
+        # single line - truncating it left the one useful half off the end.
+        print("\r\033[K", end="")
+        _print_problem("Could not list models", error)
         return _ask(f"  {S.INFO}Model id{S.R} {S.MUTED}(blank to cancel){S.R} {S.INFO}›{S.R} ")
     print("\r\033[K", end="")
 

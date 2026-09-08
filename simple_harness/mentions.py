@@ -92,7 +92,7 @@ def _read(path: str) -> tuple[bool, str]:
     elif os.path.exists(path):
         body = tools.handle_read_file(path)
     else:
-        return False, f"no such file or directory"
+        return False, "no such file or directory"
 
     if body.startswith(config.TOOL_ERROR_PREFIX):
         return False, body[len(config.TOOL_ERROR_PREFIX):].strip()

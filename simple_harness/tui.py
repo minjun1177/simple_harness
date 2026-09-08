@@ -125,81 +125,258 @@ def _welcome():
     print()
 
 
+# Every slash command, written down once.
+#
+# `_show_help` renders this and `app.py` builds its completion menu from
+# `command_names()`, so a command cannot be added to one and forgotten by the
+# other - which is exactly how `/mcp on`, `/tdd off` and `/set <NAME>` ended up
+# working but undocumented. The same reasoning as `toolspec.TOOLS`: one table,
+# rendered rather than transcribed (invariant 5.1).
+#
+# `[on/off]` rather than `<on/off>` throughout, and one row per switch rather
+# than two, because every switch here behaves the same way - typed alone it
+# says what it does and where it stands, and `on` or `off` changes it. That was
+# true of three of them and an error message on the other six.
+COMMANDS = (
+    # -- getting around ----------------------------------------------------
+    ("/help", "Show this list"),
+    ("/clear", "Forget the conversation and start a fresh one"),
+    ("/usage", "What this conversation has cost: one bar per turn, the "
+               "cumulative total, and what every request pays before the "
+               "conversation is even counted"),
+    ("/exit", "Leave the chat. /quit does the same"),
+
+    # -- which model answers -----------------------------------------------
+    ("/connect", "Pick a provider and one of its models, step by step"),
+    ("/connect <provider> [model]", "Connect straight to one, e.g. /connect anthropic"),
+    ("/connect status", "Every provider, whether it can be used, and where its key comes from"),
+    ("/connect forget <provider>", "Delete the API key saved for a provider"),
+    ("/model", "Show the connected provider and pick another of its models"),
+    ("/models", "List the models the connected provider offers"),
+
+    # -- conversations -----------------------------------------------------
+    ("/sessions", "Saved conversations, newest first"),
+    ("/load <id|title>", "Open a saved conversation, by id or by title"),
+    ("/title [name]", "Show this session's title, or set it"),
+    ("/autotitle [on/off]", "Whether the model names a new session after its first exchange"),
+    ("/export [filename]", "Write the conversation out as markdown"),
+    ("/record [on/off]", "Whether conversations are saved to disk at all"),
+
+    # -- what the model is allowed to do -----------------------------------
+    ("/automode [on/off]", "Whether tools run without asking. Off means every "
+                           "guarded tool waits for you"),
+    ("/perms", "The rules that decide what runs without asking"),
+    ("/perms reload", "Re-read the permission rule files"),
+    ("/perms allow|deny <rule>", "Add a rule, e.g. /perms allow run_cmd(git *)"),
+    ("/planmode [on/off]", "Whether the model must submit a plan before it changes anything"),
+    ("/tdd [request]", "Run one request with this project's test files locked, so "
+                       "\"make the test pass\" cannot be answered by editing the test"),
+    ("/tdd off", "Lift that lock again"),
+
+    # -- taking it back ----------------------------------------------------
+    ("/undo", "Take back the last file change the AI committed"),
+    ("/autocommit [on/off]", "Whether each file an AI tool changes gets a commit "
+                             "of its own. On its own it also lists the recent ones"),
+    ("/autoverify [on/off]", "Whether this project's own tests run after an edit, "
+                             "with a failure handed straight back to the model"),
+
+    # -- how it answers ----------------------------------------------------
+    ("/deepthink [on/off]", "Whether one request becomes plan, check, build, "
+                            "review, revise and verify"),
+    ("/think [on/off]", "Whether a reasoning model's thinking is shown. It is "
+                        "never kept in the conversation history either way"),
+    ("/system <prompt>", "Put a persona in front of the system prompt"),
+    ("/system reset", "Take that persona back out"),
+    ("/fullcontent [on/off]", "Whether a file or page reaches the model whole, "
+                              "or cut short"),
+    ("/set", "Every setting, with the ones you have changed marked"),
+    ("/set <NAME>", "Show one of them on its own"),
+    ("/set <NAME> <value>", "Change it, now and for the next session"),
+    ("/set <NAME> default", "Put it back to what config.py says"),
+
+    # -- skills and MCP servers --------------------------------------------
+    ("/skills", "The skills on disk, and which are loaded"),
+    ("/skills reload", "Rescan the skill directories"),
+    ("/skill <name>", "Load one into this conversation yourself"),
+    ("/mcp", "The attached MCP servers, and what each one exposes"),
+    ("/mcp tools|prompts|all [name]", "List what a server exposes, in full"),
+    ("/mcp resources [name]", "List the resources the servers expose"),
+    ("/mcp prompt <server> <name>", "Fetch a server's prompt into the conversation"),
+    ("/mcp reload", "Re-read .mcp.json and reconnect every server"),
+    ("/mcp connect <name>", "Reconnect a single server"),
+    ("/mcp [on/off]", "Whether MCP servers are used at all"),
+
+    # -- the other agents, and the scratch VM ------------------------------
+    ("/agents", "The other AI agents working in this project, and what each holds"),
+    ("/agents say <text>", "Say something to all of them yourself"),
+    ("/agents release <path>", "Take a file back from the agent holding it"),
+    ("/agents [on/off]", "Whether this session appears on the agent board"),
+    ("/vm", "The Python scratch process run_python uses, and where it runs"),
+    ("/vm reset", "Throw away every variable the model left in it"),
+    ("/vm stop", "End the process; the next run_python starts a new one"),
+)
+
+# Not slash commands: these two act on the line being typed, so they are listed
+# apart from the table rather than pretending to belong to it.
+PREFIXES = (
+    ("@<path>", "Attach a file or directory to the message. Typing @ opens a "
+                "list of what is here - arrows to move, Tab to insert"),
+    ("!<command>", "Run a shell command yourself. Its output joins the "
+                   "conversation, so the next question can be about it"),
+)
+
+
+def command_names() -> list:
+    """The bare commands, for the completion menu - `/mcp` once, not six times."""
+    names = []
+    for entry, _ in COMMANDS:
+        name = entry.split()[0]
+        if name not in names:
+            names.append(name)
+    return names
+
+
+# Spellings that are not rows of their own. `/quit` is `/exit`, described once
+# and offered twice.
+ALIASES = {"/quit": "/exit"}
+
+# A bracketed word is a placeholder for something only the person knows - a
+# path, a rule, a request. `[on/off]` is the exception: both of its values are
+# literally what you type, so they are worth offering.
+_CHOICES = {"[on/off]": ("on", "off")}
+
+
+def _describe(command: str) -> str:
+    """What a command does, from the first row that names it."""
+    for entry, description in COMMANDS:
+        if entry.split()[0] == command:
+            return description
+    return ""
+
+
+def _variants(entry: str) -> list:
+    """The concrete lines one table row can be typed as, and how each reads.
+
+    A row is written to be read - `/mcp tools|prompts|all [name]`,
+    `/perms allow|deny <rule>` - so the alternatives are expanded and the
+    placeholders dropped at the first one. Each variant carries its *own*
+    spelling rather than the row it came from: three suggestions all displayed
+    as `tools|prompts|all` say nothing about which is which.
+
+    Returns (what to insert, what to show) pairs.
+    """
+    tokens = entry.split()
+    lines = [[tokens[0]]]
+    tail = []
+    for index, token in enumerate(tokens[1:], 1):
+        options = _CHOICES.get(token)
+        if options is None:
+            if token.startswith(("<", "[")):
+                tail = tokens[index:]       # free text: shown, never completed
+                break
+            options = token.split("|")
+        lines = [line + [option] for line in lines for option in options]
+    if len(lines[0]) == 1:
+        return []                   # the bare command, offered on its own below
+    suffix = (" " + " ".join(tail)) if tail else ""
+    return [(" ".join(line), " ".join(line) + suffix) for line in lines]
+
+
+def _dynamic(command: str, typed: str) -> list:
+    """Names only this machine knows: the settings, the skills, the providers.
+
+    These are the completions worth having most, because they are the ones
+    nobody remembers - `/set` has sixty names and `/skill` has whatever is on
+    disk. Each is cheap to ask and wrapped, so a menu can never be what breaks.
+    """
+    rows = []
+    try:
+        if command == "/set" and typed.count(" ") == 1:
+            for name, value in sorted(config.settable().items()):
+                rows.append((f"/set {name}", f"/set {name}",
+                             f"now {_fmt_setting(value)}"))
+        elif command == "/skill" and typed.count(" ") == 1:
+            for skill in list_skills():
+                rows.append((f"/skill {skill['name']}", f"/skill {skill['name']}",
+                             skill["description"][:80]))
+        elif command == "/connect" and typed.count(" ") == 1:
+            for name in providers.PROVIDERS:
+                provider = providers.build(name)
+                rows.append((f"/connect {name}", f"/connect {name}",
+                             provider.ready() or f"ready · {provider.model}"))
+        elif command == "/mcp" and typed.startswith("/mcp connect "):
+            for server in mcp_client.all_servers():
+                rows.append((f"/mcp connect {server.name}",
+                             f"/mcp connect {server.name}", server.state))
+    except Exception:
+        return []
+    return rows
+
+
+def complete_command(text: str) -> list:
+    """What could follow `text`, as (insert, show, describe) rows.
+
+    Two questions, and the space between them decides which is being asked.
+    Before it, the command itself - every name that starts the way this one
+    does, each with what it is for. After it, what may come next: the
+    sub-commands the table lists, and the names this machine can supply.
+    """
+    text = text.lstrip()
+    if not text.startswith("/"):
+        return []
+
+    if " " not in text:
+        rows = []
+        for name in command_names():
+            if name.startswith(text):
+                rows.append((name, name, _describe(name)))
+        for alias, target in ALIASES.items():
+            if alias.startswith(text):
+                rows.append((alias, alias, _describe(target)))
+        return rows
+
+    command = text.split()[0]
+    rows, seen = [], set()
+    for entry, description in COMMANDS:
+        if entry.split()[0] != command:
+            continue
+        for line, shown in _variants(entry):
+            if line.startswith(text) and line not in seen:
+                seen.add(line)
+                rows.append((line, shown, description))
+    for insert, shown, meta in _dynamic(command, text):
+        if insert.startswith(text) and insert not in seen:
+            seen.add(insert)
+            rows.append((insert, shown, meta))
+    return rows
+
+
+def _show_rows(rows) -> None:
+    """One aligned, wrapped column of names against another of descriptions.
+
+    Wrapped rather than left to run off the edge: the table used to print each
+    description on one line however long it was, so on any ordinary terminal
+    the end of the longest - which is where the useful half of a sentence sits -
+    was simply not on screen.
+    """
+    width = max(len(name) for name, _ in rows)
+    room = max(24, tw() - width - 6)
+    for name, description in rows:
+        lines = textwrap.wrap(description, room) or [""]
+        print(f"  {S.ACCENT}{name:<{width}}{S.R}  {S.GRAY}{lines[0]}{S.R}")
+        for line in lines[1:]:
+            print(f"  {' ' * width}  {S.GRAY}{line}{S.R}")
+
+
 def _show_help():
-    commands = [
-        ("/help",  "Show this help message"),
-        ("/usage", "Show token usage history graph"),
-        ("/clear", "Clear conversation history"),
-        ("/connect", "Connect a provider (Ollama, Anthropic, OpenAI, Gemini)"),
-        ("/connect status", "Show every provider and whether it is usable"),
-        ("/model", "Show the current provider and pick a model"),
-        ("/models", "List models from the connected provider"),
-        ("/sessions", "List saved sessions"),
-        ("/load <id|title>", "Load a past session by ID or title"),
-        ("/title [name]", "Show or set the current session's title"),
-        ("/autotitle <on/off>", "Toggle letting the model name new sessions"),
-        ("/exit",  "Exit the chat"),
-        ("/automode <on/off>", "Toggle allow modal"),
-        ("/fullcontent <on/off>", "Toggle returning all file content"),
-        ("/record <on/off>", "Toggle saving chat history to sessions"),
-        ("/export [filename]", "Export conversation to a markdown file"),
-        ("/system <prompt>", "Change the system prompt"),
-        ("/planmode <on/off>", "Toggle plan mode (forces AI to write a plan first)"),
-        ("/skills", "List available skills"),
-        ("/skills reload", "Rescan skill directories and refresh the system prompt"),
-        ("/skill <name>", "Load a skill into the current conversation manually"),
-        ("/mcp", "Show attached MCP servers and their tools"),
-        ("/mcp reload", "Re-read .mcp.json and reconnect every server"),
-        ("/mcp connect <name>", "Reconnect a single MCP server"),
-        ("/mcp tools [name]", "List the tools an MCP server exposes"),
-        ("/mcp resources [name]", "List MCP resources"),
-        ("/mcp prompt <server> <name>", "Insert an MCP prompt into the conversation"),
-        ("/perms", "Show the tool permission rules"),
-        ("/perms reload", "Re-read the permission rule files"),
-        ("/perms allow|deny <rule>", "Add a rule, e.g. /perms allow run_cmd(git *)"),
-        ("/think <on/off>", "Show or hide a reasoning model's thinking"),
-        ("/deepthink", "Show the plan-check-build-review-revise-verify chain and whether it is on"),
-        ("/deepthink <on/off>", "Turn that chain on or off"),
-        ("/agents", "Show the other AI agents working in this project"),
-        ("/agents say <text>", "Say something to all of them yourself"),
-        ("/agents release <path>", "Take a file back from the agent holding it"),
-        ("/agents <on/off>", "Whether this session appears on the agent board"),
-        ("/vm", "Show the Python scratch process run_python uses, and where it runs"),
-        ("/vm reset", "Throw away every variable the model left in it"),
-        ("/vm stop", "End the process; the next run_python starts a new one"),
-        ("/set", "Show every setting, and which ones you have changed"),
-        ("/set <NAME> <value>", "Change one, e.g. /set NUM_CTX 32768. Saved for next time"),
-        ("/set <NAME> default", "Put it back to what config.py says"),
-        ("/connect forget <provider>", "Delete the API key saved for a provider"),
-        ("/undo", "Take back the last file change the AI committed"),
-        ("/autocommit", "Whether each AI edit gets its own git commit, and the recent ones"),
-        ("/autocommit <on/off>", "Turn that on or off"),
-        ("/autoverify", "Whether an edit is checked against the project's own tests"),
-        ("/autoverify <on/off>", "Turn that on or off"),
-        ("/tdd <request>", "Run one request with this project's test files locked"),
-        ("/tdd", "Arm that for your next message; /tdd off lifts it"),
-    ]
-    # Not slash commands: these two act on the line itself, so they are listed
-    # apart from the table rather than pretending to belong to it.
-    prefixes = [
-        ("@<path>", "Attach a file or directory to the message. Typing @ opens a "
-                    "list of what is here - arrows to move, Tab to insert"),
-        ("!<command>", "Run a shell command yourself. Its output joins the "
-                       "conversation, so the next question can be about it"),
-    ]
     print()
     print(f"  {S.BOLD}{S.ACCENT}Commands{S.R}")
     print(f"  {_hr(width=44)}")
-    for cmd, desc in commands:
-        print(f"  {S.ACCENT}{cmd:22}{S.R} {S.GRAY}{desc}{S.R}")
+    _show_rows(COMMANDS)
     print()
     print(f"  {S.BOLD}{S.ACCENT}In a message{S.R}")
     print(f"  {_hr(width=44)}")
-    for cmd, desc in prefixes:
-        wrapped = textwrap.wrap(desc, max(30, tw() - 32)) or [""]
-        print(f"  {S.ACCENT}{cmd:22}{S.R} {S.GRAY}{wrapped[0]}{S.R}")
-        for line in wrapped[1:]:
-            print(f"  {' ' * 22} {S.GRAY}{line}{S.R}")
+    _show_rows(PREFIXES)
     print()
 
 
@@ -349,7 +526,10 @@ def _show_mcp(detail: str = "", only: str = ""):
                     print(f"  {S.MUTED}│{S.R}    {S.PURPLE}prompt{S.R} {S.WHITE}{prompt.get('name', '')}{S.R}"
                           f"  {S.GRAY}{' '.join(str(prompt.get('description') or '').split())[:70]}{S.R}")
         elif server.state == "failed":
-            for line in textwrap.wrap(server.error, width=wrap_width)[:4]:
+            # `/mcp` is where somebody goes *because* a server failed, so this
+            # is the one screen that must not hold the reason back. Four lines
+            # cut a token error off before the part naming the variable to set.
+            for line in textwrap.wrap(server.error, width=wrap_width):
                 print(f"  {S.MUTED}│{S.R}  {S.ERR}{line}{S.R}")
         print(f"  {S.MUTED}╰─{S.R}")
 
@@ -434,11 +614,22 @@ def _show_settings(only: str = "") -> None:
 
     changed = config.saved_settings()
     defaults = config.defaults()
+
+    def family(name: str) -> int:
+        """How many settings share this one's first word - itself included.
+
+        `DEEPTHINK` and `DEEPTHINK_MAX_PASSES` are one subject and were counted
+        as two loners, because only names with something *after* the prefix
+        were counted. The bare name is a member of its own family.
+        """
+        prefix = name.split("_")[0]
+        return sum(1 for other in settings
+                   if other == prefix or other.startswith(prefix + "_"))
+
     groups: dict = {}
     for name, value in settings.items():
-        prefix = name.split("_")[0]
-        # A prefix shared by one setting is not a group, it is a name.
-        key = prefix if sum(1 for n in settings if n.startswith(prefix + "_")) > 1 else ""
+        # A first word shared by one setting is not a group, it is a name.
+        key = name.split("_")[0] if family(name) > 1 else ""
         groups.setdefault(key, []).append((name, value))
 
     print(f"\n  {S.BOLD}{S.ACCENT}Settings{S.R}  "
@@ -447,8 +638,12 @@ def _show_settings(only: str = "") -> None:
     width = max((len(n) for n in settings), default=10)
     for key in sorted(groups, key=lambda k: (k == "", k)):
         rows = groups[key]
-        if key and not only:
-            print(f"  {S.MUTED}{key.lower()}{S.R}")
+        if not only:
+            # The leftovers get a heading of their own. Without one they were
+            # printed straight under the last group's rows, which put a dozen
+            # settings that have nothing to do with the scratch VM under `vm` -
+            # the heading above them was the only thing saying otherwise.
+            print(f"  {S.MUTED}{key.lower() if key else 'everything else'}{S.R}")
         for name, value in rows:
             mark = f"{S.OK}•{S.R}" if name in changed else " "
             was = (f"  {S.MUTED}(was {_fmt_setting(defaults.get(name))}){S.R}"
@@ -478,6 +673,10 @@ def _approval_prompt(action_label: str, details: list[tuple[str, str]], rule: st
     w = max(40, tw() - 8)
     print(f"  {S.WARN}╭{'─' * w}╮{S.R}")
     for label, value in details:
+        # The one place every tool's arguments are shown, so it sees whatever a
+        # model sent - a dict where a path was wanted, a number, None. The gate
+        # in front of `run_cmd` and `delete_file` must not be what raises.
+        label, value = str(label), value if isinstance(value, str) else str(value)
         label_w = _disp_width(label)
         max_val = w - label_w - 5
         val_display = value if len(value) <= max_val else value[:max_val - 3] + "..."

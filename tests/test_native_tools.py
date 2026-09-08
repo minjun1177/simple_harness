@@ -172,14 +172,44 @@ check("and one with parameters keeps them",
                      if d["name"] == "read_file"][0]["parameters"]["properties"])
 
 print("\n--- Ollama decides per model, not per provider ---")
-providers._ollama_capabilities.update({"toolful:1b": True, "toolless:1b": False})
+# Keyed by (host, model): the same model name on another machine is another
+# model, so an answer cached against one daemon must not be handed to another.
+here = providers.OllamaProvider({"model": "toolful:1b"}).host
+providers._ollama_capabilities.update({(here, "toolful:1b"): True,
+                                       (here, "toolless:1b"): False})
 check("a model whose template can call tools gets the native path",
       providers.OllamaProvider({"model": "toolful:1b"}).supports_native_tools)
 check("one whose template cannot keeps the text protocol",
       not providers.OllamaProvider({"model": "toolless:1b"}).supports_native_tools)
+check("the answer does not follow the model name to another daemon",
+      not providers.OllamaProvider({"model": "toolful:1b",
+                                    "base_url": "http://127.0.0.1:1"}).supports_native_tools)
 check("a model nobody can ask about falls back to text",
       not providers.ollama_supports_tools("no-such-model-xyz:1b"))
 check("no model at all is not native", not providers.ollama_supports_tools(""))
+
+print("\n--- and where that daemon is can be said ---")
+saved = config.OLLAMA_HOST
+try:
+    os.environ.pop("OLLAMA_HOST", None)
+    check("it defaults to localhost",
+          providers.OllamaProvider({}).host == "http://localhost:11434",
+          providers.OllamaProvider({}).host)
+    os.environ["OLLAMA_HOST"] = "http://from-the-environment:11434"
+    check("the environment is honoured while the setting is untouched",
+          providers.OllamaProvider({}).host == "http://from-the-environment:11434",
+          providers.OllamaProvider({}).host)
+    config.OLLAMA_HOST = "http://from-set:9999"
+    check("and /set wins over the environment",
+          providers.OllamaProvider({}).host == "http://from-set:9999",
+          providers.OllamaProvider({}).host)
+    check("a base_url saved by /connect wins over both",
+          providers.OllamaProvider({"base_url": "http://saved:1/"}).host
+          == "http://saved:1")
+    check("it is a setting /set can reach", "OLLAMA_HOST" in config.settable())
+finally:
+    config.OLLAMA_HOST = saved
+    os.environ.pop("OLLAMA_HOST", None)
 check("it takes OpenAI's tool shape",
       providers.OllamaProvider({}).encode_tools(SCHEMAS)[0]["type"] == "function")
 

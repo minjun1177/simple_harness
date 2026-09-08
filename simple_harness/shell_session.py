@@ -365,10 +365,14 @@ def start(command: str):
 def register(session: Session) -> None:
     _sessions[session.id] = session
     prune()
-    limit = int(_cfg("CMD_MAX_SESSIONS", 3))
+    # At least one, whatever the setting says. `CMD_MAX_SESSIONS` is a number
+    # somebody can set to nought, and nought here meant killing the command
+    # that was registering - the one the model is about to send input to.
+    limit = max(1, int(_cfg("CMD_MAX_SESSIONS", 3)))
     while len(_sessions) > limit:
         oldest = min(_sessions.values(), key=lambda s: s.started)
         oldest.close()
+        _sessions.pop(oldest.id, None)      # close() normally does; never loop if not
 
 
 def prune() -> None:

@@ -2,7 +2,6 @@ import re
 import sys
 import asyncio
 import itertools
-import ollama
 from simple_harness import config
 from simple_harness import providers
 from simple_harness.config import S, smrp
@@ -41,7 +40,7 @@ def _wide_chars(text: str) -> int:
 def _raw_estimate(messages: list[dict]) -> float:
     total = 0.0
     for message in messages:
-        content = message.get("content", "") or ""
+        content = _text(message)
         wide = _wide_chars(content)
         total += wide / _WIDE_CHARS_PER_TOKEN
         total += (len(content) - wide) / _LATIN_CHARS_PER_TOKEN
@@ -80,10 +79,14 @@ def _get_ctx_budget() -> int:
 def _get_summary_predict_tokens() -> int:
     # Sized off the local model's weights, which only Ollama reports; a hosted
     # model gets the middle setting.
-    if providers.current().name != "ollama":
+    provider = providers.current()
+    if provider.name != "ollama":
         return 400
     try:
-        model_list = ollama.list()
+        # Through the provider's host, not a bare `ollama.list()`: pointing the
+        # harness at another machine used to move the chat and leave this
+        # asking localhost what the model weighs.
+        model_list = providers.ollama_client(getattr(provider, "host", "")).list()
         m_list = model_list.get("models", []) if isinstance(model_list, dict) else getattr(model_list, 'models', [])
         for m in m_list:
             name = m.get("model", m.get("name", "")) if isinstance(m, dict) else getattr(m, 'model', getattr(m, 'name', ''))
@@ -126,11 +129,24 @@ _TAIL_SHARE = 0.35
 _TRIM_STEPS = (24000, 12000, 6000, 3000)
 
 
+def _text(message: dict) -> str:
+    """A message's content as a string, whatever the message actually holds.
+
+    `None` is the case that matters: a session file written with a null content,
+    or a provider that reported a tool call and no text, puts one into the
+    history - and every `startswith` below then raises on *every* later turn,
+    because the bad message stays where it is. `_raw_estimate` has always
+    defended against it; the rest of this module did not.
+    """
+    content = message.get("content")
+    return content if isinstance(content, str) else ""
+
+
 def _trim_tool_results(messages: list[dict], max_chars: int = 3000) -> list[dict]:
     result = []
     for m in messages:
-        content = m.get("content", "")
-        if m["role"] == "user" and content.startswith("[Tool Result") and len(content) > max_chars:
+        content = _text(m)
+        if m.get("role") == "user" and content.startswith("[Tool Result") and len(content) > max_chars:
             tail_chars = int(max_chars * _TAIL_SHARE)
             head_chars = max_chars - tail_chars
             omitted = len(content) - max_chars
@@ -180,9 +196,9 @@ def _get_conv_pairs(messages: list[dict]) -> list[list[dict]]:
     pairs: list[list[dict]] = []
     current: list[dict] = []
     for m in messages:
-        if m["role"] == "system":
+        if m.get("role") == "system":
             continue
-        if m["role"] == "user" and not m["content"].startswith("[Tool Result"):
+        if m.get("role") == "user" and not _text(m).startswith("[Tool Result"):
             if current:
                 pairs.append(current)
             current = [m]
@@ -194,17 +210,17 @@ def _get_conv_pairs(messages: list[dict]) -> list[list[dict]]:
 
 
 async def _compress_context(messages: list[dict]) -> bool:
-    conv_msgs = [m for m in messages if m["role"] != "system"]
+    conv_msgs = [m for m in messages if m.get("role") != "system"]
     if not conv_msgs:
         return False
 
     predict_tokens = _get_summary_predict_tokens()
     prompt = smrp()
     for m in conv_msgs:
-        role = "User" if m["role"] == "user" else "Assistant"
-        content = re.sub(r'<tool_call>.*?</tool_call>', '', m['content'], flags=re.DOTALL).strip()
+        role = "User" if m.get("role") == "user" else "Assistant"
+        content = re.sub(r'<tool_call>.*?</tool_call>', '', _text(m), flags=re.DOTALL).strip()
         if content:
-            if m["role"] == "user" and m["content"].startswith("[Tool Result"):
+            if m.get("role") == "user" and _text(m).startswith("[Tool Result"):
                 content = content[:400] + ("..." if len(content) > 400 else "")
             prompt += f"[{role}]: {content}\n\n"
 
@@ -233,7 +249,7 @@ async def _compress_context(messages: list[dict]) -> bool:
     spin_task = asyncio.create_task(spinner())
     try:
         summary = await providers.complete(summary_msg, max_tokens=predict_tokens)
-    except Exception as e:
+    except Exception:
         summary = ""
     finally:
         if not spin_task.done():
@@ -259,7 +275,7 @@ def _sync_loaded_skills(messages: list[dict]) -> None:
     """
     if not config.LOADED_SKILLS:
         return
-    blob = "\n".join(m.get("content", "") for m in messages)
+    blob = "\n".join(_text(m) for m in messages)
     config.LOADED_SKILLS[:] = [n for n in config.LOADED_SKILLS if f"[Skill: {n}]\nSource:" in blob]
 
 
@@ -287,14 +303,18 @@ async def _manage_context(messages: list[dict]) -> None:
 
     # Each candidate is built from the untrimmed list, so a result is never
     # trimmed twice and the omission counts stay true.
+    tightest = list(messages)
     for ceiling in _TRIM_STEPS:
-        candidate = _trim_tool_results(messages, ceiling)
-        if _estimate_tokens(candidate) <= budget:
-            if candidate != messages:
-                messages[:] = candidate
+        tightest = _trim_tool_results(messages, ceiling)
+        if _estimate_tokens(tightest) <= budget:
+            if tightest != messages:
+                messages[:] = tightest
             return
 
-    messages[:] = candidate
+    # None of the ceilings was enough, so the tightest one stands and the rest
+    # of this function goes on to compress. Named rather than left as the loop
+    # variable: an empty `_TRIM_STEPS` would otherwise be a NameError here.
+    messages[:] = tightest
 
     pairs = _get_conv_pairs(messages)
     n_pairs = len(pairs)

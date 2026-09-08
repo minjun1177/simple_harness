@@ -58,6 +58,10 @@ PROJECT_CONFIG_FILES = (".mcp.json", "mcp.json")
 USER_CONFIG_FILE = paths.state("mcp.json")
 
 STDERR_KEEP_LINES = 60
+# A server that refuses a connection says why in its body, and an auth failure
+# says which token and where to get one. Cutting that to 200 characters removed
+# the half worth reading - the same trap `providers._error_detail` exists for.
+ERROR_DETAIL_CHARS = 2000
 LIST_PAGE_LIMIT = 20            # pagination safety valve for tools/resources/prompts
 DESC_MAX_LENGTH = 500           # per tool description, in the system prompt
 PARAM_DESC_MAX_LENGTH = 260
@@ -223,6 +227,19 @@ class StdioTransport:
         except Exception:
             try:
                 self.proc.kill()
+                # Reaped, not just signalled. Without this the child stays a
+                # zombie for the life of the harness, and `/mcp reload` on a
+                # server that will not exit leaves one behind every time.
+                self.proc.wait(timeout=3)
+            except Exception:
+                pass
+        # The reader threads are gone with the process; their pipes are not, and
+        # a session that reloads its servers a few times runs the file
+        # descriptors down.
+        for stream in (self.proc.stdout, self.proc.stderr):
+            try:
+                if stream is not None and not stream.closed:
+                    stream.close()
             except Exception:
                 pass
         self.proc = None
@@ -293,27 +310,36 @@ class HTTPTransport:
             self.session_id = session_id
 
         if response.status_code >= 400:
-            body = (response.text or "")[:300].strip()
+            body = (response.text or "").strip()[:ERROR_DETAIL_CHARS]
             raise MCPError(f"HTTP {response.status_code}{f' - {body}' if body else ''}")
 
-        content_type = (response.headers.get("Content-Type") or "").lower()
-        if "text/event-stream" in content_type:
-            for _event, data in iter_sse(response):
-                if not data.strip():
-                    continue
-                try:
-                    self._deliver(json.loads(data))
-                except json.JSONDecodeError:
-                    continue
-            return
-
-        body = response.content
-        if not body:
-            return              # 202 Accepted: the reply to a notification
+        # Closed either way: these are streamed responses, so the connection is
+        # held until the body is released. One per JSON-RPC message, and a tool
+        # loop sends a great many.
         try:
-            self._deliver(json.loads(body.decode("utf-8", "replace")))
-        except json.JSONDecodeError:
-            raise MCPError("server returned a non-JSON body")
+            content_type = (response.headers.get("Content-Type") or "").lower()
+            if "text/event-stream" in content_type:
+                for _event, data in iter_sse(response):
+                    if not data.strip():
+                        continue
+                    try:
+                        self._deliver(json.loads(data))
+                    except json.JSONDecodeError:
+                        continue
+                return
+
+            body = response.content
+            if not body:
+                return          # 202 Accepted: the reply to a notification
+            try:
+                self._deliver(json.loads(body.decode("utf-8", "replace")))
+            except json.JSONDecodeError:
+                raise MCPError("server returned a non-JSON body")
+        finally:
+            try:
+                response.close()
+            except Exception:
+                pass
 
     def _deliver(self, message) -> None:
         if self._on_message:
@@ -417,7 +443,8 @@ class SSETransport:
         except Exception as e:
             raise MCPError(f"HTTP request failed: {e}")
         if response.status_code >= 400:
-            raise MCPError(f"HTTP {response.status_code} - {(response.text or '')[:200]}")
+            raise MCPError(f"HTTP {response.status_code} - "
+                           f"{(response.text or '').strip()[:ERROR_DETAIL_CHARS]}")
 
     def close(self) -> None:
         try:
@@ -1037,7 +1064,8 @@ def loaded_in(messages: list) -> list:
     compressor can drop the message that loaded one, and a set kept only in
     memory would then claim a server is loaded whose tools nothing is sending.
     """
-    blob = "\n".join(m.get("content", "") for m in messages if isinstance(m, dict))
+    blob = "\n".join(m.get("content") or "" for m in messages
+                     if isinstance(m, dict) and isinstance(m.get("content"), str))
     return [s.name for s in all_servers() if f"{LOAD_MARKER}{s.name}]" in blob]
 
 

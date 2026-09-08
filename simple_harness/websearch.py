@@ -337,7 +337,13 @@ def _gather(query):
     """Run the chosen sources concurrently; one failing must not sink the rest."""
     candidates, notes = [], []
     sources = _pick_sources(query)
-    with futures.ThreadPoolExecutor(max_workers=len(sources)) as pool:
+    # Not a `with` block: leaving one waits for every worker to finish, so a
+    # source that hung held the search well past SEARCH_TOTAL_TIMEOUT - the
+    # timeout stopped the *waiting* and then the shutdown waited anyway. The
+    # threads are daemons and each request carries its own timeout, so what is
+    # still running is left to finish into nothing.
+    pool = futures.ThreadPoolExecutor(max_workers=len(sources))
+    try:
         running = {pool.submit(fn, query): name for name, fn in sources}
         try:
             for future in futures.as_completed(running, timeout=config.SEARCH_TOTAL_TIMEOUT):
@@ -353,6 +359,8 @@ def _gather(query):
             for future, name in running.items():
                 if not future.done():
                     notes.append(f"{name}:timeout")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
     seen, unique = set(), []
     for cand in candidates:
@@ -367,16 +375,37 @@ def _gather(query):
 # fetching and ranking
 # ---------------------------------------------------------------------------
 
+# Only ever `SEARCH_PAGE_CHARS` of a page is kept, so there is no reason to
+# hold more of one in memory than that - and eight candidate URLs are fetched
+# at once, any of which may turn out to be a download rather than a page.
+_FETCH_MAX_BYTES = 4 * 1024 * 1024
+
+
 def _fetch(cand):
     if cand["text"]:
         return cand
     try:
-        resp = requests.get(cand["url"], headers=UA, timeout=config.SEARCH_FETCH_TIMEOUT)
-        resp.raise_for_status()
-        if "html" in resp.headers.get("Content-Type", "").lower():
-            cand["text"] = strip_html(resp.text)[:config.SEARCH_PAGE_CHARS]
-        else:
-            cand["text"] = resp.text[:config.SEARCH_PAGE_CHARS]
+        resp = requests.get(cand["url"], headers=UA, stream=True,
+                            timeout=config.SEARCH_FETCH_TIMEOUT)
+        try:
+            resp.raise_for_status()
+            is_html = "html" in resp.headers.get("Content-Type", "").lower()
+            chunks, total = [], 0
+            for chunk in resp.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
+                chunks.append(chunk)
+                total += len(chunk)
+                if total >= _FETCH_MAX_BYTES:
+                    break
+            raw = b"".join(chunks)[:_FETCH_MAX_BYTES]
+        finally:
+            resp.close()
+        try:
+            body = raw.decode(resp.encoding or "utf-8", "replace")
+        except LookupError:
+            body = raw.decode("utf-8", "replace")
+        cand["text"] = (strip_html(body) if is_html else body)[:config.SEARCH_PAGE_CHARS]
     except Exception:
         cand["text"] = ""
     return cand
