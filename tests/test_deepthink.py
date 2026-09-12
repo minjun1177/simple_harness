@@ -274,7 +274,12 @@ check("a check that ran nothing is called out",
       "ran no command" in printed, printed[-200:])
 
 # And a check that actually passed says nothing extra.
-PASSING = ('<tool_call>\n{"name": "run_cmd", "arguments": {"command": "true"}}\n</tool_call>')
+# `exit 0` rather than `true`: this goes through the real `run_cmd`, and the
+# shell on the other side is `cmd.exe` on Windows, where `true` is not a
+# command at all. It passes on a CI runner only because Git for Windows puts a
+# `true.exe` on PATH - a plain Windows box has none, and the check then reads a
+# passing verification as a failed one.
+PASSING = ('<tool_call>\n{"name": "run_cmd", "arguments": {"command": "exit 0"}}\n</tool_call>')
 answer, scripted, messages, printed = drive(
     ["계획.", "검토.", "구현.", "검토했다.", "고칠 것 없음.", PASSING, "통과했습니다."])
 check("a check that passed is not second-guessed",

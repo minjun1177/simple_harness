@@ -95,11 +95,19 @@ try:
     check("what is not a secret is left exactly as it is",
           "APP_ENV=development" in read and "PORT=8080" in read)
 
-    printed = quietly(tools.dispatch_tool, "run_cmd", {"command": "cat .env"})
+    # The shell on the other side of `run_cmd` is `cmd.exe` on Windows, which
+    # has none of `cat`, `grep` or `test`. Spelled the Unix way these checks do
+    # not fail there - they pass on the error message, which proves nothing.
+    # A CI runner hides that too: Git for Windows leaves the lot on PATH.
+    WINDOWS = os.name == "nt"
+
+    printed = quietly(tools.dispatch_tool, "run_cmd",
+                      {"command": "type .env" if WINDOWS else "cat .env"})
     check("a command that prints it is redacted too", KEY not in printed, printed[:60])
 
     listed = quietly(tools.dispatch_tool, "run_cmd",
-                     {"command": "grep -o 'sk_live_[A-Za-z0-9]*' .env"})
+                     {"command": "findstr sk_live_ .env" if WINDOWS
+                      else "grep -o 'sk_live_[A-Za-z0-9]*' .env"})
     check("and so is a command that goes looking for it", KEY not in listed)
 
     # `@.env` reaches read_file directly rather than through dispatch_tool.
@@ -112,8 +120,10 @@ try:
     # Proof the *real* key reached the shell, without printing it: the command
     # only succeeds if the value is there to be matched.
     ran = quietly(tools.dispatch_tool, "run_cmd",
-                  {"command": 'test "{{env:STRIPE_KEY}}" = "' + KEY + '" '
-                              '&& echo THE-REAL-VALUE-ARRIVED'})
+                  {"command": 'if "{{env:STRIPE_KEY}}"=="' + KEY + '" '
+                              'echo THE-REAL-VALUE-ARRIVED' if WINDOWS
+                   else 'test "{{env:STRIPE_KEY}}" = "' + KEY + '" '
+                        '&& echo THE-REAL-VALUE-ARRIVED'})
     check("a placeholder reaches the shell as the value",
           "THE-REAL-VALUE-ARRIVED" in ran, ran[:60])
     check("and the result still comes back redacted", KEY not in ran)
