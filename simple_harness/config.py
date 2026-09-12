@@ -229,6 +229,14 @@ MEMORY_FILE = paths.state("memory.json")
 SESSION_DIR = paths.state("sessions")
 HISTORY_FILE = paths.state("history")
 
+# A memory written with `important` is put into the system prompt at the start
+# of every session rather than waiting to be looked up (`session
+# .memory_prompt_section`). The prompt is paid for on every turn, so both the
+# number of them and the length of each are capped: a model that marks forty
+# things important should not spend a tenth of the context window saying so.
+MEMORY_IMPORTANT_MAX = 20
+MEMORY_IMPORTANT_CHARS = 600
+
 # Sessions are filed under a human title instead of a timestamp. AUTO_TITLE lets
 # the model name a new session after its first exchange; /title overrides it.
 AUTO_TITLE = True

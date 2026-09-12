@@ -29,18 +29,56 @@ def _entry(memory: dict, memory_id: str) -> dict:
     value = memory.get(memory_id)
     return value if isinstance(value, dict) else {"content": str(value or "")}
 
+
+def _important(entry: dict) -> bool:
+    """Whether a record is marked to be put in front of the model at the start.
+
+    A flag on the entry rather than a list of ids kept beside it: one memory is
+    one record, and a second place for the same fact to be true in is a second
+    place for it to be wrong in. Anything written before the flag existed has
+    no key here and reads as not important, which is what it was.
+    """
+    return bool(entry.get("important"))
+
+
+# What a model writes for "no". Everything else that is not empty is a yes:
+# the parameter exists to mark something, so an unrecognised spelling should
+# mark it rather than quietly drop it on the floor.
+_NOT_IMPORTANT = ("false", "no", "n", "0", "off", "none", "null")
+
+
+def _read_flag(raw):
+    """The `important` argument as True, False, or None for "did not say"."""
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw if raw is not None else "").strip().lower()
+    if not text:
+        return None
+    return text not in _NOT_IMPORTANT
+
+
 def save_memory(memory: dict) -> None:
     atomic.write_json(config.MEMORY_FILE, memory)
 
-def handle_write_memory(memory_id: str, content: str) -> str:
+def handle_write_memory(memory_id: str, content: str, important="") -> str:
     if not memory_id:
         return "[Error] Memory ID is required."
     memory = load_memory()
+    flag = _read_flag(important)
+    if flag is None:
+        # Saving over a memory without mentioning `important` must not demote
+        # one that was marked important before. The mark says what the memory
+        # is for; a later rewrite of its text is not a decision about that.
+        flag = memory_id in memory and _important(_entry(memory, memory_id))
     memory[memory_id] = {
         "content": content,
-        "created_at": datetime.datetime.now().isoformat()
+        "created_at": datetime.datetime.now().isoformat(),
+        "important": flag,
     }
     save_memory(memory)
+    if flag:
+        return (f"[Success] Memory saved: '{memory_id}' (important - it is put "
+                "in front of you at the start of every session from now on).")
     return f"[Success] Memory saved: '{memory_id}'"
 
 def handle_get_memory_list() -> str:
@@ -52,7 +90,8 @@ def handle_get_memory_list() -> str:
         data = _entry(memory, mid)
         created = data.get("created_at", "unknown")
         preview = str(data.get("content", ""))[:50]
-        lines.append(f"{i}. {mid} ({created}) - {preview}")
+        mark = " [important]" if _important(data) else ""
+        lines.append(f"{i}. {mid}{mark} ({created}) - {preview}")
     return "\n".join(lines)
 
 def handle_read_memory(memory_id: str) -> str:
@@ -62,7 +101,9 @@ def handle_read_memory(memory_id: str) -> str:
     if memory_id not in memory:
         return f"[Error] Memory '{memory_id}' not found."
     data = _entry(memory, memory_id)
-    return f"[Memory: {memory_id}]\nContent: {data.get('content', '')}\nCreated: {data.get('created_at', 'unknown')}"
+    return (f"[Memory: {memory_id}]\nContent: {data.get('content', '')}\n"
+            f"Created: {data.get('created_at', 'unknown')}\n"
+            f"Important: {'yes' if _important(data) else 'no'}")
 
 def handle_delete_memory(memory_id: str) -> str:
     if not memory_id:
@@ -91,6 +132,58 @@ def handle_edit_memory(memory_id: str, new_content: str) -> str:
                              "created_at": datetime.datetime.now().isoformat()}
     save_memory(memory)
     return f"[Success] Memory edited: '{memory_id}'"
+
+
+def important_memories() -> list[tuple[str, str]]:
+    """Every memory marked important, as (id, content), in the order stored."""
+    memory = load_memory()
+    pairs = []
+    for memory_id in memory:
+        data = _entry(memory, memory_id)
+        if _important(data):
+            pairs.append((memory_id, str(data.get("content", ""))))
+    return pairs
+
+
+def memory_prompt_section() -> str:
+    """The important memories, written out for the system prompt.
+
+    A memory is only as useful as the chance the model goes looking for it, and
+    a fresh session has no reason to: it does not know there is anything to
+    find. `get_memory_list` is a tool it may never call. So the memories the
+    model itself marked as the ones that must not be missed are put in the
+    prompt instead - read once when the prompt is built, which is the start of
+    the session and the few moments `app._refresh_system_prompt` rebuilds it.
+
+    Not every memory, and not the whole of one. The prompt is the part of the
+    context that is paid for on every single turn, so this is capped both ways
+    (`MEMORY_IMPORTANT_MAX`, `MEMORY_IMPORTANT_CHARS`) and says out loud when
+    it has cut something, rather than leaving the model with half a fact it has
+    no reason to doubt.
+    """
+    listed = important_memories()
+    if not listed:
+        return ""
+    shown = listed[:max(0, config.MEMORY_IMPORTANT_MAX)]
+    if not shown:
+        return ""
+    lines = [
+        "\n### MEMORY - what you were told to remember:",
+        "These were saved with `important` set, so they are put in front of you "
+        "at the start of every session instead of waiting to be looked up. They "
+        "are what you already know about this user and this work - use them, and "
+        "do not call `read_memory` for one that is written out here.",
+    ]
+    for memory_id, content in shown:
+        text = " ".join(content.split())
+        if len(text) > config.MEMORY_IMPORTANT_CHARS:
+            text = (text[:config.MEMORY_IMPORTANT_CHARS]
+                    + f"... (cut - `read_memory` with id '{memory_id}' for the rest)")
+        lines.append(f"- {memory_id}: {text}")
+    if len(listed) > len(shown):
+        lines.append(f"({len(listed) - len(shown)} more are marked important and "
+                     "not shown here - `get_memory_list` has them.)")
+    return "\n".join(lines) + "\n"
 
 
 # What `save_session` writes, and every shape `load_session` can still read.

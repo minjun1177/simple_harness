@@ -425,6 +425,44 @@ While the major version is 0 this is a record rather than a guarantee, and
 `CHANGELOG.md` says so in as many words. It exists from 0.6.0 so that 1.0.0 can
 be a promise already kept rather than one made on the day.
 
+**5.15 A memory the model must not miss is in the prompt, not waiting to be
+looked up.** Long-term memory was a store with a door on it: `write_memory` put
+something in, and `read_memory` took it back out - if the model thought to ask.
+A fresh session has no reason to think of it. Nothing in an empty conversation
+says there is anything to find, so the fact that the user writes in Korean, or
+that this project is never pushed to `main` directly, sat in `memory.json`
+being correct and unread.
+
+`write_memory` takes a third argument for that. `important=true` marks the
+entry, `session.memory_prompt_section()` writes every marked entry out, and
+`app._compose_system_prompt` puts that block into the system message - so it is
+there before the user's first line, on a session started fresh and on one
+resumed, without a tool call. Everything unmarked keeps working exactly as it
+did.
+
+Three things make it safe to put there:
+
+* **The mark belongs to the memory, not to the call.** Saving over an entry
+  without mentioning `important` keeps the mark it has; only an explicit
+  `false` takes it away. A model rewriting "User name" a month later is not
+  making a decision about whether the user still wants to be remembered.
+* **It is bounded, and says when it cut.** `MEMORY_IMPORTANT_MAX` entries and
+  `MEMORY_IMPORTANT_CHARS` each. This is prompt, which is paid for on every
+  turn of every session; a model that marks forty things important should not
+  quietly take a tenth of the context window. What is cut is named as cut, so
+  the model knows to call `read_memory` rather than trusting half a sentence.
+* **It is byte-identical between builds**, which 5.10 requires of everything in
+  the prefix: the file's own order, no clock, no set iterated into text. Marking
+  a memory important mid-session costs one cache miss at the next prompt
+  rebuild, the same as loading a skill - and the prompt is deliberately not
+  rebuilt every turn, so it costs nothing until then.
+
+It is read in `_compose_system_prompt` rather than inside `systemprompt()` for
+an import reason and not a design one: `config` builds the system prompt at
+import time, and `session` imports `config`, so `systemprompt` cannot reach
+`session` without a cycle. Composing is where every other per-conversation
+piece already goes.
+
 ---
 
 ## 6. Module map
@@ -469,7 +507,7 @@ app.py            the loop, slash commands, session lifecycle
 | `verify.py` | Which check a project declares, running it, and the wording of a failure | When to run it or how many times - that is `chat_turn` |
 | `channel.py` | Who else is running here, what they said, what they hold | Anything about one conversation |
 | `context.py` | Token estimate, trimming, compression, and folding the token history into turns | |
-| `session.py` | Session files, the directory each was worked in, and long-term memory | |
+| `session.py` | Session files, the directory each was worked in, long-term memory, and the block the important ones make (5.15) | Where that block is put - `app` composes |
 | `mentions.py` | `@path` in a typed message: what it names, and what it attaches | Printing - the caller does that |
 | `permissions.py` | Rule loading and the allow/deny/ask decision | |
 | `shell_session.py` | Live commands, waiting-vs-busy detection | |
@@ -808,6 +846,7 @@ for t in tests/*.py; do python "$t" || echo "FAILED: $t"; done
 | `test_mcp_lazy.py` | That a big MCP server is announced rather than described, that asking for it hands over the parameters, that a call to an unloaded one still works, and that names and schemas cannot come apart (5.13) |
 | `test_tdd.py` | That `/tdd` reaches a test file however its path is written, refuses in `dispatch_tool`, holds nothing on disk, and lifts itself (§7a) |
 | `test_malformed_state.py` | State that is not the shape the code assumed: a message with no content, a hand-edited `memory.json`, a setting of nought - and that writing a file through a tool is atomic and leaves its line endings alone (5.7) |
+| `test_memory.py` | That a memory marked `important` reaches the prompt a session opens on, that the mark survives being saved over, and that the block is capped and byte-stable (5.15) |
 | `test_vault.py` | That a `.env` value never reaches the model by any route, that a placeholder reaches the shell as the real key, and that a file is neither how it gets out nor how it is lost (§8b) |
 | `test_docs.py` | That this file and `README.md` still describe the program that exists |
 | `test_compat.py` | That the commands, settings, tool names and files people build habits on are still there under the same names (5.14) |

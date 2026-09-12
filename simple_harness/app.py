@@ -28,7 +28,8 @@ from simple_harness.tui import (_welcome, _show_help, _show_skills, _show_mcp, _
                                 display_usage_graph, _hr, complete_command)
 from simple_harness.renderer import _render_full
 from simple_harness.session import (save_session, load_session, list_sessions, find_sessions,
-                     latest_in_dir, rename_session, generate_session_title, clean_title)
+                     latest_in_dir, rename_session, generate_session_title, clean_title,
+                     memory_prompt_section)
 from simple_harness.context import manage_context
 from simple_harness import llm_client
 from simple_harness.llm_client import chat_turn, parse_tool_calls, strip_thinking
@@ -38,7 +39,12 @@ def _compose_system_prompt(summary: str = "") -> str:
     base = config.SYSTEM_PROMPT
     if config.CUSTOM_PERSONA:
         base = config.CUSTOM_PERSONA + "\n\n" + base
-    return base + summary
+    # The memories marked important are read here rather than inside
+    # `systemprompt()` for one reason: `config` builds that at import time, and
+    # `session` cannot be imported from under it. Composing is where every
+    # other per-conversation piece already goes, so it goes here too - and it
+    # lands ahead of the summary, which must stay last for `_extract_summary`.
+    return base + memory_prompt_section() + summary
 
 
 def _extract_summary(system_content: str) -> str:
@@ -82,6 +88,14 @@ def _adopt_session(loaded) -> list[dict]:
         messages.insert(0, {"role": "system", "content": _compose_system_prompt()})
     config.LOADED_SKILLS[:] = skills.loaded_skill_names(messages)
     config.LOADED_MCP_SERVERS[:] = mcp_client.loaded_in(messages)
+    # Resuming is a session start too, so the prompt is rebuilt for the state
+    # this conversation is being picked up *in*: the memories marked important
+    # since the file was written belong in it, and so do the tools and servers
+    # that are attached now rather than the ones that were then. Persona and
+    # the `<SUMMARY>` are carried across by `_refresh_system_prompt` itself,
+    # and it is called after the two lists above are set so that what it builds
+    # matches what was just loaded.
+    _refresh_system_prompt(messages)
     return messages
 
 

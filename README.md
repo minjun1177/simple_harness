@@ -36,7 +36,7 @@ exists to make small models genuinely usable rather than nearly usable.
 - **ANSI Terminal User Interface**: Provides an ANSI-colored TUI with streaming text responses, live token-per-second (TPS) calculation, custom spinner animations, markdown rendering, syntax code blocks, and ASCII tables.
 - **Interactive Action Approval**: Security layer that prompts the user for confirmation prior to running shell commands, editing/writing files, or sending network API requests.
 - **Dynamic Context Compression**: Monitors active token counts and conversation length to automatically condense conversation history when nearing model limits, tailored to model size.
-- **Persistent Memory Storage**: Long-term key-value memory storage system backed by `memory.json` to store user preferences, facts, and instructions across sessions.
+- **Persistent Memory Storage**: Long-term key-value memory storage system backed by `memory.json` to store user preferences, facts, and instructions across sessions. A memory saved with `important` set does not wait to be looked up: it is written into the system prompt, so the model has it before the first message of every session - a fresh one and a resumed one alike. That is the difference between a store the model *can* read and one it *has* read.
 - **Session & History Management**: Save, list, load, record, and export conversation transcripts in JSON or Markdown format.
 - **Named Sessions**: Sessions are filed under a readable title instead of a timestamp. The model names each new session after its first exchange (`/autotitle off` to stop it), `/title <name>` renames it by hand, and `/load` accepts either the title or the id.
 - **Resuming from the command line**: `simple-harness --resume <id or title>` reopens a saved conversation, and `-c` reopens the newest one you were last working on *in this directory* - a session records where it was worked, so `-c` in a project picks up that project's thread rather than whatever you did most recently anywhere.
@@ -422,9 +422,9 @@ that says what went wrong.
 - `git_diff`: View current git working directory modifications.
 
 ### Memory & Interaction Tools
-- `write_memory`: Save key information to persistent JSON storage.
+- `write_memory`: Save key information to persistent JSON storage. Pass `important: true` for something the model must know from the first message of every later session - who you are, how you want it to work, a standing rule about the project - and it is put into the system prompt at the start of each session instead of waiting for a `read_memory` that may never come. Saving over a memory without mentioning `important` keeps the mark it already has; `important: false` takes it away.
 - `read_memory`: Retrieve content of a specific stored memory item.
-- `get_memory_list`: List stored memory IDs with timestamp and preview.
+- `get_memory_list`: List stored memory IDs with timestamp and preview, marking the ones saved as `important`.
 - `edit_memory`: Update content of an existing memory record.
 - `delete_memory`: Remove a memory entry from disk.
 - `get_user_input`: Ask the user one or more questions, each with its own list of options plus a free-text choice.
@@ -1531,6 +1531,8 @@ The settings worth knowing:
 | `MCP_ENABLED` | `True` | Attach MCP servers on startup |
 | `MCP_LAZY_TOOLS` | `True` | Announce a big MCP server by name; send its tools when asked |
 | `MCP_LAZY_MIN_TOOLS` | 6 | Tools a server needs before it is announced rather than described |
+| `MEMORY_IMPORTANT_MAX` | 20 | Memories marked `important` that the system prompt will carry |
+| `MEMORY_IMPORTANT_CHARS` | 600 | Characters of each one before it is cut, with a note saying to `read_memory` for the rest |
 | `SEARXNG_URL` | `""` | A self-hosted search instance to prefer over the public sources |
 
 The rest are tuning knobs for search, MCP and command sessions; they are
@@ -1677,6 +1679,7 @@ The codebase is organized cleanly around the following components:
 - **`tests/test_hashline_edit.py`**: That `38:ff7|print()` reaches the line it names, that a stale or mistyped anchor is refused rather than applied a few lines off, and that everything which is not an anchor still behaves as it did.
 - **`tests/test_channel.py`**: That a file one harness is changing cannot be written from another, that the refusal names who to ask, that a claim dies with the terminal that took it, and that several processes writing to the board at once lose nothing.
 - **`tests/test_mentions.py`**: What `@` attaches and what it must leave alone - an email address is not a file - that the completion menu reads the real directory, and that the command menu previews what each command does and what may follow it.
+- **`tests/test_memory.py`**: That a memory marked `important` is in the system prompt a session opens on - a new one and a resumed one - that the mark survives a later rewrite of the memory's text, that the block is capped in both directions and says when it cut something, and that a hand-edited `memory.json` cannot break the prompt.
 - **`tests/test_vault.py`**: That a `.env` value never reaches the model - not through `read_file`, not through a command that prints it, not through an `@` attachment - that the placeholder reaches the shell as the real key, and that a file is neither how a secret gets out nor how it gets lost.
 - **`tests/test_malformed_state.py`**: What happens when the state is not the shape the code assumed - a message whose content is `null`, a `memory.json` somebody edited by hand, a setting typed as nought - and that `write_file` and `edit_file` replace a file in one step rather than truncating it first, without rewriting its line endings on the way past.
 - **`requirements-lock.txt`**: The exact dependency set the harness was tested against. `requirements.txt` gives the tested floors and a ceiling before the next breaking release.
@@ -1684,12 +1687,12 @@ The codebase is organized cleanly around the following components:
 - **`websearch.py`**: Multi-source retrieval, page extraction, and BM25 reranking.
 - **`context.py`**: Token budgeting, tool-result trimming, and context compression. The token estimate is script-aware and calibrates itself against the counts each provider reports.
 - **`renderer.py`** / **`tui.py`**: Markdown rendering and the terminal chrome.
-- **`session.py`**: Session save/load/list and the persistent memory store.
+- **`session.py`**: Session save/load/list, the persistent memory store, and the block of `important` memories that goes into every session's system prompt.
 - **`systemprompt.py`**: The system prompt - the assistant's own instructions, plus the tool-protocol rules that `subagent.py` shares. The tool schemas themselves come from `toolspec.py`.
 - **`skills/`**: Project-level skills. Personal skills live in `~/.localchat/skills/`.
 - **`.permissions.json`**: Project-level tool permission rules (see `.permissions.json.example`). Personal ones live in `~/.localchat/permissions.json`.
 - **`.mcp.json`**: Project-level MCP server declarations (see `.mcp.json.example`). Personal ones live in `~/.localchat/mcp.json`.
-- **`memory.json`**: Key-value JSON storage backing the long-term memory system.
+- **`memory.json`**: Key-value JSON storage backing the long-term memory system. Each record carries its content, when it was written, and whether it was marked `important`.
 - **`sessions/`**: Session directory containing JSON transcript backups for conversation history. Each file is named after the session's title (slugified, e.g. `웹-검색-랭킹-개선.json`); untitled sessions fall back to a timestamp until a title exists. Each also records the working directory it was last saved from, which is what `-c` matches against.
 - **`.chat_history`**: History file managed by `prompt_toolkit` for command history recall across terminal runs.
 

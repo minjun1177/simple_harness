@@ -209,6 +209,7 @@ TOOLS = (
         params=(
             Param(name='id', description="Memory ID (a descriptive label). e.g., 'User name', 'User preferences', 'Project goal'"),
             Param(name='content', description="Memory content. e.g., 'Jhon', 'Prefers dark mode', 'Build a chat app'"),
+            Param(name='important', description="true for something you must know from the very first message of every future session - who the user is, how they want you to work, a standing rule about this project. Those are written into your prompt at the start of each session; everything else is only read when you go looking for it with read_memory. Leave it out when saving over an existing memory to keep the mark it already has, or send false to take the mark away.", aliases=('is_important',), optional=True),
         ),
     ),
     Tool(
