@@ -43,7 +43,6 @@
 * [x] Announce a big MCP server by name instead of describing it; use_mcp_server sends its tools when the model asks
 
 ## next
-> See roadmap.md for the reasoning and the order.
 
 * [ ] Whole-project Tree-sitter index (symbol table) instead of plain text search
 * [ ] Split the reusable parts out to PyPI (JSON repair, MCP client, shell sessions)

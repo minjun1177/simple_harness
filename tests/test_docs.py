@@ -139,6 +139,47 @@ missing = [f for f in named_files if not exists(f)]
 check("every file it names exists", not missing, str(missing))
 check("and it names most of them", len(named_files) > 15, f"{len(named_files)} files")
 
+# A file the docs point you at has to be a file you can open. TODO.md pointed
+# at a `roadmap.md` that was never committed, and went on doing so: the check
+# above reads Python filenames only, so a dead markdown link had nothing
+# looking at it.
+named_docs = set()
+for text in (README, ARCH, read("TODO.md"), read("CHANGELOG.md")):
+    # Prose only. A fenced block is as likely to be an illustration of a layout
+    # (`quick-skill.md` in a sample tree) as a pointer at a real file, and an
+    # illustration is not a broken link.
+    prose, fenced = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        elif not fenced:
+            prose.append(line)
+    prose = "\n".join(prose)
+    named_docs |= set(re.findall(r"([A-Za-z0-9_-]+\.md)", prose))
+# By basename and anywhere in the tree: a skill's `SKILL.md` is named without
+# the folder it sits in, and the point here is "is there such a file at all",
+# not where it lives.
+on_disk_docs = set()
+for base, dirs, names in os.walk(ROOT):
+    dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")
+               and "venv" not in d]
+    on_disk_docs |= {n for n in names if n.endswith(".md")}
+absent = sorted(d for d in named_docs if d not in on_disk_docs)
+check("every markdown file the docs name exists", not absent, str(absent))
+
+# The size in ARCHITECTURE's opening line is prose, so nothing regenerates it -
+# and prose that states a number goes stale silently. It is rounded on purpose,
+# so this asks only that the rounding still be honest.
+stated = re.search(r"~([\d,]+) lines of Python", ARCH_FLAT)
+check("ARCHITECTURE states the size of the codebase", stated is not None)
+if stated:
+    real = sum(len(read(f).splitlines())
+               for f in sorted(os.listdir(PKG)) if f.endswith(".py"))
+    claimed_lines = int(stated.group(1).replace(",", ""))
+    check("and the number is within a tenth of the real one",
+          abs(claimed_lines - real) <= real * 0.10,
+          f"doc says {claimed_lines:,}, the package is {real:,}")
+
 # Anything written as `module.function` should resolve.
 from simple_harness import (atomic, context, deepthink, git_ops, llm_client,
                             providers, session, subagent)
