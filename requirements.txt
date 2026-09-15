@@ -15,6 +15,10 @@ ddgs>=9.0,<10.0
 requests>=2.34.2,<3.0
 beautifulsoup4>=4.15.0,<5.0
 psutil>=7.2.2,<8.0
+# Only `open`, `convert`, `resize` and `save` are used, to shrink an image to
+# what the APIs accept. Without it images still work; one over the ceiling is
+# refused rather than resized (`images.PILLOW_AVAILABLE`).
+pillow>=11.4.0,<13.0
 tree-sitter>=0.26.0,<0.27
 tree-sitter-python>=0.25.0,<0.26
 tree-sitter-javascript>=0.25.0,<0.26

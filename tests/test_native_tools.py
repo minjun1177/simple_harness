@@ -175,12 +175,19 @@ print("\n--- Ollama decides per model, not per provider ---")
 # Keyed by (host, model): the same model name on another machine is another
 # model, so an answer cached against one daemon must not be handed to another.
 here = providers.OllamaProvider({"model": "toolful:1b"}).host
-providers._ollama_capabilities.update({(here, "toolful:1b"): True,
-                                       (here, "toolless:1b"): False})
+# One cache, holding what `ollama show` said the model can do. Tool support and
+# vision are both read out of it, so seeding it seeds both.
+providers._ollama_capability_lists.update({
+    (here, "toolful:1b"): ["completion", "tools"],
+    (here, "toolless:1b"): ["completion"],
+    (here, "seeing:1b"): ["completion", "tools", "vision"]})
 check("a model whose template can call tools gets the native path",
       providers.OllamaProvider({"model": "toolful:1b"}).supports_native_tools)
 check("one whose template cannot keeps the text protocol",
       not providers.OllamaProvider({"model": "toolless:1b"}).supports_native_tools)
+check("the same answer says whether it can be sent an image",
+      providers.OllamaProvider({"model": "seeing:1b"}).sees_images()
+      and not providers.OllamaProvider({"model": "toolful:1b"}).sees_images())
 check("the answer does not follow the model name to another daemon",
       not providers.OllamaProvider({"model": "toolful:1b",
                                     "base_url": "http://127.0.0.1:1"}).supports_native_tools)

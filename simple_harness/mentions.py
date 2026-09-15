@@ -16,13 +16,14 @@ A miss is never fatal. A path that does not exist is reported and the message is
 sent as written - the model can still answer, and stopping a turn because of a
 typo in one token would cost more than the typo does.
 
-Stdlib plus `config` only, so this can be tested without a terminal.
+Stdlib, `config` and `images` only, so this can be tested without a terminal.
 """
 
 import os
 import re
 
 from simple_harness import config
+from simple_harness import images
 
 # `@` starts a mention only at the start of the line or after whitespace, so an
 # email address and a decorator in pasted code are left alone. The token runs to
@@ -115,18 +116,28 @@ def _read(path: str) -> tuple[bool, str]:
     return True, body
 
 
-def expand(text: str) -> tuple[str, list[tuple[str, bool, str]]]:
-    """The message to send, and one (path, attached, note) per mention.
+def expand(text: str) -> tuple[str, list[tuple[str, bool, str]], list[str]]:
+    """The message to send, one (path, attached, note) per mention, and images.
 
     The caller displays the notes; nothing here prints, so the expansion can be
     tested and so a sub-agent could use it without writing to the terminal.
+
+    An image does not become text. `@shot.png` read as a file is a screenful of
+    broken bytes that tells the model nothing and costs a thousand tokens to
+    say it, so the path comes back separately and rides on the message itself
+    (`images.py`) - the mention still stays in the sentence where it was typed,
+    because "what is wrong with @shot.png" is a sentence either way.
     """
     paths = find(text)
     if not paths:
-        return text, []
+        return text, [], []
 
-    notes, blocks = [], []
+    notes, blocks, pictures = [], [], []
     for path in paths:
+        if not os.path.isdir(path) and images.is_image(path):
+            pictures.append(path)
+            notes.append((path, True, images.describe(path)))
+            continue
         attached, body = _read(path)
         if attached:
             kind = "directory listing" if os.path.isdir(path) else "file"
@@ -136,5 +147,5 @@ def expand(text: str) -> tuple[str, list[tuple[str, bool, str]]]:
             notes.append((path, False, body))
 
     if not blocks:
-        return text, notes
-    return text.rstrip() + "\n\n" + "\n\n".join(blocks), notes
+        return text, notes, pictures
+    return text.rstrip() + "\n\n" + "\n\n".join(blocks), notes, pictures

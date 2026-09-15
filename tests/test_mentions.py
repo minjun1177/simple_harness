@@ -65,7 +65,7 @@ try:
         check(f"{text[:38]!r} attaches nothing", not real, str(real))
 
     print("\n--- a file arrives under the sentence that named it ---")
-    out, notes = mentions.expand("explain @config.txt please")
+    out, notes, _pictures = mentions.expand("explain @config.txt please")
     check("the sentence is kept intact", out.startswith("explain @config.txt please"))
     check("the file is named in the attachment", "[Attached file: config.txt]" in out)
     check("its contents come with it", "port=8080" in out)
@@ -73,20 +73,20 @@ try:
           str(notes))
 
     print("\n--- a directory arrives as its listing ---")
-    out, notes = mentions.expand("what is in @src ?")
+    out, notes, _pictures = mentions.expand("what is in @src ?")
     check("the listing is labelled", "[Attached directory listing: src]" in out)
     check("and lists what is there", "main.py" in out and "utils" in out)
 
     print("\n--- a miss is reported, never fatal ---")
     text = "read @nope.txt for me"
-    out, notes = mentions.expand(text)
+    out, notes, _pictures = mentions.expand(text)
     check("the message goes as written", out == text, repr(out[:60]))
     check("and the miss is reported", notes and notes[0][1] is False, str(notes))
 
     print("\n--- one mention cannot swallow the context ---")
     big = os.path.join(WORK, "big.txt")
     open(big, "w").write("y" * (config.MENTION_MAX_CHARS * 2))
-    out, notes = mentions.expand("@big.txt")
+    out, notes, _pictures = mentions.expand("@big.txt")
     check("the attachment is capped", len(out) < config.MENTION_MAX_CHARS * 1.2, str(len(out)))
     check("and says it was cut", "characters" in out and "read_file" in out)
     os.remove(big)

@@ -9,6 +9,7 @@ from simple_harness import config
 from simple_harness import paths
 from simple_harness import terms
 from simple_harness import channel
+from simple_harness import images
 from simple_harness import notes
 from simple_harness import deepthink
 from simple_harness import git_ops
@@ -163,21 +164,49 @@ def _run_user_command(command: str) -> str:
         config.POLICY_AUTO_ALLOW = False
 
 
-def _attach_mentions(text: str) -> str:
+def _attach_mentions(text: str) -> tuple[str, list]:
     """Expand `@path` in a typed message and say what came with it.
 
     The model is never told a mention failed by silence: a path that is not
-    there is named on screen, and the message goes as written.
+    there is named on screen, and the message goes as written. Returns the
+    message and the image paths to hang on it - an image is not turned into
+    text, so it travels beside the sentence rather than inside it.
     """
-    expanded, notes = mentions.expand(text)
+    expanded, notes, pictures = mentions.expand(text)
     for path, attached, detail in notes:
         if attached:
             print(f"  {S.MUTED}◆ attached {S.WHITE}{path}{S.R} {S.GRAY}({detail}){S.R}")
         else:
             print(f"  {S.WARN}⚠ @{path}: {detail}{S.R}")
+    if pictures:
+        pictures = _images_this_model_can_see(pictures)
     if notes:
         print()
-    return expanded
+    return expanded, pictures
+
+
+def _images_this_model_can_see(pictures: list) -> list:
+    """`pictures`, or none of them plus an explanation on screen.
+
+    Told before the request rather than after it. A model that cannot see gets
+    no error from anybody: the hosted APIs would reject it loudly, but a local
+    model without `vision` has the image dropped by Ollama and answers about
+    the sentence alone - confidently, and about nothing. That is the one
+    failure worth spending a capability probe to avoid.
+    """
+    provider = providers.current()
+    if provider.sees_images():
+        return pictures[:config.IMAGE_MAX_PER_MESSAGE]
+    plural = "s were" if len(pictures) != 1 else " was"
+    print(f"  {S.WARN}⚠ {provider.model or provider.label} cannot see images; "
+          f"{len(pictures)} image{plural} left off.{S.R}")
+    if provider.name == "ollama":
+        able = providers.ollama_vision_models(provider.host)
+        if able:
+            print(f"  {S.MUTED}  installed models that can: "
+                  f"{', '.join(able[:5])}{S.R}")
+    print(f"  {S.MUTED}  The message itself was sent as written.{S.R}")
+    return []
 
 
 def _connect_mcp_servers() -> list:
@@ -1088,7 +1117,7 @@ async def main(resume_id: str = "") -> None:
         # message for the model, so this is where an `@path` becomes context.
         # Before the plan-mode note, so the attachment stays under the sentence
         # the user wrote rather than under a system aside.
-        user_input = _attach_mentions(user_input)
+        user_input, attached_images = _attach_mentions(user_input)
 
         if config.PLANMODE and not config.DEEPTHINK:
             if config.AUTO_ALLOW:
@@ -1143,7 +1172,17 @@ async def main(resume_id: str = "") -> None:
         # so `/usage` reports what the question cost rather than what its last
         # request cost.
         config.next_turn()
-        messages.append({"role": "user", "content": user_input})
+        # Nothing should be waiting to be looked at when a turn begins. A
+        # `view_image` whose turn died before its result was appended would
+        # otherwise hang its picture on a later, unrelated message.
+        images.forget_pending()
+        turn = {"role": "user", "content": user_input}
+        if attached_images:
+            # Beside `content`, never inside it: invariant 5.3 wants the stored
+            # history to stay plain text, and these are paths rather than bytes
+            # so a saved session does not carry a screenshot around forever.
+            turn["images"] = attached_images
+        messages.append(turn)
         config.repair_messages(messages)
         current_session_id = save_session(messages, current_session_id)
 

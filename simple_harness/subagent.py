@@ -29,6 +29,7 @@ import asyncio
 import threading
 
 from simple_harness import config
+from simple_harness import images
 from simple_harness import providers
 from simple_harness import toolspec
 from simple_harness.config import S, _hr
@@ -163,8 +164,14 @@ async def _work(task: str, context: str, depth: int) -> str:
             # only the results that ran left a sub-agent looking idle while it
             # spent its budget knocking on a door it does not have.
             _fmt_tool_result(name, result)
-            messages.append({"role": "user",
-                             "content": f"[Tool Result for '{name}']:\n{result}"})
+            # Same arrangement the main loop uses: `view_image` leaves the path
+            # behind and it is hung on the result message it belongs to. A
+            # sub-agent sent to read a screenshot has to be able to see it.
+            step = {"role": "user", "content": f"[Tool Result for '{name}']:\n{result}"}
+            looked_at = images.take_pending()
+            if looked_at:
+                step["images"] = looked_at
+            messages.append(step)
 
     # Out of turns. Ask for the report rather than throwing the work away - a
     # partial answer with its limits stated is still worth having.

@@ -12,9 +12,9 @@ mistakes are.
 
 ## 1. What this is
 
-A terminal AI assistant, ~16,100 lines of Python, no framework. It talks to
+A terminal AI assistant, ~16,600 lines of Python, no framework. It talks to
 Ollama, Anthropic, OpenAI and Gemini over plain HTTP (no vendor SDKs), gives the
-model 39 tools, and runs them with the user's approval.
+model 40 tools, and runs them with the user's approval.
 
 The design constraint that explains most of the odd decisions: **it has to work
 with a 4-billion-parameter local model.** Such a model cannot reliably escape a
@@ -506,6 +506,49 @@ A note id is chosen by the model and becomes a filename, so it goes through
 then refuses anything whose parent is not the notes directory, so loosening the
 slug later cannot quietly turn an id into a way to write anywhere on the disk.
 
+**5.17 An image rides beside the text, as a path, and the model is asked
+whether it can see before one is sent.** Three of the four providers take
+images, and so do a fair number of local models - Ollama reports `vision` in
+the same `capabilities` list that says whether a model can call a tool, and the
+4B-class model this harness is benchmarked against has it. Two things had to be
+decided to make that work here, and both of them were decided by things already
+in this file.
+
+*Where an image lives on a message.* `content` is a string everywhere:
+`merge_runs` concatenates it, `context` trims it, `session` replays it, and 5.3
+requires the stored history to be plain text so that one format reaches all of
+them. Turning content into a block list to hold a picture would have rewritten
+every one of those. So an image is a sibling key, `message["images"]`, and
+`providers.py` builds the four wire shapes on the way out - Ollama already uses
+that exact key, Anthropic gets image blocks before the text block, OpenAI gets
+a `data:` URL part, Gemini gets `inline_data`. `merge_runs_with_images` exists
+because merging keeps only role and content, which would have thrown an
+attachment away the moment a tool result landed on top of it.
+
+*What the key holds: paths, not bytes.* A session file is written after every
+turn. A 400KB screenshot is 550KB of base64 in every saved copy of every
+conversation it appears in; the path is forty bytes. So the bytes are read at
+send time and never stored, and an image deleted between one session and its
+resumption is skipped rather than fatal - the rest of the conversation still
+answers.
+
+*Asking first.* `Provider.sees_images()` is True for the hosted three and
+overridden for Ollama, and the reason it is worth a probe at all is that this
+is the one capability whose absence is **silent**. A hosted API rejects an
+image it cannot take and says so. Ollama drops it on the way in, and the model
+then answers about the sentence alone - fluently, at length, about a picture it
+was never shown. A wrong answer with no error in it is the worst outcome
+available, so the check happens before the request and the refusal names
+installed models that would have worked.
+
+The three ways in follow the same rule, that a person should not have to know
+any of the above. `@shot.png` attaches rather than pasting bytes into the
+prompt; `read_file` on an image refuses and names `view_image`, because a small
+model reaches for `read_file` for everything; and `view_image` cannot hand a
+picture back through a string, so it leaves the path with `images` and
+`llm_client` hangs it on the tool-result message it is already appending - the
+same arrangement `verify` uses for a check it wants run after the turn.
+
 ---
 
 ## 6. Module map
@@ -552,6 +595,7 @@ app.py            the loop, slash commands, session lifecycle
 | `context.py` | Token estimate, trimming, compression, and folding the token history into turns | |
 | `session.py` | Session files, the directory each was worked in, long-term memory, and the block the important ones make (5.15) | Where that block is put - `app` composes |
 | `notes.py` | A project's markdown notes: where they live, the five tools over them, and the block of titles (5.16) | What counts as a project - `channel.workspace` answers that |
+| `images.py` | Recognising an image, resizing one too big for an API, and the base64 a provider sends (5.17) | The four wire shapes - `providers` builds those |
 | `mentions.py` | `@path` in a typed message: what it names, and what it attaches | Printing - the caller does that |
 | `permissions.py` | Rule loading and the allow/deny/ask decision | |
 | `shell_session.py` | Live commands, waiting-vs-busy detection | |
@@ -891,6 +935,7 @@ for t in tests/*.py; do python "$t" || echo "FAILED: $t"; done
 | `test_tdd.py` | That `/tdd` reaches a test file however its path is written, refuses in `dispatch_tool`, holds nothing on disk, and lifts itself (§7a) |
 | `test_malformed_state.py` | State that is not the shape the code assumed: a message with no content, a hand-edited `memory.json`, a setting of nought - and that writing a file through a tool is atomic and leaves its line endings alone (5.7) |
 | `test_memory.py` | That a memory marked `important` reaches the prompt a session opens on, that the mark survives being saved over, and that the block is capped and byte-stable (5.15) |
+| `test_images.py` | That an image is recognised by extension and by its bytes, that a large one is resized and relabelled as what it became, that all four wire shapes are right with the cache breakpoint still on the text, and that a model which cannot see is found out before the request (5.17) |
 | `test_notes.py` | That a note is one markdown file whose name is its id, that projects do not share notes while a subdirectory shares one, that a model-chosen id cannot write outside the notes directory, and that the prompt gets sorted titles only (5.16) |
 | `test_vault.py` | That a `.env` value never reaches the model by any route, that a placeholder reaches the shell as the real key, and that a file is neither how it gets out nor how it is lost (§8b) |
 | `test_docs.py` | That this file and `README.md` still describe the program that exists |

@@ -239,6 +239,13 @@ TOOLS = (
         ),
     ),
     Tool(
+        name='view_image',
+        description="Look at an image file - a screenshot, a diagram, a photo, a chart you just produced. The image is put in front of you together with this tool's result, so answer from what you see in it. read_file cannot do this: an image read as text is broken bytes. Only call this when you actually need to see the picture, and only once per file.",
+        params=(
+            Param(name='filepath', description='The path to the image. png, jpeg, gif and webp.', aliases=('path', 'image', 'file')),
+        ),
+    ),
+    Tool(
         name='write_note',
         description="Save a markdown note about THIS project - why something is built the way it is, the order a job has to be done in, what is still open. Notes are per project and are not the same store as write_memory, which is about the user and follows them everywhere. The body is NOT a JSON parameter: put it in a <content> block directly after the JSON object, inside the same <tool_call> (see DO rule 3). Write markdown there exactly as it should read, with no escaping. Writing a note under an id that already exists replaces it whole.",
         native_description="Save a markdown note about THIS project - why something is built the way it is, the order a job has to be done in, what is still open. Notes are per project and are not the same store as write_memory, which is about the user and follows them everywhere. Writing a note under an id that already exists replaces it whole.",

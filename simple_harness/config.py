@@ -242,6 +242,17 @@ MEMORY_IMPORTANT_CHARS = 600
 # Only the titles reach the prompt (`notes.notes_prompt_section`), so the cap
 # here is on how many lines that list may run to - the bodies cost nothing
 # until `read_note` asks for one.
+# An image rides on a message as a path and is encoded on the way out
+# (`images.py`). The long edge is what the hosted providers scale to anyway, so
+# resizing here costs nothing and stops a phone photograph from being refused
+# by the API instead of by the harness. The byte ceiling is the strictest of
+# the four (Anthropic's 5MB), applied after any resize.
+IMAGE_MAX_EDGE = 1568
+IMAGE_MAX_BYTES = 5 * 1024 * 1024
+# Images per message. A model that has been handed nine screenshots has not
+# been helped, and each one is prompt paid for on every turn of the tool loop.
+IMAGE_MAX_PER_MESSAGE = 4
+
 NOTES_DIR = paths.state("notes")
 NOTES_TITLES_MAX = 40
 # A note comes back into the conversation whole, so the ceiling is the point at

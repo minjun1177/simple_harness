@@ -27,6 +27,7 @@ mcp-types==2.1.1
 mdurl==0.1.2
 ollama==0.6.2
 opentelemetry-api==1.44.0
+pillow==12.3.0
 playwright==1.62.0
 playwright-mcp-server==0.1.0
 primp==2.0.0

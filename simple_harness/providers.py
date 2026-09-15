@@ -139,6 +139,58 @@ def merge_runs(messages: list) -> list:
     return merged
 
 
+def carried_images(message: dict) -> list:
+    """The image paths a message carries, capped, as a list.
+
+    Images live beside `content` rather than inside it (see `images.py`), so
+    every function above this one goes on seeing the plain string it expects.
+    """
+    from simple_harness import config
+    found = message.get("images")
+    if not isinstance(found, list):
+        return []
+    return [p for p in found if isinstance(p, str) and p][:config.IMAGE_MAX_PER_MESSAGE]
+
+
+def has_images(messages: list) -> bool:
+    return any(carried_images(m) for m in messages)
+
+
+def _encoded(message: dict) -> list:
+    """(base64, media type) for each image on a message that could be read.
+
+    A file that has gone since it was attached is skipped rather than fatal: a
+    resumed conversation whose screenshot was tidied away should still answer
+    about everything else that was said.
+    """
+    from simple_harness import images
+    out = []
+    for path in carried_images(message):
+        data, kind, _note = images.encode(path)
+        if data:
+            out.append((data, kind))
+    return out
+
+
+def merge_runs_with_images(messages: list) -> list:
+    """`merge_runs`, keeping the image paths of everything it merged.
+
+    Merging drops keys other than role and content, which would silently throw
+    an attachment away the moment a tool result landed after it.
+    """
+    merged = []
+    for message in messages:
+        content = message.get("content", "")
+        pictures = carried_images(message)
+        if merged and merged[-1]["role"] == message.get("role"):
+            merged[-1]["content"] += "\n\n" + content
+            merged[-1]["images"] = merged[-1].get("images", []) + pictures
+        else:
+            merged.append({"role": message.get("role", "user"),
+                           "content": content, "images": pictures})
+    return [{k: v for k, v in m.items() if k != "images" or v} for m in merged]
+
+
 # ---------------------------------------------------------------------------
 # prompt caching
 # ---------------------------------------------------------------------------
@@ -178,6 +230,38 @@ def merge_runs(messages: list) -> list:
 _CACHE_BREAKPOINT = {"type": "ephemeral"}       # the 5-minute TTL; a read refreshes it
 
 
+def _openai_messages(messages: list) -> list:
+    """OpenAI's messages, with any images as content parts beside the text.
+
+    A message with no image keeps its plain string content. OpenAI accepts the
+    part list everywhere, but sending one for every message would change the
+    shape of every request this harness has ever made for no reason - and the
+    OpenAI-compatible servers behind `base_url` are not all as forgiving.
+    """
+    if not has_images(messages):
+        return merge_runs(messages)
+    out = []
+    for message in merge_runs_with_images(messages):
+        pictures = _encoded(message)
+        if not pictures:
+            out.append({k: v for k, v in message.items() if k != "images"})
+            continue
+        parts = [{"type": "text", "text": message.get("content", "")}]
+        parts.extend({"type": "image_url",
+                      "image_url": {"url": f"data:{kind};base64,{data}"}}
+                     for data, kind in pictures)
+        out.append({"role": message["role"], "content": parts})
+    return out
+
+
+def _gemini_parts(message: dict) -> list:
+    """One Gemini `parts` list: the images it carries, then its text."""
+    parts = [{"inline_data": {"mime_type": kind, "data": data}}
+             for data, kind in _encoded(message)]
+    parts.append({"text": message.get("content", "")})
+    return parts
+
+
 def _cached_system(system: str) -> list:
     """The system prompt as one cacheable block.
 
@@ -186,6 +270,28 @@ def _cached_system(system: str) -> list:
     thirds of the fixed cost is. One breakpoint, both halves.
     """
     return [{"type": "text", "text": system, "cache_control": dict(_CACHE_BREAKPOINT)}]
+
+
+def _anthropic_messages(conversation: list) -> list:
+    """Anthropic's messages, with any images as blocks ahead of the text.
+
+    Images first: that is the documented placement, and a question reads as a
+    question about the picture above it rather than about nothing yet seen.
+    A message with no image keeps its plain string content, so the ordinary
+    request is byte for byte what it was before images existed.
+    """
+    out = []
+    for message in merge_runs_with_images(conversation):
+        pictures = _encoded(message)
+        if not pictures:
+            out.append({k: v for k, v in message.items() if k != "images"})
+            continue
+        blocks = [{"type": "image",
+                   "source": {"type": "base64", "media_type": kind, "data": data}}
+                  for data, kind in pictures]
+        blocks.append({"type": "text", "text": message.get("content", "")})
+        out.append({"role": message["role"], "content": blocks})
+    return out
 
 
 def _cache_tail(conversation: list) -> list:
@@ -205,6 +311,15 @@ def _cache_tail(conversation: list) -> list:
     marked = list(conversation)
     last = dict(marked[-1])
     content = last.get("content")
+    if isinstance(content, list) and content:
+        # Already blocks, because the message carries an image. The breakpoint
+        # goes on the final block, which is the text - marking the image would
+        # leave the question it belongs to outside the cached prefix.
+        blocks = [dict(b) for b in content]
+        blocks[-1] = {**blocks[-1], "cache_control": dict(_CACHE_BREAKPOINT)}
+        last["content"] = blocks
+        marked[-1] = last
+        return marked
     if not isinstance(content, str) or not content:
         return conversation          # not a shape this knows how to mark
     last["content"] = [{"type": "text", "text": content,
@@ -383,6 +498,16 @@ class Provider:
     def base_url(self) -> str:
         return str(self.settings.get("base_url") or self.default_base_url).rstrip("/")
 
+    def sees_images(self) -> bool:
+        """Whether this model can be sent an image at all.
+
+        True for the hosted three: every current model of theirs accepts one,
+        the list moves weekly, and when one does not the API says so plainly.
+        Ollama overrides it, because there the answer is per model and nothing
+        fails when it is no - see `OllamaProvider.sees_images`.
+        """
+        return True
+
     @property
     def model(self) -> str:
         return str(self.settings.get("model") or "")
@@ -447,7 +572,10 @@ class Provider:
 # What each local model says it can do, asked once per model. `ollama.show`
 # is a local call, but the prompt is rebuilt often enough that asking every
 # time would be wasteful, and a daemon that is down must not stall startup.
-_ollama_capabilities: dict = {}
+# Keyed by (host, model): the same model name on another machine is another
+# model, and answering from a cache filled against localhost is how the
+# harness would decide a model cannot do something it can.
+_ollama_capability_lists: dict = {}
 
 
 def ollama_client(host: str = "", timeout: float | None = None):
@@ -479,24 +607,73 @@ def ollama_supports_tools(model: str, host: str = "") -> bool:
     Anything that goes wrong means no: the text protocol works everywhere, so
     falling back to it is always safe.
     """
+    return "tools" in ollama_capabilities(model, host)
+
+
+def ollama_capabilities(model: str, host: str = "") -> list:
+    """What Ollama says this local model can do, or [] if it will not say.
+
+    Cached per (host, model) for the reason `ollama_supports_tools` gives: the
+    same name on another machine is another model, and an answer from the wrong
+    cache is how the harness decides a model cannot do something it can.
+    """
     if not model:
-        return False
-    # Keyed by host as well: the same model name on another machine is another
-    # model, and answering from a cache filled against localhost is how the
-    # harness would decide a model has no tool support it does have.
+        return []
     key = (host, model)
-    if key in _ollama_capabilities:
-        return _ollama_capabilities[key]
-    supported = False
+    if key in _ollama_capability_lists:
+        return _ollama_capability_lists[key]
+    found = []
     try:
         shown = ollama_client(host, timeout=2.0).show(model)
-        capabilities = (shown.get("capabilities") if isinstance(shown, dict)
-                        else getattr(shown, "capabilities", None)) or []
-        supported = "tools" in capabilities
+        found = list((shown.get("capabilities") if isinstance(shown, dict)
+                      else getattr(shown, "capabilities", None)) or [])
     except Exception:
-        supported = False
-    _ollama_capabilities[key] = supported
-    return supported
+        found = []
+    _ollama_capability_lists[key] = found
+    return found
+
+
+def ollama_vision_models(host: str = "") -> list:
+    """Installed local models that report `vision`, so a refusal can name one."""
+    try:
+        listed = ollama_client(host, timeout=2.0).list()
+    except Exception:
+        return []
+    # The client hands back a typed response on some versions and a plain dict
+    # on others, and the same is true of each entry - so both are read, the way
+    # `ollama_capabilities` reads `show()`.
+    entries = (listed.get("models") if isinstance(listed, dict)
+               else getattr(listed, "models", None)) or []
+    names = []
+    for entry in entries:
+        if isinstance(entry, dict):
+            name = entry.get("model") or entry.get("name") or ""
+        else:
+            name = getattr(entry, "model", "") or getattr(entry, "name", "") or ""
+        if name and "vision" in ollama_capabilities(name, host):
+            names.append(name)
+    return names
+
+
+def _ollama_messages(messages: list) -> list:
+    """The conversation with image paths turned into what Ollama wants.
+
+    Ollama's own wire format already carries images beside the text, under the
+    same key name this harness stores them under - so this swaps paths for
+    base64 and changes nothing else. Messages with no image are handed back
+    untouched, which is all of them in the ordinary case.
+    """
+    if not has_images(messages):
+        return messages
+    out = []
+    for message in messages:
+        encoded = [data for data, _kind in _encoded(message)]
+        if encoded:
+            out.append({**{k: v for k, v in message.items() if k != "images"},
+                        "images": encoded})
+        else:
+            out.append({k: v for k, v in message.items() if k != "images"})
+    return out
 
 
 def _ollama_calls(message):
@@ -566,6 +743,18 @@ class OllamaProvider(Provider):
         """Unlike the hosted providers, this depends on the model, not the API."""
         return ollama_supports_tools(self.model, self.host)
 
+    def sees_images(self) -> bool:
+        """Whether this local model was built to take an image.
+
+        Ollama reports it in the same `capabilities` list that says whether the
+        model can call a tool. Worth asking, because unlike the hosted APIs
+        nothing here fails: an image sent to a model without `vision` is
+        dropped on the way in, and the model then answers about the sentence
+        alone - confidently, and about a picture it never saw. A wrong answer
+        with no error in it is the worst outcome available.
+        """
+        return "vision" in ollama_capabilities(self.model, self.host)
+
     def encode_tools(self, schemas: list) -> list:
         # Ollama takes OpenAI's shape.
         return [{"type": "function",
@@ -597,7 +786,7 @@ class OllamaProvider(Provider):
         from simple_harness import config
         options = {"num_ctx": config.NUM_CTX,
                    "num_predict": token_budget(max_tokens)}
-        request = {"model": self.model, "messages": messages,
+        request = {"model": self.model, "messages": _ollama_messages(messages),
                    "stream": True, "options": options}
         if tools:
             request["tools"] = self.encode_tools(tools)
@@ -655,7 +844,7 @@ class AnthropicProvider(Provider):
             "model": self.model,
             # Anthropic requires max_tokens; it is a cap, not a target.
             "max_tokens": token_budget(max_tokens),
-            "messages": _cache_tail(merge_runs(conversation))
+            "messages": _cache_tail(_anthropic_messages(conversation))
                         or [{"role": "user", "content": "."}],
             "stream": True,
         }
@@ -748,7 +937,7 @@ class OpenAIProvider(Provider):
                tools: list | None = None):
         payload = {
             "model": self.model,
-            "messages": merge_runs(messages),
+            "messages": _openai_messages(messages),
             "stream": True,
             "stream_options": {"include_usage": True},
             "max_completion_tokens": token_budget(max_tokens),
@@ -869,8 +1058,8 @@ class GeminiProvider(Provider):
                tools: list | None = None):
         system, conversation = split_system(messages)
         contents = [{"role": "model" if m["role"] == "assistant" else "user",
-                     "parts": [{"text": m.get("content", "")}]}
-                    for m in merge_runs(conversation)]
+                     "parts": _gemini_parts(m)}
+                    for m in merge_runs_with_images(conversation)]
         payload = {
             "contents": contents or [{"role": "user", "parts": [{"text": "."}]}],
             "generationConfig": {"maxOutputTokens": token_budget(max_tokens)},

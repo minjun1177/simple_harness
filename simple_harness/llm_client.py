@@ -17,6 +17,7 @@ from simple_harness.tui import _fmt_tool_call, _fmt_tool_result, _fmt_tokens
 from simple_harness.renderer import _render_line, _format_table, _render_full
 from simple_harness.tools import dispatch_tool
 from simple_harness import channel
+from simple_harness import images
 from simple_harness import context
 from simple_harness import mcp_client
 from simple_harness import providers
@@ -940,10 +941,18 @@ async def chat_turn(messages: list[dict]) -> str:
 
             _fmt_tool_result(function_name, tool_result)
 
-            messages.append({
+            result_message = {
                 "role": "user",
                 "content": f"[Tool Result for '{function_name}']:\n{tool_result}",
-            })
+            }
+            # `view_image` cannot hand a picture back through a string, so it
+            # leaves the path behind and it is hung on this message - the one
+            # the model reads next. Paths, never bytes: invariant 5.3 keeps the
+            # stored history plain text, and `providers` encodes on the way out.
+            looked_at = images.take_pending()
+            if looked_at:
+                result_message["images"] = looked_at
+            messages.append(result_message)
             call_count += 1
 
             if isinstance(tool_result, str) and tool_result.startswith(REFUSAL_PREFIX):

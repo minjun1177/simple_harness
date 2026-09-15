@@ -112,7 +112,7 @@ try:
 
     # `@.env` reaches read_file directly rather than through dispatch_tool.
     from simple_harness import mentions          # noqa: E402
-    attached, notes = mentions.expand("what is in @.env")
+    attached, notes, _pictures = mentions.expand("what is in @.env")
     check("an @ attachment is redacted as well", KEY not in attached, str(notes))
 
     # ----------------------------------------------------------------------

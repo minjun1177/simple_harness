@@ -15,6 +15,7 @@ from simple_harness.tui import _fmt_tool_call, _approval_prompt
 from simple_harness.skills import handle_use_skill
 from simple_harness import mcp_client
 from simple_harness import channel
+from simple_harness import images
 from simple_harness import git_ops
 from simple_harness import permissions
 from simple_harness import shell_session
@@ -925,6 +926,14 @@ def handle_read_file(filepath: str) -> str:
     filepath, complaint = _as_path(filepath)
     if complaint:
         return complaint
+    if images.is_image(filepath):
+        # Read as text a PNG is a screenful of broken bytes that says nothing
+        # and costs a thousand tokens to say it. A small model reaches for
+        # `read_file` for everything, so it is sent to the right tool here
+        # rather than left to work out what it is looking at.
+        return (f"{config.TOOL_ERROR_PREFIX} {os.path.basename(filepath)} is an "
+                f"image ({images.describe(filepath)}), not text. Call "
+                "`view_image` with this path to look at it.")
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             content = f.read()
@@ -933,6 +942,40 @@ def handle_read_file(filepath: str) -> str:
         return _encode_hashlines(content)
     except Exception as e:
         return f"[Error] Cannot read file: {e}"
+
+def handle_view_image(filepath: str) -> str:
+    """Put an image in front of the model on its next request.
+
+    A tool result is a string, so this cannot hand a picture back the way
+    `read_file` hands back text. It checks the file and leaves the path with
+    `images`, and `llm_client` hangs it on the tool-result message it is about
+    to append - which is the message the model reads next.
+    """
+    filepath, complaint = _as_path(filepath)
+    if complaint:
+        return complaint
+    if not os.path.exists(filepath):
+        return f"{config.TOOL_ERROR_PREFIX} No such file: {filepath}"
+    if not images.is_image(filepath):
+        return (f"{config.TOOL_ERROR_PREFIX} {os.path.basename(filepath)} is not "
+                f"an image this harness can send. It handles "
+                f"{', '.join(sorted(set(images.MEDIA_TYPES.values())))}. "
+                "Use `read_file` for text.")
+    from simple_harness import providers      # here, not at the top: see `_handlers`
+    provider = providers.current()
+    if not provider.sees_images():
+        return (f"{config.TOOL_ERROR_PREFIX} {provider.model or provider.label} "
+                "cannot see images, so there is no point sending one. Answer "
+                "from what you can read, or ask the user to switch models.")
+    data, _kind, why = images.encode(filepath)
+    if not data:
+        return f"{config.TOOL_ERROR_PREFIX} {why}"
+    images.want(filepath)
+    note = f" ({why})" if why else ""
+    return (f"[Image attached: {filepath}]{note}\nIt is in front of you with "
+            "this result - look at it and answer. Do not call view_image for "
+            "the same file again.")
+
 
 def handle_write_file(filepath: str, content: str) -> str:
     filepath, complaint = _as_path(filepath)
@@ -2104,6 +2147,7 @@ def _handlers() -> dict:
             "delete_file": handle_delete_file,
             "copy_file": handle_copy_file,
             "create_dir": handle_create_dir,
+            "view_image": handle_view_image,
             "git_status": handle_git_status,
             "git_diff": handle_git_diff,
             "write_memory": handle_write_memory,
