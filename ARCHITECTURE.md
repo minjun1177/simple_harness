@@ -12,9 +12,9 @@ mistakes are.
 
 ## 1. What this is
 
-A terminal AI assistant, ~15,700 lines of Python, no framework. It talks to
+A terminal AI assistant, ~16,100 lines of Python, no framework. It talks to
 Ollama, Anthropic, OpenAI and Gemini over plain HTTP (no vendor SDKs), gives the
-model 34 tools, and runs them with the user's approval.
+model 39 tools, and runs them with the user's approval.
 
 The design constraint that explains most of the odd decisions: **it has to work
 with a 4-billion-parameter local model.** Such a model cannot reliably escape a
@@ -463,6 +463,49 @@ import time, and `session` imports `config`, so `systemprompt` cannot reach
 `session` without a cycle. Composing is where every other per-conversation
 piece already goes.
 
+**5.16 What is true about a project is kept per project, as markdown, and the
+file is the record.** 5.15 put what the model knows about the *person* in front
+of it. The other half is what it knows about the *repository* - why the anchor
+hash has three characters, the order the deploy runs in, the three questions
+nobody has answered - and none of that belongs in a store shared by every
+project, because it is not merely unhelpful elsewhere, it is wrong elsewhere.
+It is also prose with headings and a code fence in it, which is not what JSON
+is for.
+
+So `notes.py` is a second store with different rules. `channel.workspace()`
+decides what a project is, which is the git working tree or the current
+directory when there is none, so a terminal in `src/` sees what one at the root
+sees; `paths.workspace_slug` names the directory, and it is the same name the
+channel board is filed under, so the two cannot come to different conclusions
+about where a project ends.
+
+One note is one file - `~/.localchat/notes/<project>/<id>.md` - and the file is
+the whole record: its name is the id, its mtime is when it was written, its
+bytes are the content. There is deliberately no index beside it. An index is a
+second place for "which notes exist" to be true in, and this one could disagree
+with the directory the moment a person deleted a file by hand, which they can,
+because the point of markdown on disk is that it opens in an editor.
+
+Three things follow the same reasoning as 5.15:
+
+* **The body travels as a raw block.** `<content>`, the way file bodies do. A
+  note is the one kind of text most likely to contain a fenced code block, and
+  asking a 4B model to JSON-escape one is asking for the failure this harness
+  exists to avoid.
+* **The prompt gets titles, never bodies.** A note can be a page; forty of them
+  would be unbounded context charged on every turn. What a fresh session lacks
+  is not the content but the knowledge that the content exists - one line per
+  note buys exactly that, and `read_note` buys the rest.
+* **The title list is sorted by id.** Not by mtime. This is a cache prefix
+  (5.10), and ordering it by time would reshuffle the prompt every time a note
+  was written, for nothing.
+
+A note id is chosen by the model and becomes a filename, so it goes through
+`paths.safe_name` - the same slug a session title gets, for the same reason.
+`../../.ssh/config` loses every separator on the way through, and `note_path`
+then refuses anything whose parent is not the notes directory, so loosening the
+slug later cannot quietly turn an id into a way to write anywhere on the disk.
+
 ---
 
 ## 6. Module map
@@ -508,6 +551,7 @@ app.py            the loop, slash commands, session lifecycle
 | `channel.py` | Who else is running here, what they said, what they hold | Anything about one conversation |
 | `context.py` | Token estimate, trimming, compression, and folding the token history into turns | |
 | `session.py` | Session files, the directory each was worked in, long-term memory, and the block the important ones make (5.15) | Where that block is put - `app` composes |
+| `notes.py` | A project's markdown notes: where they live, the five tools over them, and the block of titles (5.16) | What counts as a project - `channel.workspace` answers that |
 | `mentions.py` | `@path` in a typed message: what it names, and what it attaches | Printing - the caller does that |
 | `permissions.py` | Rule loading and the allow/deny/ask decision | |
 | `shell_session.py` | Live commands, waiting-vs-busy detection | |
@@ -516,7 +560,7 @@ app.py            the loop, slash commands, session lifecycle
 | `websearch.py` | Retrieval, extraction, BM25 reranking | |
 | `skills.py` | Skill discovery and loading | |
 | `tui.py` / `renderer.py` | Terminal chrome and markdown | Decisions |
-| `atomic.py`, `sse.py`, `paths.py` | One job each. Stdlib only, importing nothing local | |
+| `atomic.py`, `sse.py`, `paths.py` | One job each. Stdlib only, importing nothing local. `paths` also owns the two names derived from something that was not chosen to be a filename: `safe_name` and `workspace_slug` | |
 | `terms.py` | What the harness does to this machine, asked once before it does it | |
 
 ---
@@ -847,6 +891,7 @@ for t in tests/*.py; do python "$t" || echo "FAILED: $t"; done
 | `test_tdd.py` | That `/tdd` reaches a test file however its path is written, refuses in `dispatch_tool`, holds nothing on disk, and lifts itself (§7a) |
 | `test_malformed_state.py` | State that is not the shape the code assumed: a message with no content, a hand-edited `memory.json`, a setting of nought - and that writing a file through a tool is atomic and leaves its line endings alone (5.7) |
 | `test_memory.py` | That a memory marked `important` reaches the prompt a session opens on, that the mark survives being saved over, and that the block is capped and byte-stable (5.15) |
+| `test_notes.py` | That a note is one markdown file whose name is its id, that projects do not share notes while a subdirectory shares one, that a model-chosen id cannot write outside the notes directory, and that the prompt gets sorted titles only (5.16) |
 | `test_vault.py` | That a `.env` value never reaches the model by any route, that a placeholder reaches the shell as the real key, and that a file is neither how it gets out nor how it is lost (§8b) |
 | `test_docs.py` | That this file and `README.md` still describe the program that exists |
 | `test_compat.py` | That the commands, settings, tool names and files people build habits on are still there under the same names (5.14) |

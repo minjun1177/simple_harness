@@ -9,6 +9,7 @@ from simple_harness import config
 from simple_harness import paths
 from simple_harness import terms
 from simple_harness import channel
+from simple_harness import notes
 from simple_harness import deepthink
 from simple_harness import git_ops
 from simple_harness import skills
@@ -39,12 +40,14 @@ def _compose_system_prompt(summary: str = "") -> str:
     base = config.SYSTEM_PROMPT
     if config.CUSTOM_PERSONA:
         base = config.CUSTOM_PERSONA + "\n\n" + base
-    # The memories marked important are read here rather than inside
-    # `systemprompt()` for one reason: `config` builds that at import time, and
-    # `session` cannot be imported from under it. Composing is where every
-    # other per-conversation piece already goes, so it goes here too - and it
-    # lands ahead of the summary, which must stay last for `_extract_summary`.
-    return base + memory_prompt_section() + summary
+    # The memories marked important, and the titles of this project's notes,
+    # are read here rather than inside `systemprompt()` for one reason:
+    # `config` builds that at import time, and neither `session` nor `notes`
+    # can be imported from under it. Composing is where every other
+    # per-conversation piece already goes, so they go here too - and they land
+    # ahead of the summary, which must stay last for `_extract_summary`.
+    return (base + memory_prompt_section()
+            + notes.notes_prompt_section() + summary)
 
 
 def _extract_summary(system_content: str) -> str:

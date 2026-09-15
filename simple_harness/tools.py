@@ -1907,6 +1907,7 @@ _WRITES_FILES = {
 _CHANGES_THINGS = frozenset(_WRITES_FILES) | {
     "create_dir", "run_cmd", "send_input", "end_process", "run_python",
     "write_memory", "edit_memory", "delete_memory", "call_api",
+    "write_note", "edit_note", "delete_note",
 }
 
 
@@ -2077,14 +2078,18 @@ def dispatch_tool(function_name: str, arguments: dict) -> str | None:
 def _handlers() -> dict:
     """Tool name to the function that runs it.
 
-    `session` is imported here rather than at the top only because it keeps the
-    memory handlers next to the rest of the table; there is no cycle either way.
+    `session` and `notes` are imported here rather than at the top only because
+    it keeps the memory and note handlers next to the rest of the table; there
+    is no cycle either way.
     """
     global _HANDLERS
     if _HANDLERS is None:
         from simple_harness.session import (handle_write_memory, handle_get_memory_list,
                              handle_read_memory, handle_delete_memory,
                              handle_edit_memory)
+        from simple_harness.notes import (handle_write_note, handle_read_note,
+                                          handle_list_notes, handle_edit_note,
+                                          handle_delete_note)
         _HANDLERS = {
             "search_web": handle_search_web,
             "get_url": handle_get_url,
@@ -2106,6 +2111,11 @@ def _handlers() -> dict:
             "read_memory": handle_read_memory,
             "delete_memory": handle_delete_memory,
             "edit_memory": handle_edit_memory,
+            "write_note": handle_write_note,
+            "read_note": handle_read_note,
+            "list_notes": handle_list_notes,
+            "edit_note": handle_edit_note,
+            "delete_note": handle_delete_note,
             "get_user_input": handle_get_input,
             "get_system_info": handle_get_system_info,
             "search_in_file": handle_search_in_file,

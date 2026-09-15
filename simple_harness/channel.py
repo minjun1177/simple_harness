@@ -44,7 +44,6 @@ a worse one.
 """
 
 import atexit
-import hashlib
 import json
 import os
 import re
@@ -113,16 +112,12 @@ def workspace() -> str:
 def board_path() -> str:
     """The file the workspace's agents share.
 
-    Named after the directory *and* a digest of it: the name is so a person
-    looking in `~/.localchat/channel` can tell which project a board belongs
-    to, and the digest is because two different projects are routinely called
-    `chat`.
+    Named after the directory *and* a digest of it - see `paths.workspace_slug`
+    for why. The naming lives there rather than here because a project's notes
+    are filed under the same name, and two spellings of "which project is this"
+    would be two answers waiting to disagree.
     """
-    place = workspace()
-    digest = hashlib.sha1(os.path.normcase(place).encode("utf-8", "replace"))
-    readable = re.sub(r"[^\w.-]", "-", os.path.basename(place.rstrip(os.sep)))
-    return paths.state("channel", f"{readable[:32] or 'workspace'}-"
-                                  f"{digest.hexdigest()[:10]}.json")
+    return paths.state("channel", paths.workspace_slug(workspace()) + ".json")
 
 
 def reset() -> None:

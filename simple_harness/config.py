@@ -237,6 +237,17 @@ HISTORY_FILE = paths.state("history")
 MEMORY_IMPORTANT_MAX = 20
 MEMORY_IMPORTANT_CHARS = 600
 
+# Notes are the other half of remembering: markdown about one project rather
+# than facts about the person, one file per note under `NOTES_DIR/<project>/`.
+# Only the titles reach the prompt (`notes.notes_prompt_section`), so the cap
+# here is on how many lines that list may run to - the bodies cost nothing
+# until `read_note` asks for one.
+NOTES_DIR = paths.state("notes")
+NOTES_TITLES_MAX = 40
+# A note comes back into the conversation whole, so the ceiling is the point at
+# which one note stops being something a small model can take in at once.
+NOTE_MAX_CHARS = 20000
+
 # Sessions are filed under a human title instead of a timestamp. AUTO_TITLE lets
 # the model name a new session after its first exchange; /title overrides it.
 AUTO_TITLE = True
@@ -618,7 +629,7 @@ _NOT_A_SETTING = frozenset({
     "TDD_LOCK", "LOADED_MCP_SERVERS",
     # Where the person's own files live. `LOCALCHAT_HOME` moves all of them
     # together; moving one by hand splits a memory or a session list in two.
-    "MEMORY_FILE", "HISTORY_FILE", "SESSION_DIR",
+    "MEMORY_FILE", "HISTORY_FILE", "SESSION_DIR", "NOTES_DIR",
     # Invariant 5.9: these two are anchors that `tools`, `llm_client` and `tui`
     # each test with `startswith`. They are a protocol, not a preference.
     "TOOL_ERROR_PREFIX", "TOOL_REFUSAL_PREFIX",

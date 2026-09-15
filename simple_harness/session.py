@@ -5,6 +5,7 @@ import datetime
 
 from simple_harness import atomic
 from simple_harness import config
+from simple_harness import paths
 from simple_harness import providers
 from simple_harness.config import S, ttlp
 
@@ -193,12 +194,6 @@ SESSION_FORMAT = 4
 SESSION_FORMATS = (2, 3, 4)
 
 
-_FS_UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
-_WINDOWS_RESERVED = ({"CON", "PRN", "AUX", "NUL", "CLOCK$"}
-                     | {f"COM{i}" for i in range(1, 10)}
-                     | {f"LPT{i}" for i in range(1, 10)})
-
-
 def _timestamp_id() -> str:
     return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -221,17 +216,12 @@ def clean_title(raw: str) -> str:
 
 
 def slugify_title(title: str) -> str:
-    """Turn a human title into a filesystem-safe session id ("" if nothing survives)."""
-    slug = _FS_UNSAFE.sub(" ", title or "")
-    slug = re.sub(r'[^\w\s-]', '', slug, flags=re.UNICODE)
-    slug = re.sub(r'\s+', '-', slug.strip())
-    slug = re.sub(r'-{2,}', '-', slug).strip('-._')
-    slug = slug[:config.SESSION_SLUG_MAX_LEN].strip('-._').lower()
-    if not slug:
-        return ""
-    if slug.split('.')[0].upper() in _WINDOWS_RESERVED:
-        slug = f"{slug}-session"
-    return slug
+    """Turn a human title into a filesystem-safe session id ("" if nothing survives).
+
+    The rule itself lives in `paths`, because a note id becomes a filename the
+    same way and for the same reasons.
+    """
+    return paths.safe_name(title, config.SESSION_SLUG_MAX_LEN, "session")
 
 
 def _unique_session_id(base: str, current_id: str = None) -> str:

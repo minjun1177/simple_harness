@@ -23,7 +23,9 @@ import time (ARCHITECTURE 5.2), so the modules below it cannot import `config`;
 they can import this.
 """
 
+import hashlib
 import os
+import re
 
 ENV_VAR = "LOCALCHAT_HOME"
 DIR_NAME = ".localchat"
@@ -53,6 +55,55 @@ def ensure_home() -> str:
     except OSError:
         pass          # the writer will report it with the file it was writing
     return directory
+
+
+# ---------------------------------------------------------------------------
+# naming a file after something that was not chosen to be a filename
+# ---------------------------------------------------------------------------
+
+# Illegal on Windows, and `/` would silently make a name into a path.
+_FS_UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+# Names Windows will not give a file whatever the extension. `CON.md` is not a
+# file there, and the failure comes back as a permission error from `open`.
+_WINDOWS_RESERVED = ({"CON", "PRN", "AUX", "NUL", "CLOCK$"}
+                     | {f"COM{i}" for i in range(1, 10)}
+                     | {f"LPT{i}" for i in range(1, 10)})
+
+
+def safe_name(text: str, limit: int = 48, reserved_suffix: str = "x") -> str:
+    """A filename for `text`, or "" when nothing usable is left of it.
+
+    Session titles and note ids are both written by a model, in any script, and
+    both end up as a filename. Letters and digits survive in whatever language
+    they are in - a Korean note id stays readable rather than becoming a hash -
+    and everything the filesystem would object to does not.
+
+    `reserved_suffix` is appended when the result is a name Windows reserves,
+    which is the one case where a legal-looking name still cannot be created.
+    """
+    slug = _FS_UNSAFE.sub(" ", text or "")
+    slug = re.sub(r'[^\w\s-]', '', slug, flags=re.UNICODE)
+    slug = re.sub(r'\s+', '-', slug.strip())
+    slug = re.sub(r'-{2,}', '-', slug).strip('-._')
+    slug = slug[:limit].strip('-._').lower()
+    if not slug:
+        return ""
+    if slug.split('.')[0].upper() in _WINDOWS_RESERVED:
+        slug = f"{slug}-{reserved_suffix}"
+    return slug
+
+
+def workspace_slug(place: str) -> str:
+    """A directory's own name, plus a digest of the path it sits at.
+
+    The readable half is so a person looking in `~/.localchat` can tell which
+    project something belongs to; the digest is because two different projects
+    are routinely both called `chat`. Used for the channel board and for a
+    project's notes, which must agree on what counts as one project.
+    """
+    digest = hashlib.sha1(os.path.normcase(place).encode("utf-8", "replace"))
+    readable = re.sub(r"[^\w.-]", "-", os.path.basename(place.rstrip(os.sep)))
+    return f"{readable[:32] or 'workspace'}-{digest.hexdigest()[:10]}"
 
 
 def strays_in_cwd() -> list:

@@ -37,6 +37,7 @@ exists to make small models genuinely usable rather than nearly usable.
 - **Interactive Action Approval**: Security layer that prompts the user for confirmation prior to running shell commands, editing/writing files, or sending network API requests.
 - **Dynamic Context Compression**: Monitors active token counts and conversation length to automatically condense conversation history when nearing model limits, tailored to model size.
 - **Persistent Memory Storage**: Long-term key-value memory storage system backed by `memory.json` to store user preferences, facts, and instructions across sessions. A memory saved with `important` set does not wait to be looked up: it is written into the system prompt, so the model has it before the first message of every session - a fresh one and a resumed one alike. That is the difference between a store the model *can* read and one it *has* read.
+- **Per-Project Notes**: Markdown notes about one repository, kept apart from memory because memory is about *you* and follows you everywhere, while a note is about *this* project and is wrong anywhere else - why something is built the way it is, the order a job has to be done in, what is still open. One note is one `.md` file under `~/.localchat/notes/<project>/`, so the directory opens in any editor and nothing appears inside your repository. The git working tree decides what a project is, so a terminal in `src/` sees what one at the root sees. Only the titles reach the system prompt; `read_note` fetches a body when the model recognises one it needs.
 - **Session & History Management**: Save, list, load, record, and export conversation transcripts in JSON or Markdown format.
 - **Named Sessions**: Sessions are filed under a readable title instead of a timestamp. The model names each new session after its first exchange (`/autotitle off` to stop it), `/title <name>` renames it by hand, and `/load` accepts either the title or the id.
 - **Resuming from the command line**: `simple-harness --resume <id or title>` reopens a saved conversation, and `-c` reopens the newest one you were last working on *in this directory* - a session records where it was worked, so `-c` in a project picks up that project's thread rather than whatever you did most recently anywhere.
@@ -164,7 +165,7 @@ deliberate `VM_TIMEOUT`.
 
 ## 4. Tool Capabilities
 
-The client equips the model with 34 tools. They are listed in one table in
+The client equips the model with 39 tools. They are listed in one table in
 `toolspec.py`, from which both the system prompt and the dispatcher are
 generated - so this list cannot quietly drift from what actually runs.
 
@@ -427,6 +428,14 @@ that says what went wrong.
 - `get_memory_list`: List stored memory IDs with timestamp and preview, marking the ones saved as `important`.
 - `edit_memory`: Update content of an existing memory record.
 - `delete_memory`: Remove a memory entry from disk.
+
+### Project Note Tools
+Markdown notes about *this* project, kept separately from memory - memory is about you and follows you everywhere, a note is about one repository and is wrong anywhere else. One note is one `.md` file under `~/.localchat/notes/<project>/`, so the directory can be opened in any editor. Only the titles go into the system prompt; a body is read when it is asked for.
+- `write_note`: Save a markdown note about this project - why something is built the way it is, the order a job has to be done in, what is still open. The body arrives in a `<content>` raw block, never JSON-escaped. Writing under an id that already exists replaces it whole.
+- `read_note`: Read one note in full by its id.
+- `list_notes`: List this project's notes - id, size and when each was last written.
+- `edit_note`: Replace the body of a note that already exists. `write_note` is what starts a new one.
+- `delete_note`: Remove a note from disk.
 - `get_user_input`: Ask the user one or more questions, each with its own list of options plus a free-text choice.
 
 ### MCP Tools
@@ -1533,6 +1542,8 @@ The settings worth knowing:
 | `MCP_LAZY_MIN_TOOLS` | 6 | Tools a server needs before it is announced rather than described |
 | `MEMORY_IMPORTANT_MAX` | 20 | Memories marked `important` that the system prompt will carry |
 | `MEMORY_IMPORTANT_CHARS` | 600 | Characters of each one before it is cut, with a note saying to `read_memory` for the rest |
+| `NOTES_TITLES_MAX` | 40 | Project-note titles the system prompt will list |
+| `NOTE_MAX_CHARS` | 20000 | Ceiling on one note, which comes back into the conversation whole |
 | `SEARXNG_URL` | `""` | A self-hosted search instance to prefer over the public sources |
 
 The rest are tuning knobs for search, MCP and command sessions; they are
@@ -1679,6 +1690,7 @@ The codebase is organized cleanly around the following components:
 - **`tests/test_hashline_edit.py`**: That `38:ff7|print()` reaches the line it names, that a stale or mistyped anchor is refused rather than applied a few lines off, and that everything which is not an anchor still behaves as it did.
 - **`tests/test_channel.py`**: That a file one harness is changing cannot be written from another, that the refusal names who to ask, that a claim dies with the terminal that took it, and that several processes writing to the board at once lose nothing.
 - **`tests/test_mentions.py`**: What `@` attaches and what it must leave alone - an email address is not a file - that the completion menu reads the real directory, and that the command menu previews what each command does and what may follow it.
+- **`tests/test_notes.py`**: That a note is one markdown file whose name is its id and whose bytes are its content, that two projects do not share notes while one project is the same project from any directory inside it, that a note id the model chose cannot write outside the notes directory, and that the prompt gets the titles only - capped, sorted, and identical between builds.
 - **`tests/test_memory.py`**: That a memory marked `important` is in the system prompt a session opens on - a new one and a resumed one - that the mark survives a later rewrite of the memory's text, that the block is capped in both directions and says when it cut something, and that a hand-edited `memory.json` cannot break the prompt.
 - **`tests/test_vault.py`**: That a `.env` value never reaches the model - not through `read_file`, not through a command that prints it, not through an `@` attachment - that the placeholder reaches the shell as the real key, and that a file is neither how a secret gets out nor how it gets lost.
 - **`tests/test_malformed_state.py`**: What happens when the state is not the shape the code assumed - a message whose content is `null`, a `memory.json` somebody edited by hand, a setting typed as nought - and that `write_file` and `edit_file` replace a file in one step rather than truncating it first, without rewriting its line endings on the way past.
@@ -1692,6 +1704,7 @@ The codebase is organized cleanly around the following components:
 - **`skills/`**: Project-level skills. Personal skills live in `~/.localchat/skills/`.
 - **`.permissions.json`**: Project-level tool permission rules (see `.permissions.json.example`). Personal ones live in `~/.localchat/permissions.json`.
 - **`.mcp.json`**: Project-level MCP server declarations (see `.mcp.json.example`). Personal ones live in `~/.localchat/mcp.json`.
+- **`notes.py`**: Markdown notes about one project - where a project's notes live, the five tools over them, and the block of titles that goes into the system prompt.
 - **`memory.json`**: Key-value JSON storage backing the long-term memory system. Each record carries its content, when it was written, and whether it was marked `important`.
 - **`sessions/`**: Session directory containing JSON transcript backups for conversation history. Each file is named after the session's title (slugified, e.g. `웹-검색-랭킹-개선.json`); untitled sessions fall back to a timestamp until a title exists. Each also records the working directory it was last saved from, which is what `-c` matches against.
 - **`.chat_history`**: History file managed by `prompt_toolkit` for command history recall across terminal runs.

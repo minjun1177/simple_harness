@@ -239,6 +239,42 @@ TOOLS = (
         ),
     ),
     Tool(
+        name='write_note',
+        description="Save a markdown note about THIS project - why something is built the way it is, the order a job has to be done in, what is still open. Notes are per project and are not the same store as write_memory, which is about the user and follows them everywhere. The body is NOT a JSON parameter: put it in a <content> block directly after the JSON object, inside the same <tool_call> (see DO rule 3). Write markdown there exactly as it should read, with no escaping. Writing a note under an id that already exists replaces it whole.",
+        native_description="Save a markdown note about THIS project - why something is built the way it is, the order a job has to be done in, what is still open. Notes are per project and are not the same store as write_memory, which is about the user and follows them everywhere. Writing a note under an id that already exists replaces it whole.",
+        params=(
+            Param(name='id', description="The note id, which is also its title - a short descriptive label, e.g. 'deploy-order', 'why-hashline', 'open-questions'. This one DOES go in the JSON.", aliases=('note', 'note_id', 'title'), native_description="The note id, which is also its title - a short descriptive label, e.g. 'deploy-order', 'why-hashline', 'open-questions'."),
+            Param(name='content', description='The whole note, as markdown, in a <content> raw block.', block=True, native_description='The whole note, as markdown.'),
+        ),
+    ),
+    Tool(
+        name='read_note',
+        description='Read one of this project\'s markdown notes in full, by its id. The ids are listed in your prompt under PROJECT NOTES.',
+        params=(
+            Param(name='id', description='The note id to read.', aliases=('note', 'note_id', 'title')),
+        ),
+    ),
+    Tool(
+        name='list_notes',
+        description="List this project's markdown notes - id, size and when each was last written.",
+    ),
+    Tool(
+        name='edit_note',
+        description='Replace the body of a note that already exists. Use write_note to start a new one. The new body is NOT a JSON parameter: put it in a <new_content> block directly after the JSON object, inside the same <tool_call> (see DO rule 3).',
+        native_description='Replace the body of a note that already exists. Use write_note to start a new one.',
+        params=(
+            Param(name='id', description='The note id to edit.', aliases=('note', 'note_id', 'title')),
+            Param(name='new_content', description='The whole new note, as markdown, in a <new_content> raw block.', block=True, native_description='The whole new note, as markdown.'),
+        ),
+    ),
+    Tool(
+        name='delete_note',
+        description='Delete one of this project\'s markdown notes by its id.',
+        params=(
+            Param(name='id', description='The note id to delete.', aliases=('note', 'note_id', 'title')),
+        ),
+    ),
+    Tool(
         name='get_user_input',
         description="Ask the user one or more questions and get their answers. Each question is asked separately, with its own list of options; the user picks a number or types their own answer. Use this when a choice is genuinely the user's to make.",
         params=(
