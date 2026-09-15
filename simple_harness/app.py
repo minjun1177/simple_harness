@@ -34,7 +34,8 @@ from simple_harness.renderer import _render_full
 from simple_harness.session import (save_session, load_session, list_sessions, find_sessions,
                      latest_in_dir, rename_session, generate_session_title, clean_title,
                      memory_prompt_section)
-from simple_harness.context import manage_context
+from simple_harness.context import (manage_context, _estimate_tokens,
+                                    _get_ctx_budget, token_turns)
 from simple_harness import llm_client
 from simple_harness.llm_client import chat_turn, parse_tool_calls, strip_thinking
 
@@ -318,6 +319,20 @@ def _close_menu_when_unwanted(buffer) -> None:
             buffer.cancel_completion()
     except Exception:
         pass          # a menu is a convenience; it never stops typing
+
+
+def _report_usage(messages: list[dict]) -> None:
+    """Tell the remote what this conversation costs now.
+
+    The phone has no `/usage` and no room for one, but it does have room for a
+    number above the box - and "how much of the window is left" is the thing
+    somebody driving from a train most wants and least can ask for.
+    """
+    try:
+        remote.set_usage(_estimate_tokens(messages), _get_ctx_budget(),
+                         len(token_turns()))
+    except Exception:
+        pass          # a number on a strip is never worth an exception
 
 
 def _print_above(text: str) -> None:
@@ -869,6 +884,7 @@ async def main(resume_id: str = "") -> None:
     _report_strays()
     _report_agents(channel.join(_agent_label()))
     _open_saved_remote()
+    _report_usage(messages)
 
     if resume_id:
         if resumed:
@@ -996,6 +1012,7 @@ async def main(resume_id: str = "") -> None:
             mcp_servers_in_prompt = sorted(config.LOADED_MCP_SERVERS)
             print("\033[2J\033[H", end="")
             _welcome()
+            _report_usage(messages)
             print(f"  {S.OK}✓ Conversation and usage cleared.{S.R}\n")
             continue
         if cmd == "/models":
@@ -1512,6 +1529,7 @@ async def main(resume_id: str = "") -> None:
             connect._print_problem("Error", e)
         finally:
             remote.set_busy(False)
+            _report_usage(messages)
             # `/tdd` is armed for one request and lifts itself here - including
             # when the turn ended in an error or the user interrupted it. A
             # lock that outlives what it was asked for is a lock nobody

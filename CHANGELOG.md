@@ -146,6 +146,17 @@ printed on the spot - rather than waiting for a restart.
   driving.** It is the one blocking question that never went through
   `ask_the_driver`; a remote-driven turn stopped there with nothing on the
   phone to say why. It goes through it now, with its two answers as buttons.
+- **The page was a wall of grey.** The transcript was stripped of colour on
+  its way out; it now keeps the terminal's `ESC [ … m` and the page paints it.
+  Every other escape is still removed before sending, and text only ever lands
+  as `textContent`, so nothing that arrives can be markup.
+- **A line sent from the page appeared twice** - once echoed locally and once
+  when the harness printed it at the prompt and the mirror carried it back.
+  The local echo is gone; the transcript's own copy is the one you see, exactly
+  as the terminal shows it.
+- **The page now says what the conversation costs**: tokens against the context
+  window and the number of turns, on a strip above the box. It is the half of
+  `/usage` that fits on a phone.
 - **Redaction was silent about itself.** A `.env` value that is also an
   ordinary word - `PROJECT_DIR=simple_harness` - is a secret by the only rule
   that never lets a key through, so `!dir` came back full of

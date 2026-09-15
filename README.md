@@ -638,6 +638,17 @@ the transcript as it is printed here, a box that types into the same loop the
 keyboard types into - a message or a slash command, both - and, when something
 needs approving, the approval prompt itself with its buttons.
 
+The transcript arrives with the terminal's own colours still on it and the
+page paints them, because half of what a terminal says is *how* it says it -
+a refusal in red, a tool call in grey, the answer in white - and a wall of
+identical text is harder to read on a phone than on the screen it came from.
+Only `ESC [ … m` ever reaches the browser; every other escape is taken out
+before it is sent, and the text itself only ever goes in as `textContent`.
+
+Above the box is a strip saying what the conversation costs - tokens against
+the context window, and how many turns - which is the part of `/usage` that
+fits on a phone and the thing somebody driving from a train most wants to know.
+
 Typing `/` there lists the slash commands with what each one does, from the
 same table `/help` renders, and tapping one inserts it: a phone has not read
 `/help` and cannot be expected to remember forty names. Typing `!` turns the

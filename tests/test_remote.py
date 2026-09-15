@@ -141,12 +141,18 @@ print("\n--- the transcript is what the terminal printed ---")
 
 remote.publish("plain line\n")
 remote.publish("\x1b[33mcoloured\x1b[0m line\n")
+remote.publish("\x1b[2K\x1b[3Aerased and moved\n")
 remote.publish("spinner one\rspinner two\n")
 remote.publish("half a line, still")
 code, body = state(TOKEN)
 lines = [text for _, text in body["lines"]]
 check("a line arrives", "plain line" in lines, str(lines))
-check("ANSI is stripped off it", "coloured line" in lines, str(lines))
+check("its colour comes with it - the browser is what paints the transcript",
+      "\x1b[33mcoloured\x1b[0m line" in lines, str(lines))
+check("but nothing that moves a cursor or erases does",
+      "erased and moved" in lines
+      and not any("\x1b[2K" in text or "\x1b[3A" in text for text in lines),
+      str([t for t in lines if "erased" in t]))
 check("an overwritten line arrives as what was left",
       "spinner two" in lines and "spinner one" not in lines, str(lines))
 check("a line still being printed is the tail, not a line",
@@ -235,6 +241,10 @@ check("the question reaches the remote",
       question and question["title"].startswith("Run Command"), str(question))
 check("with what is being approved",
       question and ["command", "rm -rf build/"] in question["details"], str(question))
+check("and a question is plain text - the page draws it, so colour is noise",
+      question and not any("\x1b" in str(part) for row in question["details"] for part in row)
+      and not any("\x1b" in str(part) for row in question["choices"] for part in row),
+      str(question))
 check("and no answer field to read ahead",
       question and "answer" not in question, str(question))
 
@@ -430,6 +440,17 @@ remote.take_notices()
 check("who opened it is known", any(row["address"] == "127.0.0.1"
                                     for row in remote.clients()),
       str(remote.clients()))
+
+# ---------------------------------------------------------------------------
+print("\n--- and what the conversation is costing ---")
+
+code, body = state(TOKEN)
+check("nothing is claimed before anything is known", not body.get("usage"),
+      str(body.get("usage")))
+remote.set_usage(4321, 20000, turns=3)
+code, body = state(TOKEN)
+check("what the loop reports is what the page gets",
+      body["usage"] == {"used": 4321, "budget": 20000, "turns": 3}, str(body["usage"]))
 
 # ---------------------------------------------------------------------------
 print("\n--- the phone is told what it may type ---")

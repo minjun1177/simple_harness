@@ -109,6 +109,10 @@ _BROWSER_ASKS_ANYWAY = frozenset({
 })
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+# The colour half of that: `ESC [ … m` and nothing else. It is the only escape
+# the browser is allowed to see - a cursor move means nothing to a page and
+# everything to whoever is reading it.
+_NOT_SGR = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-ln-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
 # Everything below is read and written from the server's threads and from the
 # main one, so nothing here is touched outside `_wake`.
@@ -134,6 +138,7 @@ _tail = ""                  # the line being printed, before its newline
 _typed = collections.deque()             # lines from the remote, oldest first
 _question = None            # the question waiting for an answer, or None
 _busy = False
+_usage = {}                 # what the conversation costs, for the page's strip
 _driver = "terminal"        # who started the line being worked on
 _last_seen = 0.0            # when a remote client last asked for state
 
@@ -245,12 +250,26 @@ def publish(text: str) -> None:
 
 
 def _clean(line: str) -> str:
-    """One line as the remote should see it: no ANSI, no secrets."""
-    line = _ANSI.sub("", line).replace("\t", "    ").rstrip()
+    """One line as the remote should see it: colour kept, nothing else.
+
+    The transcript is the terminal's own output, and half of what the terminal
+    says is *how* it says it - a refusal in red, a tool call in grey, the
+    model's answer in white. Stripping that left the phone with a wall of
+    identical text that is genuinely harder to read than the screen it came
+    from. So the colour survives to the browser, which paints it, and every
+    other escape - the cursor moves, the erases - is taken out here, where it
+    cannot mean anything to a page.
+    """
+    line = _NOT_SGR.sub("", line).replace("\t", "    ").rstrip()
     try:
         return vault.redact(line)
     except Exception:
         return line
+
+
+def _plain(text: str) -> str:
+    """The same, with the colour taken out too: for a question's own words."""
+    return _ANSI.sub("", _clean(text))
 
 
 def transcript(since: int = 0) -> list:
@@ -288,6 +307,19 @@ def set_busy(flag: bool) -> None:
         if _busy != bool(flag):
             _busy = bool(flag)
             _wake.notify_all()
+
+
+def set_usage(used: int, budget: int, turns: int = 0) -> None:
+    """What this conversation is costing, for the strip above the phone's box.
+
+    Pushed in rather than worked out here: the conversation lives in `app`, and
+    a module that opens a socket has no business reaching into it. Numbers
+    only - the page draws them.
+    """
+    global _usage
+    with _wake:
+        _usage = {"used": int(used), "budget": int(budget), "turns": int(turns)}
+        _wake.notify_all()
 
 
 def set_driver(who: str) -> None:
@@ -516,8 +548,8 @@ def ask(title: str, details, choices, free_text: bool = False,
         _question = {
             "id": ticket,
             "title": title,
-            "details": [[str(label), _clean(str(value))] for label, value in details],
-            "choices": [[str(value), _clean(str(label))] for value, label in choices],
+            "details": [[_plain(str(label)), _plain(str(value))] for label, value in details],
+            "choices": [[str(value), _plain(str(label))] for value, label in choices],
             "free_text": bool(free_text),
             "asked": time.time(),
             "answer": None,
@@ -737,6 +769,7 @@ def stop() -> None:
         _bad.clear()
         _sessions.clear()
         _pairing = None
+        _usage.clear()
         _last_seen = 0.0
 
 
@@ -985,9 +1018,10 @@ class _Handler(BaseHTTPRequestHandler):
             # one question answered and the next asked between two polls is
             # the case a boolean cannot see, and it is the case where being
             # late matters most.
-            was_busy = _busy
+            was_busy, was_usage = _busy, dict(_usage)
             was_asking = _question["id"] if _question else ""
             while (_seq <= since and _busy == was_busy and _server is not None
+                   and _usage == was_usage
                    and (_question["id"] if _question else "") == was_asking):
                 if time.time() >= deadline:
                     return
@@ -1007,6 +1041,7 @@ def _state(since: int) -> dict:
             "lines": lines,
             "tail": _clean(_tail),
             "busy": _busy,
+            "usage": dict(_usage),
             "driver": _driver,
             "queued": len(_typed),
             "question": question,
@@ -1080,6 +1115,13 @@ form { display:flex; gap:8px; padding:10px 14px calc(10px + env(safe-area-inset-
 #menu span { color:var(--muted); display:block; font-size:12px; margin-top:2px; }
 #shell { display:none; padding:8px 14px; background:#231d10; color:var(--warn);
          border-top:1px solid var(--warn); font-size:12px; }
+#cost { display:flex; align-items:center; gap:8px; padding:4px 14px 0;
+        font-size:11px; color:var(--muted); }
+#cost .bar { flex:1; height:3px; border-radius:2px; background:#2a2a2a;
+             overflow:hidden; }
+#cost .bar i { display:block; height:100%; width:0; background:var(--ok); }
+#cost.warm .bar i { background:var(--warn); }
+#cost.full .bar i { background:var(--err); }
 body.shell input { color:var(--warn); border-color:var(--warn); }
 input { flex:1; min-width:0; font:inherit; padding:11px 12px; border-radius:6px;
         border:1px solid var(--line); background:#111; color:var(--text); }
@@ -1110,6 +1152,7 @@ input:focus { outline:1px solid var(--accent); }
 <div id="ask"><h3></h3><dl></dl><div class="row"></div></div>
 <div id="menu"></div>
 <div id="shell"><b>Shell</b> - runs on that machine as you; not sent to the model</div>
+<div id="cost" hidden><span id="costtext"></span><span class="bar"><i></i></span></div>
 <form id="say"><input id="text" placeholder="message, or /command"
   autocomplete="off" autocapitalize="off" autocorrect="off"><button>Send</button></form>
 <script>
@@ -1170,11 +1213,52 @@ document.getElementById("code").addEventListener("keydown", (e) => {
 });
 
 function atBottom() { return log.scrollHeight - log.scrollTop - log.clientHeight < 60; }
+
+// The transcript arrives with the terminal's own colours still on it, as SGR
+// escapes. Painting them is what makes it readable: a refusal in red and a
+// tool call in grey say as much as the words do. Only `ESC [ … m` reaches the
+// browser - everything else was taken out before it was sent - and the text
+// itself only ever goes in as textContent, so nothing here can be markup.
+const BASIC = ["#1c1c1c", "#e06c75", "#98c379", "#e5b567", "#61afef", "#c678dd",
+               "#56b6c2", "#e8e4dc"];
+
+function paint(target, text) {
+  const parts = text.split(/\\x1b\\[([0-9;]*)m/);
+  let colour = null, bold = false;
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 1) { [colour, bold] = sgr(parts[i], colour, bold); continue; }
+    if (!parts[i]) continue;
+    const span = document.createElement("span");
+    span.textContent = parts[i];
+    if (colour) span.style.color = colour;
+    if (bold) span.style.fontWeight = "600";
+    target.appendChild(span);
+  }
+}
+
+function sgr(codes, colour, bold) {
+  const n = codes.split(";").map(x => parseInt(x || "0", 10));
+  for (let i = 0; i < n.length; i++) {
+    if (n[i] === 0) { colour = null; bold = false; }
+    else if (n[i] === 1) bold = true;
+    else if (n[i] === 22) bold = false;
+    else if (n[i] === 39) colour = null;
+    else if (n[i] === 38 && n[i + 1] === 2) {
+      const [r, g, b] = [n[i + 2] | 0, n[i + 3] | 0, n[i + 4] | 0];
+      colour = `rgb(${r & 255},${g & 255},${b & 255})`; i += 4;
+    }
+    else if (n[i] === 38 && n[i + 1] === 5) { colour = null; i += 2; }
+    else if (n[i] >= 30 && n[i] <= 37) colour = BASIC[n[i] - 30];
+    else if (n[i] >= 90 && n[i] <= 97) colour = BASIC[n[i] - 90];
+  }
+  return [colour, bold];
+}
+
 function add(text, cls) {
   const stick = atBottom();
   const div = document.createElement("div");
   if (cls) div.className = cls;
-  div.textContent = text === "" ? "\\u00a0" : text;
+  if (text === "") div.textContent = "\\u00a0"; else paint(div, text);
   log.appendChild(div);
   while (log.childNodes.length > 1200) log.removeChild(log.firstChild);
   if (stick) log.scrollTop = log.scrollHeight;
@@ -1271,9 +1355,28 @@ document.getElementById("say").onsubmit = async (e) => {
   closeMenu();
   shell.style.display = "none";
   document.body.classList.remove("shell");
-  add("\\u276f " + text);
+  // No echo here. The harness prints the line itself the moment it reaches the
+  // prompt - `❯ /connect  (from the remote)` - and that comes back in the
+  // transcript like everything else, so echoing it locally showed it twice.
   await call("/say", { text }).catch(() => {});
 };
+
+const cost = document.getElementById("cost"), costtext = document.getElementById("costtext");
+
+function short(n) {
+  return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n);
+}
+
+function drawCost(usage) {
+  if (!usage || !usage.budget) { cost.hidden = true; return; }
+  const share = Math.min(1, usage.used / usage.budget);
+  cost.hidden = false;
+  cost.className = share > 0.9 ? "full" : (share > 0.7 ? "warm" : "");
+  costtext.textContent = `${short(usage.used)} / ${short(usage.budget)} context`
+    + `  ${Math.round(share * 100)}%`
+    + (usage.turns ? `  \\u00b7 ${usage.turns} turn${usage.turns === 1 ? "" : "s"}` : "");
+  cost.querySelector(".bar i").style.width = (share * 100).toFixed(1) + "%";
+}
 
 async function poll() {
   for (;;) {
@@ -1283,13 +1386,14 @@ async function poll() {
       if (r.status === 401) { where.textContent = "this link is no longer valid"; return; }
       const s = await r.json();
       dot.className = s.busy ? "busy" : "live";
+      drawCost(s.usage);
       where.textContent = (s.title || s.cwd) + "  ·  " + s.model;
       for (const [n, text] of s.lines) { add(text); seq = n; }
       if (tailNode) { tailNode.remove(); tailNode = null; }
       if (s.tail) {
         const stick = atBottom();
         tailNode = document.createElement("div");
-        tailNode.className = "t"; tailNode.textContent = s.tail;
+        tailNode.className = "t"; paint(tailNode, s.tail);
         log.appendChild(tailNode);
         if (stick) log.scrollTop = log.scrollHeight;
       }
