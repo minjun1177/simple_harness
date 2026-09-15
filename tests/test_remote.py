@@ -432,6 +432,21 @@ check("who opened it is known", any(row["address"] == "127.0.0.1"
       str(remote.clients()))
 
 # ---------------------------------------------------------------------------
+print("\n--- the phone is told what it may type ---")
+
+code, body = request("/commands", TOKEN)
+rows = json.loads(body)["commands"] if code == 200 else []
+check("the command list is served", code == 200 and len(rows) > 20, str(len(rows)))
+from simple_harness import tui                                      # noqa: E402
+check("and it is the table /help renders, not a second list",
+      [row["name"] for row in rows][:len(tui.COMMANDS)]
+      == [name for name, _ in tui.COMMANDS],
+      "a phone offered a command the terminal does not answer is a dead end")
+check("every row says what it does",
+      all(row["help"].strip() for row in rows))
+check("it needs the token like everything else", request("/commands")[0] == 401)
+
+# ---------------------------------------------------------------------------
 print("\n--- what a browser fetches by itself is not an intruder ---")
 
 remote.take_notices()
@@ -442,8 +457,12 @@ check("and none of it is reported as somebody trying a token",
       not remote.take_notices(),
       "opening the link used to report you at your own prompt, twice")
 check("...nor counted towards the lockout", not remote.status()["refused"])
+# From a standing start: only the *first* wrong token from an address is
+# reported, so a count left over from the check above would hide this one.
+remote._bad.clear()
 code, _ = request("/state", "not-the-token")
-check("while a real wrong token still is", code == 401 and len(remote.take_notices()) == 1)
+check("while a real wrong token still is",
+      code == 401 and len(remote.take_notices()) == 1, str(code))
 
 print("\n--- a browser that goes away is not a stack trace ---")
 

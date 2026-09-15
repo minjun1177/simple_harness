@@ -638,6 +638,13 @@ the transcript as it is printed here, a box that types into the same loop the
 keyboard types into - a message or a slash command, both - and, when something
 needs approving, the approval prompt itself with its buttons.
 
+Typing `/` there lists the slash commands with what each one does, from the
+same table `/help` renders, and tapping one inserts it: a phone has not read
+`/help` and cannot be expected to remember forty names. Typing `!` turns the
+box amber and says **Shell - runs on that machine as you; not sent to the
+model**, which is the same warning the terminal puts over its own prompt and
+for the same reason - the two look identical until one of them runs.
+
 **Every question follows whoever is driving.** A turn started from the phone has its
 questions asked on the phone; a turn started here is asked here. This is the
 part that makes it a remote control rather than a viewer: a run that stops at
@@ -683,10 +690,10 @@ that opens is a shell - the link can type `!rm -rf ~` as easily as "hello". So:
   another agent's message does:
 
   ```
-  ⚿ 192.168.0.14 opened the remote link.
-  ⚿ 192.168.0.14 wants to drive this session. Code: 418 205 - type it there
+  ◆ 192.168.0.14 opened the remote link.
+  ◆ 192.168.0.14 wants to drive this session. Code: 418 205 - type it there
     within 2 minutes. If this is not you, /remote off.
-  ⚿ 192.168.0.23 tried the remote with a token that is not this one.
+  ◆ 192.168.0.23 tried the remote with a token that is not this one.
   ```
 
   On a network you share, the question worth answering is not *could* somebody
@@ -1564,9 +1571,34 @@ works, and the model has still never seen the key. The approval prompt shows
 the placeholder too, with a line saying which secret is filled in, so approving
 is not a way to find out either.
 
-`APP_ENV` and a port number are left alone: below `SECRET_MIN_LENGTH`, or a
-plain word, or a number, a "secret" is something like `dev`, and hiding it
-would rewrite every tool result that mentions the word.
+**What counts as a secret**, exactly - because the rule is blunt on purpose
+and it shows:
+
+1. the file is `.env`, `.env.local`, `.env.development`, `.env.production`,
+   `.env.test` or `.envrc`, in the working directory or at the top of the git
+   tree. Anything with `example`, `sample`, `template`, `dist` or `default` in
+   the name is skipped: those exist to be read;
+2. the line parses as `KEY=value`, `export KEY=value` or `KEY: value`, quotes
+   stripped;
+3. the **value** is at least `SECRET_MIN_LENGTH` (8) characters, is not a
+   number, and is not one of a short list of words that are never secrets
+   (`true`, `localhost`, `production`, …).
+
+Then that value is replaced **wherever it appears**, in any text going to the
+model or out over `/remote`. Which is the whole point and also the surprise:
+`PROJECT_DIR=simple_harness` in your `.env` makes `simple_harness` a secret, so
+`!dir` comes back with `{{env:PROJECT_DIR}}` where the folder name was. Nothing
+is wrong - a value that is also an ordinary word matches like an ordinary word,
+and the alternative is a rule that sometimes lets a key through. When it
+happens to a `!` command the harness now says so:
+
+```
+◆ PROJECT_DIR from .env is hidden in the copy the model gets. /set SECRET_REDACT off stops that.
+```
+
+The way out is to take the value out of `.env` rather than to loosen the rule:
+it is not a secret, so it does not belong in the file the harness treats as
+secret. `APP_ENV=development` and a port number are already left alone by (3).
 
 **A file is never how it gets out, or how it is lost.** A placeholder is
 expanded into what *runs* and never into what is *saved*, so writing

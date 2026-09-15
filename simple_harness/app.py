@@ -334,13 +334,19 @@ def _show_remote_notices() -> None:
 
     Written by the server's own threads and read here, exactly as the channel's
     messages are: a line printed from a request handler would land in the
-    middle of a streaming answer. "Somebody opened the link" and "somebody
+    middle of a streaming answer.
+
+    `◆` rather than anything more evocative: this is read on whatever terminal
+    the person has, and Windows Terminal's default font has no glyph for U+26BF
+    - the "squared key" that was here first came out as a replacement box.
+    Geometric Shapes is the block everything else in this interface draws from
+    for that reason. "Somebody opened the link" and "somebody
     tried a wrong token" are both things a person only finds useful while they
     can still act on them, which is at a prompt.
     """
     try:
         for text in remote.take_notices():
-            _print_above(f"  {S.WARN}⚿ {text}{S.R}")
+            _print_above(f"  {S.WARN}◆ {text}{S.R}")
     except Exception:
         pass          # the door is a convenience; it never stops the prompt
 
@@ -922,8 +928,21 @@ async def main(resume_id: str = "") -> None:
             # session file, and `!cat .env` should not be how a key gets there.
             # `safe_run_cmd` is called directly here, so `dispatch_tool`'s own
             # redaction is not in the way.
-            messages.append({"role": "user",
-                             "content": vault.redact(f"[Shell] $ {command}\n{output}")})
+            kept = f"[Shell] $ {command}\n{output}"
+            hidden = vault.redact(kept)
+            if hidden != kept:
+                # Said rather than left to be discovered. The screen has the
+                # real output and the model's copy does not, and the only way
+                # to find that out used to be noticing `{{env:…}}` in a
+                # directory listing and wondering what was wrong. A `.env`
+                # value that is also an ordinary word - a project directory, a
+                # user name - matches everywhere it appears, which is the
+                # price of never letting one through.
+                names = ", ".join(vault.used_in({"v": hidden})) or "something"
+                print(f"  {S.MUTED}◆ {names} from .env {'is' if names.count(',') == 0 else 'are'} "
+                      f"hidden in the copy the model gets. {S.GRAY}/set SECRET_REDACT off"
+                      f"{S.MUTED} stops that.{S.R}\n")
+            messages.append({"role": "user", "content": hidden})
             current_session_id = save_session(messages, current_session_id)
             continue
 

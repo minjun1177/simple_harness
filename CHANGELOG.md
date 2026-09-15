@@ -62,7 +62,7 @@ the model's copy is, so a `.env` value that is on your screen because *you* ran
 
 And you are told who is there. The first request from an address, and the first
 wrong token from one, arrive at your prompt the way another agent's message
-does - `⚿ 192.168.0.14 opened the remote link.` On a shared network the
+does - `◆ 192.168.0.14 opened the remote link.` On a shared network the
 question worth answering is not whether somebody *could* get in but whether
 they did, and nothing else here can answer it.
 
@@ -96,7 +96,7 @@ printed on the spot - rather than waiting for a restart.
 ### Fixed, from the first afternoon of it running on Windows
 
 - **A message that arrived while you were at the prompt lost its colours** and
-  arrived as `?[38;2;250;189;47m⚿ …` instead. Printing above a live prompt goes
+  arrived as `?[38;2;250;189;47m◆ …` instead. Printing above a live prompt goes
   through prompt_toolkit's own console writer on Windows, which hands escape
   sequences to the console as characters; they are handed over as `ANSI(...)`
   now. The agent channel's messages had the same fault and the same fix.
@@ -109,10 +109,24 @@ printed on the spot - rather than waiting for a restart.
   a dropped long poll is `ConnectionAbortedError` on Windows. A socket giving
   way is now the ordinary end of a request, and anything that is not one is a
   single line at the prompt.
+- **The notice marker was a glyph Windows Terminal cannot draw.** U+26BF, the
+  "squared key", is not in its default font and came out as a box. It is `◆`
+  now, from the Geometric Shapes block everything else in this interface uses.
 - **`/model` from the phone asked the terminal.** `connect` now asks through
   the same place every other blocking question does, and passes its numbered
   list along as buttons. An API key is the deliberate exception: it is not
   typed over plain HTTP, whoever is driving.
+- **The page now knows what may be typed into it.** `/` lists the slash
+  commands with what each does - the table `/help` renders, served as
+  `/commands` - and tapping one inserts it. `!` turns the box amber and says
+  it runs on that machine as you, which is the warning the terminal has had
+  over its own prompt since the shell escape existed.
+- **Redaction was silent about itself.** A `.env` value that is also an
+  ordinary word - `PROJECT_DIR=simple_harness` - is a secret by the only rule
+  that never lets a key through, so `!dir` came back full of
+  `{{env:PROJECT_DIR}}` with nothing to say why. A `!` command whose output was
+  redacted now names what was hidden. README §13a states the three conditions
+  outright.
 
 The transcript is a tee on `sys.stdout` rather than a second rendering, which is
 why what the phone shows is exactly what the terminal shows, tool boxes and all.

@@ -910,6 +910,21 @@ class _Handler(BaseHTTPRequestHandler):
             page = PAGE.replace("__TOKEN__", _token)
             return self._reply(200, page.encode("utf-8"), "text/html; charset=utf-8")
 
+        if path == "/commands":
+            # The same table `/help` renders, so the phone cannot be offered a
+            # command the terminal does not answer - and cannot miss one it
+            # does. Asked once by the page and kept; it does not change while
+            # a session is running.
+            try:
+                from simple_harness import tui
+                rows = [{"name": name, "help": description}
+                        for name, description in tui.COMMANDS]
+                rows += [{"name": name, "help": description}
+                         for name, description in tui.PREFIXES]
+            except Exception:
+                rows = []
+            return self._json(200, {"commands": rows})
+
         if path == "/state":
             try:
                 since = int(fields.get("since", "0"))
@@ -1056,6 +1071,16 @@ button.go { border-color:var(--ok); color:var(--ok); }
 button.no { border-color:var(--err); color:var(--err); }
 form { display:flex; gap:8px; padding:10px 14px calc(10px + env(safe-area-inset-bottom));
        border-top:1px solid var(--line); background:var(--panel); }
+#menu { display:none; max-height:45vh; overflow-y:auto; border-top:1px solid var(--line);
+        background:var(--panel); }
+#menu button { display:block; width:100%; text-align:left; border:0; border-radius:0;
+               background:none; padding:9px 14px; border-bottom:1px solid #222; }
+#menu button:active { background:#242424; }
+#menu b { color:var(--accent); font-weight:600; }
+#menu span { color:var(--muted); display:block; font-size:12px; margin-top:2px; }
+#shell { display:none; padding:8px 14px; background:#231d10; color:var(--warn);
+         border-top:1px solid var(--warn); font-size:12px; }
+body.shell input { color:var(--warn); border-color:var(--warn); }
 input { flex:1; min-width:0; font:inherit; padding:11px 12px; border-radius:6px;
         border:1px solid var(--line); background:#111; color:var(--text); }
 input:focus { outline:1px solid var(--accent); }
@@ -1083,6 +1108,8 @@ input:focus { outline:1px solid var(--accent); }
   <div id="pairnote"></div>
 </div>
 <div id="ask"><h3></h3><dl></dl><div class="row"></div></div>
+<div id="menu"></div>
+<div id="shell"><b>Shell</b> - runs on that machine as you; not sent to the model</div>
 <form id="say"><input id="text" placeholder="message, or /command"
   autocomplete="off" autocapitalize="off" autocorrect="off"><button>Send</button></form>
 <script>
@@ -1187,11 +1214,63 @@ async function reply(id, value) {
   await call("/answer", { id, value }).catch(() => {});
 }
 
+// What the terminal shows when a line starts with `/` or `!`, shown here for
+// the same reason: on a phone there is no /help to have read, and no way to
+// tell a command for that machine from a message for the model until it runs.
+const menu = document.getElementById("menu"), shell = document.getElementById("shell");
+let commands = null;
+
+async function loadCommands() {
+  if (commands) return commands;
+  try {
+    const r = await call("/commands");
+    commands = (await r.json()).commands || [];
+  } catch (e) { commands = []; }
+  return commands;
+}
+
+function closeMenu() { menu.style.display = "none"; menu.innerHTML = ""; }
+
+async function reflect() {
+  const box = document.getElementById("text"), text = box.value;
+  const isShell = text.startsWith("!");
+  shell.style.display = isShell ? "block" : "none";
+  document.body.classList.toggle("shell", isShell);
+  if (!text.startsWith("/")) return closeMenu();
+
+  const typed = text.split(" ")[0].toLowerCase();
+  const rows = (await loadCommands())
+    .filter(c => c.name.toLowerCase().startsWith(typed));
+  if (!rows.length) return closeMenu();
+  menu.innerHTML = "";
+  for (const row of rows.slice(0, 40)) {
+    const b = document.createElement("button");
+    b.type = "button";
+    const name = document.createElement("b"); name.textContent = row.name;
+    const help = document.createElement("span"); help.textContent = row.help;
+    b.append(name, help);
+    b.onclick = () => {
+      // Up to the first placeholder: `/load <id|title>` inserts `/load `, so
+      // the part only the person knows is the part they are left typing.
+      const upto = row.name.split(" ").filter(w => !w.startsWith("<") && !w.startsWith("["));
+      box.value = upto.join(" ") + (upto.join(" ") === row.name ? "" : " ");
+      closeMenu(); box.focus();
+    };
+    menu.appendChild(b);
+  }
+  menu.style.display = "block";
+}
+
+document.getElementById("text").addEventListener("input", reflect);
+
 document.getElementById("say").onsubmit = async (e) => {
   e.preventDefault();
   const box = document.getElementById("text"), text = box.value.trim();
   if (!text) return;
   box.value = "";
+  closeMenu();
+  shell.style.display = "none";
+  document.body.classList.remove("shell");
   add("\\u276f " + text);
   await call("/say", { text }).catch(() => {});
 };
