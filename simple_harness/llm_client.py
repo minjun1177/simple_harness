@@ -13,7 +13,8 @@ import time
 import random
 from simple_harness import config
 from simple_harness.config import S
-from simple_harness.tui import _fmt_tool_call, _fmt_tool_result, _fmt_tokens
+from simple_harness.tui import (_fmt_tool_call, _fmt_tool_result, _fmt_tokens,
+                                ask_the_driver)
 from simple_harness.renderer import _render_line, _format_table, _render_full
 from simple_harness.tools import dispatch_tool
 from simple_harness import channel
@@ -830,10 +831,18 @@ async def chat_turn(messages: list[dict]) -> str:
         limit = int(getattr(config, "MAX_TOOL_CALLS", 10) or 0)
         if limit > 0 and call_count > 0 and call_count % limit == 0:
             print(f"\n  {S.WARN}⚠  Tool call limit ({limit}) reached.{S.R}")
+            # Through the one place every blocking question goes, or a turn
+            # driven from a phone stops here, on a keyboard nobody is at, with
+            # nothing on the phone to say why the answer never came.
             try:
-                user_choice = input(f"  {S.WARN}Continue? {S.MUTED}[{S.OK}y{S.MUTED}/{S.ERR}n{S.MUTED}]{S.R} {S.WARN}›{S.R} ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                user_choice = "n"
+                answer = ask_the_driver(
+                    f"Tool call limit ({limit}) reached - carry on?",
+                    [("calls so far", str(call_count))],
+                    [("y", "Carry on"), ("n", "Stop here")],
+                    f"  {S.WARN}Continue? {S.MUTED}[{S.OK}y{S.MUTED}/{S.ERR}n{S.MUTED}]{S.R} {S.WARN}›{S.R} ")
+            except KeyboardInterrupt:
+                answer = "n"
+            user_choice = (answer or "n").strip().lower()
             if user_choice != 'y':
                 # The last thing the *model* said, not `messages[-2]`, which at
                 # this point in the loop is whatever tool result happens to sit

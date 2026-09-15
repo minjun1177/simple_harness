@@ -18,6 +18,8 @@ from simple_harness import mcp_client
 from simple_harness import permissions
 from simple_harness import providers
 from simple_harness import connect
+from simple_harness import remote
+from simple_harness import qr
 from simple_harness import mentions
 from simple_harness import tools
 from simple_harness import vault
@@ -32,7 +34,8 @@ from simple_harness.renderer import _render_full
 from simple_harness.session import (save_session, load_session, list_sessions, find_sessions,
                      latest_in_dir, rename_session, generate_session_title, clean_title,
                      memory_prompt_section)
-from simple_harness.context import manage_context
+from simple_harness.context import (manage_context, _estimate_tokens,
+                                    _get_ctx_budget, token_turns)
 from simple_harness import llm_client
 from simple_harness.llm_client import chat_turn, parse_tool_calls, strip_thinking
 
@@ -303,6 +306,88 @@ def _report_agents(agent_id: str) -> None:
           f"board.{S.R}\n")
 
 
+def _close_menu_when_unwanted(buffer) -> None:
+    """Shut the completion menu the moment the line stops asking for one.
+
+    A `Condition` decides whether a menu is coming; a completion *state* is
+    whether one is open. The reserved rows answer to either, so a menu left
+    open over a line that no longer starts with `/` keeps the band under the
+    prompt after the reason for it has been deleted.
+    """
+    try:
+        if buffer.complete_state is not None and not config.COMPLETE_WHILE_TYPING():
+            buffer.cancel_completion()
+    except Exception:
+        pass          # a menu is a convenience; it never stops typing
+
+
+def _report_usage(messages: list[dict]) -> None:
+    """Tell the remote what this conversation costs now.
+
+    The phone has no `/usage` and no room for one, but it does have room for a
+    number above the box - and "how much of the window is left" is the thing
+    somebody driving from a train most wants and least can ask for.
+    """
+    try:
+        remote.set_usage(_estimate_tokens(messages), _get_ctx_budget(),
+                         len(token_turns()))
+    except Exception:
+        pass          # a number on a strip is never worth an exception
+
+
+# Commands the link does not get to run. One entry, and the reasoning is the
+# whole of it: everything else the remote can type it can also undo from there,
+# and this is the one that takes away the thing it would need to.
+_NOT_FROM_THE_REMOTE = ("/exit", "/quit")
+
+
+def _refused_from_remote(cmd: str) -> bool:
+    """Is this a command the phone may not run? Says why, on both screens."""
+    if cmd not in _NOT_FROM_THE_REMOTE or not remote.driven():
+        return False
+    print(f"  {S.WARN}◆ {cmd} is not taken from the remote.{S.MUTED} Closing the "
+          f"session from a phone leaves the phone with nothing to reconnect to - "
+          f"and this terminal with a prompt nobody asked to leave.{S.R}")
+    print(f"  {S.MUTED}Type it at the keyboard, or {S.GRAY}/remote off{S.MUTED} "
+          f"to hand the session back to it.{S.R}\n")
+    return True
+
+
+def _print_above(text: str) -> None:
+    """Print a line that arrives while a prompt is open.
+
+    One `print`, and one place saying why it is one `print`: what makes this
+    work is `patch_stdout(raw=True)` in `_read_line`, without which everything
+    routed through here loses its escapes to prompt_toolkit's sanitising and
+    arrives as `?[38;2;250;189;47m…`. Everything that prints above a live
+    prompt - another agent's message, the remote's notices, the echo of a line
+    typed there - comes through here, so that reason is written down once.
+    """
+    print(text)
+
+
+def _show_remote_notices() -> None:
+    """Who has been at the remote's door, printed as soon as the prompt is free.
+
+    Written by the server's own threads and read here, exactly as the channel's
+    messages are: a line printed from a request handler would land in the
+    middle of a streaming answer.
+
+    `◆` rather than anything more evocative: this is read on whatever terminal
+    the person has, and Windows Terminal's default font has no glyph for U+26BF
+    - the "squared key" that was here first came out as a replacement box.
+    Geometric Shapes is the block everything else in this interface draws from
+    for that reason. "Somebody opened the link" and "somebody
+    tried a wrong token" are both things a person only finds useful while they
+    can still act on them, which is at a prompt.
+    """
+    try:
+        for text in remote.take_notices():
+            _print_above(f"  {S.WARN}◆ {text}{S.R}")
+    except Exception:
+        pass          # the door is a convenience; it never stops the prompt
+
+
 def _show_arrivals() -> None:
     """Print what other agents have said, as soon as the terminal is free.
 
@@ -312,7 +397,7 @@ def _show_arrivals() -> None:
     """
     try:
         for entry in channel.take_for_screen():
-            print(f"  {S.PURPLE}✉ {channel.describe(entry)}{S.R}")
+            _print_above(f"  {S.PURPLE}✉ {channel.describe(entry)}{S.R}")
     except Exception:
         pass          # the board is a convenience; it never stops the prompt
 
@@ -330,6 +415,7 @@ async def _watch_channel() -> None:
         try:
             channel.heartbeat(_agent_label())
             _show_arrivals()
+            _show_remote_notices()
         except Exception:
             return
 
@@ -350,13 +436,76 @@ def _prompt_message() -> str:
     return f"  {S.USER_CLR}{S.BOLD}❯{S.R} "
 
 
+async def _remote_line() -> str:
+    """A line typed on the remote, as soon as there is one."""
+    while True:
+        await asyncio.sleep(0.25)
+        line = remote.take_line()
+        if line:
+            return line
+
+
+def _echo_remote(line: str) -> str:
+    """Print a remotely typed line where a typed one would have been.
+
+    The person at this keyboard has to be able to read the transcript
+    downwards and see what was asked, even when it was asked from a train.
+    """
+    _print_above(f"  {S.USER_CLR}{S.BOLD}❯{S.R} {line}  {S.MUTED}(from the remote){S.R}")
+    remote.set_driver("remote")
+    return line
+
+
+async def _typed_or_remote(session_pt, message) -> str:
+    """Whichever comes first: a line typed here, or one typed on the remote.
+
+    The prompt is cancelled when the remote wins, which costs whatever was
+    half-typed at this keyboard. That is the right way round: a person who is
+    at the keyboard is the one who can see the line disappear and type it
+    again, and the alternative - holding the remote's line until somebody
+    presses Enter here - is exactly the hang the remote exists to avoid.
+    """
+    typed = asyncio.ensure_future(session_pt.prompt_async(message))
+    if not remote.running():
+        return (await typed).strip()
+
+    waiting = asyncio.ensure_future(_remote_line())
+    done, _ = await asyncio.wait({typed, waiting},
+                                 return_when=asyncio.FIRST_COMPLETED)
+    if typed in done:
+        waiting.cancel()
+        remote.set_driver("terminal")
+        return typed.result().strip()
+
+    typed.cancel()
+    try:
+        await typed
+    except (asyncio.CancelledError, Exception):
+        # The CancelledError is the one just asked for; anything else is
+        # `prompt_toolkit` objecting to being stopped mid-line, which is not
+        # worth losing the line that arrived over.
+        pass
+    return _echo_remote(waiting.result())
+
+
 async def _read_line(session_pt) -> str:
     """One line from the person, with the channel watched while they type."""
+    remote.ensure_mirror()
+    remote.set_busy(False)
     if session_pt is None:
         _show_arrivals()
+        _show_remote_notices()
+        # Nothing here can race a blocking `input()`, so a remote line waits
+        # for the next Enter. `prompt_toolkit` is what makes the difference,
+        # and this is the path taken when it is not installed.
+        waiting = remote.take_line()
+        if waiting:
+            return _echo_remote(waiting)
+        remote.set_driver("terminal")
         return input(f"  {S.USER_CLR}{S.BOLD}❯{S.R} ").strip()
 
     _show_arrivals()
+    _show_remote_notices()
     # `ANSI` lives behind the prompt_toolkit guard in `config`, so it is reached
     # the same way `main` reaches it rather than imported at module level.
     ANSI = config.ANSI
@@ -366,12 +515,25 @@ async def _read_line(session_pt) -> str:
     watcher = asyncio.ensure_future(_watch_channel())
     # `patch_stdout` is what lets the watcher print *above* the prompt rather
     # than through the middle of what is being typed.
+    #
+    # `raw=True` is not decoration. Without it prompt_toolkit sanitises what it
+    # is handed - `Output.write` turns every ESC into `?` to stop stray cursor
+    # movement corrupting its picture of the screen - so a coloured line
+    # printed while a prompt is open arrives as `?[38;2;250;189;47m◆ …`. That
+    # is every message from another agent and every notice from the remote, on
+    # every platform; it was only ever noticed on Windows because that is where
+    # somebody happened to be sitting when one arrived. What goes out this way
+    # is colour and nothing else, which is exactly what `raw` is safe for.
     keep_prompt_intact = getattr(config, "patch_stdout", None)
     try:
         if keep_prompt_intact is None:
-            return (await session_pt.prompt_async(message)).strip()
-        with keep_prompt_intact():
-            return (await session_pt.prompt_async(message)).strip()
+            return await _typed_or_remote(session_pt, message)
+        with keep_prompt_intact(raw=True):
+            # Inside, not outside: `patch_stdout` replaces `sys.stdout` with a
+            # proxy of its own, and the tee has to sit over *that* to catch
+            # what is printed while the prompt is open.
+            remote.ensure_mirror()
+            return await _typed_or_remote(session_pt, message)
     finally:
         watcher.cancel()
 
@@ -507,7 +669,146 @@ def _set_command(rest: str, messages: list[dict]) -> None:
     # the tool catalogue is in it at all - so it is rebuilt every time rather
     # than only for the ones somebody remembered to list here.
     _refresh_system_prompt(messages)
+    # A remote that is open was started from the settings as they were. Moving
+    # the port is the one somebody actually types mid-session, and a `/set`
+    # that quietly did nothing until the next restart would read as broken.
+    if name.startswith("REMOTE_"):
+        try:
+            changed = remote.reconfigure()
+        except Exception as e:
+            print(f"  {S.ERR}✗ The remote could not move there: {e}{S.R}\n")
+            return
+        if changed.get("rebound"):
+            print(f"  {S.INFO}◆ The remote moved, so its link changed. The old "
+                  f"one no longer opens anything.{S.R}")
+            for line in _remote_lines():
+                print(f"  {S.MUTED}{line}{S.R}")
     print()
+
+
+def _remote_lines() -> list:
+    """What `/remote` says about a door that is already open."""
+    if not remote.running():
+        return ["│ /remote on opens it here; /remote on lan opens it to this "
+                "machine's network as well.",
+                "╰─ the token is made when it opens, is never saved, and dies "
+                "with it."]
+    state = remote.status()
+    seen = ("nobody has opened it yet" if not state["seen"]
+            else f"last read {channel.ago(state['seen'])}")
+    rows = [f"│ bound to {state['host']}:{state['port']} - {seen}"]
+    if state["pairing"]:
+        rows.append(f"│ a browser must also type a code shown here before it can "
+                    f"drive anything ({state['paired']} paired)")
+    if state["clients"]:
+        who = ", ".join(row["address"] for row in remote.clients()[:4])
+        rows.append(f"│ opened from {who}")
+    if state["refused"]:
+        rows.append(f"│ refused for wrong tokens: {', '.join(state['refused'])}")
+    if state["queued"]:
+        rows.append(f"│ {state['queued']} line(s) typed there, waiting for this prompt")
+    rows.append("╰─ open this, and whoever holds it is at this prompt:")
+    rows += [f"   {url}" for url in state["urls"]]
+    rows.append(f"   {'/remote qr shows it as something a camera can read.'}")
+    return rows
+
+
+def _open_saved_remote() -> None:
+    """Re-open the door for somebody who left it open in `settings.json`.
+
+    A new token every time, printed every time. `REMOTE_ENABLED` is a standing
+    answer to "should this session be reachable", not a saved key - there is
+    no saved key.
+    """
+    if not config.REMOTE_ENABLED or remote.running():
+        return
+    try:
+        remote.start()
+    except Exception as e:
+        print(f"  {S.WARN}⚠ Remote control is on in your settings but could not "
+              f"start: {e}{S.R}\n")
+        return
+    print(f"  {S.INFO}◆ Remote control is on.{S.R}")
+    for line in _remote_lines():
+        print(f"  {S.MUTED}{line}{S.R}")
+    print()
+
+
+def _show_remote_qr() -> None:
+    """`/remote qr`: the link as something a camera can read.
+
+    Forty-three random characters is not a thing anybody types into a phone,
+    and a link that is hard to open is a feature that goes unused. The last
+    address is the one drawn - on `lan` that is the one a phone can actually
+    reach, which is the whole point of pointing a phone at it.
+    """
+    if not remote.running():
+        print(f"  {S.ERR}✗ Nothing is open to scan.{S.MUTED} {S.GRAY}/remote on"
+              f"{S.MUTED} first.{S.R}\n")
+        return
+    link = remote.status()["urls"][-1]
+    if not qr.fits(link):
+        print(f"  {S.WARN}⚠ That link is too long to draw.{S.R}\n  {link}\n")
+        return
+    print()
+    print(qr.render(link, colour=bool(S.R)))
+    print(f"\n  {S.MUTED}{link}{S.R}")
+    if remote.status()["pairing"]:
+        print(f"  {S.MUTED}Scanning it opens the page; driving the session also "
+              f"needs the code this terminal prints when the page asks.{S.R}")
+    print()
+
+
+def _remote_command(rest: str) -> None:
+    """`/remote`: the one door into this session, and whether it is open.
+
+    On is a deliberate act every time. What it opens is not a view of the
+    session but the session itself - the link types lines, and a line can be
+    `!rm -rf ~` - so the switch says so, the LAN case says it louder, and
+    neither the port nor the token survives the process.
+    """
+    verb, _, argument = rest.strip().partition(" ")
+    verb, argument = verb.lower(), argument.strip().lower()
+
+    if verb in ("qr", "code"):
+        _show_remote_qr()
+        return
+
+    if verb == "forget":
+        dropped = remote.forget_sessions()
+        print(f"  {S.INFO}✓ {dropped or 'No'} paired browser"
+              f"{'' if dropped == 1 else 's'} dropped.{S.MUTED} The link still "
+              f"works; whoever opens it has to be told a new code.{S.R}\n")
+        return
+
+    if verb == "on" and not remote.running():
+        try:
+            remote.start("lan" if argument in ("lan", "network") else "")
+        except Exception as e:
+            print(f"  {S.ERR}✗ The remote could not be opened: {e}{S.R}\n")
+            return
+    elif verb == "off":
+        remote.stop()
+
+    chosen = _switch(
+        "/remote", verb, remote.running(), "Remote control",
+        "this session can be driven from a browser: the transcript, the prompt, "
+        "and the approvals that would otherwise wait for a keystroke",
+        on_note="Whoever opens the link is at this prompt, with everything it "
+                "can do.",
+        off_note="The port is closed and the token is gone. A link already open "
+                 "stops working.",
+        extra=_remote_lines())
+    if chosen is not None:
+        config.REMOTE_ENABLED = remote.running()
+    if verb == "on" and remote.running():
+        for line in _remote_lines():
+            print(f"  {S.MUTED}{line}{S.R}")
+        if remote.status()["host"] == "0.0.0.0":
+            print(f"  {S.WARN}⚠ This is open to every machine that can reach "
+                  f"yours.{S.MUTED} Only the link opens it, but the link is all "
+                  f"it takes.{S.R}")
+        print()
 
 
 def _vm_command(rest: str) -> None:
@@ -604,6 +905,8 @@ async def main(resume_id: str = "") -> None:
     _report_mcp_problems(failed_mcp)
     _report_strays()
     _report_agents(channel.join(_agent_label()))
+    _open_saved_remote()
+    _report_usage(messages)
 
     if resume_id:
         if resumed:
@@ -629,14 +932,28 @@ async def main(resume_id: str = "") -> None:
         session_pt = PromptSession(
             history=FileHistory(config.HISTORY_FILE),
             completer=completer,
+            # Pointed at the real stream rather than at whatever `sys.stdout`
+            # happens to be: with a remote already open, `sys.stdout` is the
+            # mirror, and everything this draws - the prompt itself included -
+            # went out to the phone. See `remote.unmirrored_stdout`.
+            output=config.create_output(stdout=remote.unmirrored_stdout()),
             # What colours the line itself once it starts with `!`. The banner
             # above comes from `_prompt_message`; between them, a command for
             # this machine never looks like a message for the model.
             lexer=config.ShellLineLexer(SHELL_STYLE),
             # The menu has to open on its own for `@` to be discoverable: nobody
             # presses Tab after a character they have not been told completes.
-            complete_while_typing=True,
+            # A condition rather than `True`, because `True` also means "keep
+            # eight rows free under the prompt at all times" - a blank band
+            # under every ordinary sentence anybody types. See
+            # `config._wants_the_menu`.
+            complete_while_typing=config.COMPLETE_WHILE_TYPING,
         )
+        # Deleting the `/` has to take the menu - and the rows held for it -
+        # away again. prompt_toolkit keeps a completion state until something
+        # cancels it, and the height it reserves is `while_typing OR a state is
+        # open`, so without this the band outlives the line that earned it.
+        session_pt.default_buffer.on_text_changed += _close_menu_when_unwanted
 
     # Which MCP servers the system prompt was built for, so a load can be
     # noticed. Sorted, so the comparison is about the set and not the order.
@@ -651,6 +968,7 @@ async def main(resume_id: str = "") -> None:
             user_input = config.safe_text(user_input)
         except (EOFError, KeyboardInterrupt):
             channel.leave()
+            remote.stop()
             mcp_client.shutdown()
             print(f"\n\n  {S.GRAY}Goodbye!{S.R}\n")
             break
@@ -675,14 +993,30 @@ async def main(resume_id: str = "") -> None:
             # session file, and `!cat .env` should not be how a key gets there.
             # `safe_run_cmd` is called directly here, so `dispatch_tool`'s own
             # redaction is not in the way.
-            messages.append({"role": "user",
-                             "content": vault.redact(f"[Shell] $ {command}\n{output}")})
+            kept = f"[Shell] $ {command}\n{output}"
+            hidden = vault.redact(kept)
+            if hidden != kept:
+                # Said rather than left to be discovered. The screen has the
+                # real output and the model's copy does not, and the only way
+                # to find that out used to be noticing `{{env:…}}` in a
+                # directory listing and wondering what was wrong. A `.env`
+                # value that is also an ordinary word - a project directory, a
+                # user name - matches everywhere it appears, which is the
+                # price of never letting one through.
+                names = ", ".join(vault.used_in({"v": hidden})) or "something"
+                print(f"  {S.MUTED}◆ {names} from .env {'is' if names.count(',') == 0 else 'are'} "
+                      f"hidden in the copy the model gets. {S.GRAY}/set SECRET_REDACT off"
+                      f"{S.MUTED} stops that.{S.R}\n")
+            messages.append({"role": "user", "content": hidden})
             current_session_id = save_session(messages, current_session_id)
             continue
 
         cmd = user_input.lower()
+        if _refused_from_remote(cmd):
+            continue
         if cmd in ("/exit", "/quit"):
             channel.leave()
+            remote.stop()
             mcp_client.shutdown()
             print(f"\n  {S.GRAY}Goodbye!{S.R}\n")
             break
@@ -707,6 +1041,7 @@ async def main(resume_id: str = "") -> None:
             mcp_servers_in_prompt = sorted(config.LOADED_MCP_SERVERS)
             print("\033[2J\033[H", end="")
             _welcome()
+            _report_usage(messages)
             print(f"  {S.OK}✓ Conversation and usage cleared.{S.R}\n")
             continue
         if cmd == "/models":
@@ -1082,6 +1417,10 @@ async def main(resume_id: str = "") -> None:
             _agents_command(user_input[len("/agents"):])
             continue
 
+        if cmd == "/remote" or cmd.startswith("/remote "):
+            _remote_command(user_input[len("/remote"):])
+            continue
+
         if cmd == "/vm" or cmd.startswith("/vm "):
             _vm_command(user_input[len("/vm"):])
             continue
@@ -1172,6 +1511,9 @@ async def main(resume_id: str = "") -> None:
         # so `/usage` reports what the question cost rather than what its last
         # request cost.
         config.next_turn()
+        # The remote's own badge: a phone that cannot tell "thinking" from
+        # "finished and silent" is a phone you have to keep refreshing.
+        remote.set_busy(True)
         # Nothing should be waiting to be looked at when a turn begins. A
         # `view_image` whose turn died before its result was appended would
         # otherwise hang its picture on a later, unrelated message.
@@ -1215,6 +1557,8 @@ async def main(resume_id: str = "") -> None:
             print()
             connect._print_problem("Error", e)
         finally:
+            remote.set_busy(False)
+            _report_usage(messages)
             # `/tdd` is armed for one request and lifts itself here - including
             # when the turn ended in an error or the user interrupted it. A
             # lock that outlives what it was asked for is a lock nobody

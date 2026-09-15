@@ -27,6 +27,170 @@ packages of their own rather than be imported from here.
 
 ---
 
+## Unreleased
+
+### Remote control: one door into the session that is already running
+
+A harness is a terminal, and a terminal is somewhere you have to be. The moment
+a request takes minutes rather than seconds - a `/deepthink` pass, a suite the
+model is chasing - the two things you need are *what is it doing* and *yes, go
+ahead*, and both are behind a keyboard you have walked away from. Worse than
+slow: a turn that stops at `Allow? [y/n]` on a screen nobody is looking at has
+hung, and nothing says so.
+
+`/remote on` prints a link. Open it on a phone and you are at the prompt - the
+transcript as it is printed, a box that types into the same loop the keyboard
+types into, and the approval prompts themselves, with buttons.
+
+The rule that makes it a control rather than a viewer: **a question is asked
+wherever the person driving the turn is.** A line typed on the phone marks the
+turn, and every blocking question in the harness - the approval prompt,
+`get_input`, `submit_plan_for_approval` - now goes through one place that knows
+which that is. Both are still printed on the terminal, so the person at the
+desk can read what was asked and what came back. Nobody answering inside
+`REMOTE_ASK_TIMEOUT` is a no.
+
+What is behind the link is a shell, so: off until `/remote on`; loopback unless
+`/remote on lan`, which says what it is doing in as many words; a token made
+when the door opens, printed once, never written to disk and gone when it
+closes - 128 bits on loopback, 256 for `lan`, which is the one that crosses a
+network somebody else is also on; a `Host` that is not this machine refused
+before the token is read; wrong tokens counted per address and shut out after
+`REMOTE_MAX_BAD_TOKENS` of them; and the mirrored transcript redacted the way
+the model's copy is, so a `.env` value that is on your screen because *you* ran
+`!cat .env` does not go out over the wire.
+
+And you are told who is there. The first request from an address, and the first
+wrong token from one, arrive at your prompt the way another agent's message
+does - `◆ 192.168.0.14 opened the remote link.` On a shared network the
+question worth answering is not whether somebody *could* get in but whether
+they did, and nothing else here can answer it.
+
+**Over a network the link is not enough on its own.** A browser that arrives
+over `lan` is shown a box rather than the transcript: six digits, printed in the
+terminal the harness runs in, good for two minutes and three guesses. Type them
+on the phone and it gets a session of its own; anything else stays outside.
+That is a second factor rather than a second copy of the first - the link
+crosses the network and can be photographed, read aloud or left in a history,
+and the terminal cannot. `REMOTE_PAIR` chooses when it is asked (`lan`,
+`always`, `never`) and `/remote forget` drops every browser that has paired.
+
+**`/remote qr`** draws the link as something to point a camera at, because
+nobody types forty-three random characters into a phone twice. Black modules on
+a white ground the harness paints itself, so it scans in any terminal theme.
+There is no library behind it: `qr.py` is a byte-mode encoder in the stdlib,
+level M, versions 1 to 9. `tests/test_qr.py` reads each symbol back the way a
+scanner does - the mask out of its own format bits, the zigzag, the blocks - and
+checks that every block still satisfies its Reed-Solomon parity, which is one
+check over the format bits, the placement, the block tables, the interleaving
+and the arithmetic at once.
+
+It is plain HTTP, which on loopback is the whole story and over `lan` is a
+network you are choosing to trust. There is deliberately no TLS and no account:
+from anywhere else, forward the port over `ssh -L`.
+
+`REMOTE_PORT` and `REMOTE_HOST` are ordinary settings, and `/set REMOTE_PORT
+9000` at a prompt with a remote already open *moves* it - new token, new link,
+printed on the spot - rather than waiting for a restart.
+
+### Fixed, from the first afternoon of it running on Windows
+
+- **A message that arrived while you were at the prompt lost its colours** and
+  arrived as `?[38;2;250;189;47m◆ …` instead. Printing above a live prompt goes
+  through prompt_toolkit's own console writer on Windows, which hands escape
+  sequences to the console as characters; they are handed over as `ANSI(...)`
+  now. The agent channel's messages had the same fault and the same fix.
+- **Opening the link reported you at your own prompt as an intruder** - twice,
+  once for the tab icon and once for the page. A browser fetches `/favicon.ico`
+  and friends by itself, without the token; those paths answer 404 and are
+  counted as nothing.
+- **A phone that locked its screen printed a stack trace** into the middle of
+  the conversation: `socketserver` reports a handler's exception that way, and
+  a dropped long poll is `ConnectionAbortedError` on Windows. A socket giving
+  way is now the ordinary end of a request, and anything that is not one is a
+  single line at the prompt.
+- **The notice marker was a glyph Windows Terminal cannot draw.** U+26BF, the
+  "squared key", is not in its default font and came out as a box. It is `◆`
+  now, from the Geometric Shapes block everything else in this interface uses.
+- **`/model` from the phone asked the terminal.** `connect` now asks through
+  the same place every other blocking question does, and passes its numbered
+  list along as buttons. An API key is the deliberate exception: it is not
+  typed over plain HTTP, whoever is driving.
+- **The page now knows what may be typed into it.** `/` lists the slash
+  commands with what each does - the table `/help` renders, served as
+  `/commands` - and tapping one inserts it. `!` turns the box amber and says
+  it runs on that machine as you, which is the warning the terminal has had
+  over its own prompt since the shell escape existed.
+- **Eight blank lines sat under the prompt, all the time.**
+  `complete_while_typing=True` is what opens the `/` and `@` menus without a
+  Tab, and it is also what makes prompt_toolkit hold `reserve_space_for_menu`
+  rows free below the cursor - for the whole time somebody is typing an
+  ordinary sentence that will never have a menu. The reservation is read on
+  every render, so it is earned now: a `Condition` says yes for a line that
+  starts with `/` or carries an `@`, and nothing else. Tab still completes
+  anything, any time.
+- **Everything printed above a live prompt lost its escapes**, on every
+  platform - `?[38;2;250;189;47m◆ …` - because `patch_stdout` sanitises what it
+  is handed unless it is opened `raw=True`. It is opened `raw=True` now. The
+  first pass at this blamed the Windows console and special-cased it; a pty
+  said otherwise.
+- **The menu's reserved rows outlived the `/` that earned them.** Deleting the
+  slash left the completion state open, and the reservation answers to either
+  that or the condition, so the band stayed until Escape. The buffer now closes
+  a menu the line has stopped asking for.
+- **A line typed while the model worked could answer a question.** It already
+  reached the next prompt - the terminal buffers it - but a mid-turn approval
+  prompt would take it as its answer, unseen. The keyboard buffer is emptied
+  before a question is asked, and the person is told their line was set aside.
+- **The tool-call-limit prompt asked the terminal even when a phone was
+  driving.** It is the one blocking question that never went through
+  `ask_the_driver`; a remote-driven turn stopped there with nothing on the
+  phone to say why. It goes through it now, with its two answers as buttons.
+- **The page was a wall of grey.** The transcript was stripped of colour on
+  its way out; it now keeps the terminal's `ESC [ … m` and the page paints it.
+  Every other escape is still removed before sending, and text only ever lands
+  as `textContent`, so nothing that arrives can be markup.
+- **The prompt itself was being mirrored.** With a remote open before the
+  prompt was built, prompt_toolkit drew through the mirror, so every render -
+  the bare `❯`, the menu, the redraw after each keystroke - went to the phone.
+  The prompt is pointed at the real stream now and the tee sits inside
+  `patch_stdout`, where it catches what the program prints and not what the
+  renderer draws.
+- **Colour that spanned lines was lost.** The banner opens with one escape and
+  closes four lines later; published by the line, everything between came out
+  white. The page carries the state from line to line, as a terminal does.
+- **`/exit` from the page is refused.** It is the one command the link cannot
+  undo from where it is typed.
+- **A line sent from the page appeared twice** - once echoed locally and once
+  when the harness printed it at the prompt and the mirror carried it back.
+  The local echo is gone; the transcript's own copy is the one you see, exactly
+  as the terminal shows it.
+- **The page now says what the conversation costs**: tokens against the context
+  window and the number of turns, on a strip above the box, with the spinner
+  the terminal turns on the left of it. It is the half of `/usage` that fits on
+  a phone.
+- **The spinner reached the phone as every frame it had ever drawn.** It is one
+  line, rewritten many times a second and never ended with a newline, and the
+  `\r` rule was applied to finished lines but not to the one still being
+  written - so the buffer held the lot, laid end to end. It holds the frame it
+  is on, and nothing once it stops.
+- **Redaction was silent about itself.** A `.env` value that is also an
+  ordinary word - `PROJECT_DIR=simple_harness` - is a secret by the only rule
+  that never lets a key through, so `!dir` came back full of
+  `{{env:PROJECT_DIR}}` with nothing to say why. A `!` command whose output was
+  redacted now names what was hidden. README §13a states the three conditions
+  outright.
+
+The transcript is a tee on `sys.stdout` rather than a second rendering, which is
+why what the phone shows is exactly what the terminal shows, tool boxes and all.
+
+New: `/remote` (with `qr` and `forget`), `remote.py`, `qr.py`,
+`tests/test_remote.py`, `tests/test_qr.py`, and `REMOTE_ENABLED`, `REMOTE_HOST`,
+`REMOTE_PORT`, `REMOTE_LINES`, `REMOTE_ASK_TIMEOUT`, `REMOTE_PAIR`,
+`REMOTE_MAX_BAD_TOKENS`, `REMOTE_LOCKOUT`.
+
+---
+
 ## 0.6.0 - 2026-09-08
 
 The release where the harness stopped trusting the model's account of its own
