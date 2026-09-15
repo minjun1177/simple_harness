@@ -220,12 +220,21 @@ try:
         import asyncio                                             # noqa: E402
         from prompt_toolkit.application.current import set_app     # noqa: E402
 
+        # Built against a dummy terminal on purpose. A `PromptSession` asks the
+        # platform for a console as it is constructed, and the Windows runner
+        # has none - `NoConsoleScreenBufferError`, before a single check runs.
+        # Nothing here needs a screen: the reservation is a number the layout
+        # works out, and it works it out the same with nowhere to draw.
+        from prompt_toolkit.input import DummyInput                # noqa: E402
+        from prompt_toolkit.output import DummyOutput              # noqa: E402
+
         async def band():
             session = config.PromptSession(
                 completer=config.merge_completers([
                     config.SlashCommandCompleter(tui.complete_command),
                     config.PathMentionCompleter()]),
-                complete_while_typing=config.COMPLETE_WHILE_TYPING)
+                complete_while_typing=config.COMPLETE_WHILE_TYPING,
+                input=DummyInput(), output=DummyOutput())
             rows = {}
             with set_app(session.app):
                 for line in ("", "hello there", "!dir", "/", "/re", "look at @src"):
