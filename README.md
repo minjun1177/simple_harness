@@ -638,7 +638,7 @@ the transcript as it is printed here, a box that types into the same loop the
 keyboard types into - a message or a slash command, both - and, when something
 needs approving, the approval prompt itself with its buttons.
 
-**Approvals follow whoever is driving.** A turn started from the phone has its
+**Every question follows whoever is driving.** A turn started from the phone has its
 questions asked on the phone; a turn started here is asked here. This is the
 part that makes it a remote control rather than a viewer: a run that stops at
 `Allow? [y/n]` on a screen nobody is looking at has hung, and there is no way
@@ -646,6 +646,12 @@ to find that out from the train. Both are printed on the terminal either way,
 so the person at the desk can read what was asked and what came back. A
 question nobody answers within `REMOTE_ASK_TIMEOUT` is refused, because the
 safe end of an unanswered *may I delete this* is no.
+
+That covers the slash commands that ask something too: `/model` typed on the
+phone puts its list of models on the phone, as buttons. The one exception is an
+API key - `/connect` will not take one over the link, because this is plain
+HTTP and a key typed there crosses the network in the clear. That prompt is
+answered at the keyboard or not at all.
 
 **What it costs to leave it open.** Nothing runs until `/remote on`, and what
 that opens is a shell - the link can type `!rm -rf ~` as easily as "hello". So:

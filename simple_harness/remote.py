@@ -102,6 +102,12 @@ HOLD_SECONDS = 25.0
 # resolved to this machine from somewhere it should not have.
 _LOCAL_NAMES = {"localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0"}
 
+# Paths a browser asks for on its own, with no token, because it is a browser.
+_BROWSER_ASKS_ANYWAY = frozenset({
+    "/favicon.ico", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png",
+    "/robots.txt",
+})
+
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
 # Everything below is read and written from the server's threads and from the
@@ -511,7 +517,7 @@ def ask(title: str, details, choices, free_text: bool = False,
             "id": ticket,
             "title": title,
             "details": [[str(label), _clean(str(value))] for label, value in details],
-            "choices": [[str(value), str(label)] for value, label in choices],
+            "choices": [[str(value), _clean(str(label))] for value, label in choices],
             "free_text": bool(free_text),
             "asked": time.time(),
             "answer": None,
@@ -588,6 +594,25 @@ def _lan_address() -> str:
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        """A dropped connection is not news, and never a stack trace.
+
+        `socketserver` prints the whole traceback to stderr when a handler
+        raises, which lands in the middle of the conversation. A phone that
+        locks its screen, a tab that closes, a long poll the OS tears down -
+        Windows raises `ConnectionAbortedError` for all three - are the normal
+        end of a request here, not a fault. Anything that is *not* a socket
+        giving way is worth one line at the prompt, because a handler that
+        keeps failing is a remote that has quietly stopped working.
+        """
+        kind, problem, _ = sys.exc_info()
+        if kind is None or issubclass(kind, OSError):
+            return
+        try:
+            _note(f"the remote hit {kind.__name__}: {problem}")
+        except Exception:
+            pass
 
 
 def start(scope: str = "") -> dict:
@@ -837,7 +862,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _who(self) -> str:
         return self.client_address[0] if self.client_address else "?"
 
-    def _refusal(self, fields, needs_pairing: bool = True):
+    def _refusal(self, path, fields, needs_pairing: bool = True):
         """Everything a request has to get past, in the order it has to.
 
         The `Host` first, because a request from a page that resolved its own
@@ -850,6 +875,12 @@ class _Handler(BaseHTTPRequestHandler):
         """
         if not self._host_is_this_machine():
             return 403, "wrong host"
+        if path in _BROWSER_ASKS_ANYWAY:
+            # A browser fetches these by itself, without the token, the moment
+            # the page loads. Counting them as somebody trying a wrong token
+            # meant opening the link reported *you* at your own prompt as an
+            # intruder - twice, once for the tab and once for the icon.
+            return 404, "no such thing here"
         who = self._who()
         waiting = locked_out(who)
         if waiting:
@@ -870,7 +901,8 @@ class _Handler(BaseHTTPRequestHandler):
         # code, and a browser that cannot load it cannot be told what to type.
         # It carries nothing about this session - the transcript is behind
         # `/state`, which does need one.
-        refused = self._refusal(fields, needs_pairing=path not in ("/", "/index.html"))
+        refused = self._refusal(path, fields,
+                                needs_pairing=path not in ("/", "/index.html"))
         if refused:
             return self._json(refused[0], {"error": refused[1]})
 
@@ -891,7 +923,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):                                   # noqa: N802
         path, fields = self._path_and_query()
-        refused = self._refusal(fields, needs_pairing=path != "/pair")
+        refused = self._refusal(path, fields, needs_pairing=path != "/pair")
         if refused:
             return self._json(refused[0], {"error": refused[1]})
         payload = self._body()

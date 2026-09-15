@@ -305,6 +305,30 @@ def _report_agents(agent_id: str) -> None:
           f"board.{S.R}\n")
 
 
+def _print_above(text: str) -> None:
+    """Print a line that arrives while a prompt is open, colours intact.
+
+    `patch_stdout` puts such a line above the prompt rather than through the
+    middle of it, and on Linux and macOS a plain `print` of ANSI text comes out
+    as ANSI text. On Windows it does not: prompt_toolkit writes through its own
+    console output, which passes escape sequences to the console as characters,
+    so the person sees `?[38;2;250;189;47m` in front of every message that
+    arrived while they were at the prompt. Handing prompt_toolkit the same
+    string as `ANSI(...)` lets it parse the escapes into its own styling and
+    render them the way that console actually takes.
+
+    Only on Windows, and only when prompt_toolkit is there: everywhere else the
+    plain print is already right, and it is the path that cannot fail.
+    """
+    if config.CURRENT_OS == "Windows" and config.PROMPT_TOOLKIT_AVAILABLE:
+        try:
+            config.print_formatted_text(config.ANSI(text))
+            return
+        except Exception:
+            pass          # a message printed plainly beats a message lost
+    print(text)
+
+
 def _show_remote_notices() -> None:
     """Who has been at the remote's door, printed as soon as the prompt is free.
 
@@ -316,7 +340,7 @@ def _show_remote_notices() -> None:
     """
     try:
         for text in remote.take_notices():
-            print(f"  {S.WARN}⚿ {text}{S.R}")
+            _print_above(f"  {S.WARN}⚿ {text}{S.R}")
     except Exception:
         pass          # the door is a convenience; it never stops the prompt
 
@@ -330,7 +354,7 @@ def _show_arrivals() -> None:
     """
     try:
         for entry in channel.take_for_screen():
-            print(f"  {S.PURPLE}✉ {channel.describe(entry)}{S.R}")
+            _print_above(f"  {S.PURPLE}✉ {channel.describe(entry)}{S.R}")
     except Exception:
         pass          # the board is a convenience; it never stops the prompt
 
@@ -384,7 +408,7 @@ def _echo_remote(line: str) -> str:
     The person at this keyboard has to be able to read the transcript
     downwards and see what was asked, even when it was asked from a train.
     """
-    print(f"  {S.USER_CLR}{S.BOLD}❯{S.R} {line}  {S.MUTED}(from the remote){S.R}")
+    _print_above(f"  {S.USER_CLR}{S.BOLD}❯{S.R} {line}  {S.MUTED}(from the remote){S.R}")
     remote.set_driver("remote")
     return line
 

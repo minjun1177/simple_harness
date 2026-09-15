@@ -895,8 +895,11 @@ happen is the one at the keyboard.
 **The question follows the driver.** Every blocking question in the harness
 goes through `tui.ask_the_driver`, which asks `remote.driven()` - did the line
 being worked on come from the remote? - and puts the question wherever that
-person is. `_approval_prompt`, `get_input` and `submit_plan_for_approval` all
-reach it. `ask` blocks the main thread on the same `Condition` the server's
+person is. `_approval_prompt`, `get_input`, `submit_plan_for_approval` and
+`connect._ask` all reach it; `connect` passes its numbered list along as
+choices, so `/model` on a phone is a list of buttons rather than a prompt
+nobody can see. Its one `keyboard_only=True` is the API key, which does not go
+over plain HTTP whoever is driving. `ask` blocks the main thread on the same `Condition` the server's
 threads notify, so an answer from a phone returns *into* the tool call that
 was waiting for a keystroke. No answer inside `REMOTE_ASK_TIMEOUT` returns
 `""`, and every caller reads that as a no.
@@ -937,6 +940,17 @@ after any `/set REMOTE_*`: a changed host or port stops and restarts the server
 (a new token, and the caller prints the new link), and a changed `REMOTE_LINES`
 resizes the ring in place. A setting that needs the feature turned off and on
 again to mean anything is a setting that reads as broken.
+
+**Two things Windows does differently.** A line printed while a prompt is open
+goes out through prompt_toolkit's console writer there, not to a terminal
+interpreting escapes, so raw ANSI arrives as `?[38;2;…m` on screen -
+`app._print_above` hands it over as `ANSI(...)` instead, and everything that
+prints above a prompt (the channel's messages, the remote's notices, the echo
+of a remotely typed line) goes through it. And a connection torn down
+mid-request raises there where it does not elsewhere, which `socketserver`
+answers with a traceback into the middle of the conversation; `_Server.
+handle_error` swallows every `OSError` and turns anything else into one line at
+the prompt.
 
 `stop()` is called from the main thread and never from a handler - `shutdown`
 waits for the serving loop a handler is running inside - and it drops the tee,

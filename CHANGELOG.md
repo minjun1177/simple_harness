@@ -93,6 +93,27 @@ from anywhere else, forward the port over `ssh -L`.
 9000` at a prompt with a remote already open *moves* it - new token, new link,
 printed on the spot - rather than waiting for a restart.
 
+### Fixed, from the first afternoon of it running on Windows
+
+- **A message that arrived while you were at the prompt lost its colours** and
+  arrived as `?[38;2;250;189;47m⚿ …` instead. Printing above a live prompt goes
+  through prompt_toolkit's own console writer on Windows, which hands escape
+  sequences to the console as characters; they are handed over as `ANSI(...)`
+  now. The agent channel's messages had the same fault and the same fix.
+- **Opening the link reported you at your own prompt as an intruder** - twice,
+  once for the tab icon and once for the page. A browser fetches `/favicon.ico`
+  and friends by itself, without the token; those paths answer 404 and are
+  counted as nothing.
+- **A phone that locked its screen printed a stack trace** into the middle of
+  the conversation: `socketserver` reports a handler's exception that way, and
+  a dropped long poll is `ConnectionAbortedError` on Windows. A socket giving
+  way is now the ordinary end of a request, and anything that is not one is a
+  single line at the prompt.
+- **`/model` from the phone asked the terminal.** `connect` now asks through
+  the same place every other blocking question does, and passes its numbered
+  list along as buttons. An API key is the deliberate exception: it is not
+  typed over plain HTTP, whoever is driving.
+
 The transcript is a tee on `sys.stdout` rather than a second rendering, which is
 why what the phone shows is exactly what the terminal shows, tool boxes and all.
 

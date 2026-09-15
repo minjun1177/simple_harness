@@ -432,6 +432,36 @@ check("who opened it is known", any(row["address"] == "127.0.0.1"
       str(remote.clients()))
 
 # ---------------------------------------------------------------------------
+print("\n--- what a browser fetches by itself is not an intruder ---")
+
+remote.take_notices()
+for path in ("/favicon.ico", "/apple-touch-icon.png", "/robots.txt"):
+    code, _ = request(path)
+    check(f"{path} answers 404 without a token", code == 404, str(code))
+check("and none of it is reported as somebody trying a token",
+      not remote.take_notices(),
+      "opening the link used to report you at your own prompt, twice")
+check("...nor counted towards the lockout", not remote.status()["refused"])
+code, _ = request("/state", "not-the-token")
+check("while a real wrong token still is", code == 401 and len(remote.take_notices()) == 1)
+
+print("\n--- a browser that goes away is not a stack trace ---")
+
+import io                                                          # noqa: E402
+import contextlib                                                  # noqa: E402
+
+noise = io.StringIO()
+with contextlib.redirect_stderr(noise):
+    dropped = socket.create_connection(("127.0.0.1", remote.status()["port"]))
+    dropped.sendall(f"GET /state?k={TOKEN}&wait=1 HTTP/1.1\r\n"
+                    f"Host: 127.0.0.1\r\n\r\n".encode())
+    dropped.close()
+    time.sleep(0.8)
+check("nothing is printed when a connection is torn down mid-request",
+      noise.getvalue() == "", noise.getvalue()[:120])
+check("and the remote is still answering", state(TOKEN)[0] == 200)
+
+# ---------------------------------------------------------------------------
 print("\n--- over a network the link is not enough on its own ---")
 
 check("loopback asks for nothing more by default",
