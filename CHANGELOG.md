@@ -66,6 +66,25 @@ does - `⚿ 192.168.0.14 opened the remote link.` On a shared network the
 question worth answering is not whether somebody *could* get in but whether
 they did, and nothing else here can answer it.
 
+**Over a network the link is not enough on its own.** A browser that arrives
+over `lan` is shown a box rather than the transcript: six digits, printed in the
+terminal the harness runs in, good for two minutes and three guesses. Type them
+on the phone and it gets a session of its own; anything else stays outside.
+That is a second factor rather than a second copy of the first - the link
+crosses the network and can be photographed, read aloud or left in a history,
+and the terminal cannot. `REMOTE_PAIR` chooses when it is asked (`lan`,
+`always`, `never`) and `/remote forget` drops every browser that has paired.
+
+**`/remote qr`** draws the link as something to point a camera at, because
+nobody types forty-three random characters into a phone twice. Black modules on
+a white ground the harness paints itself, so it scans in any terminal theme.
+There is no library behind it: `qr.py` is a byte-mode encoder in the stdlib,
+level M, versions 1 to 9. `tests/test_qr.py` reads each symbol back the way a
+scanner does - the mask out of its own format bits, the zigzag, the blocks - and
+checks that every block still satisfies its Reed-Solomon parity, which is one
+check over the format bits, the placement, the block tables, the interleaving
+and the arithmetic at once.
+
 It is plain HTTP, which on loopback is the whole story and over `lan` is a
 network you are choosing to trust. There is deliberately no TLS and no account:
 from anywhere else, forward the port over `ssh -L`.
@@ -77,8 +96,9 @@ printed on the spot - rather than waiting for a restart.
 The transcript is a tee on `sys.stdout` rather than a second rendering, which is
 why what the phone shows is exactly what the terminal shows, tool boxes and all.
 
-New: `/remote`, `remote.py`, `tests/test_remote.py`, and `REMOTE_ENABLED`,
-`REMOTE_HOST`, `REMOTE_PORT`, `REMOTE_LINES`, `REMOTE_ASK_TIMEOUT`,
+New: `/remote` (with `qr` and `forget`), `remote.py`, `qr.py`,
+`tests/test_remote.py`, `tests/test_qr.py`, and `REMOTE_ENABLED`, `REMOTE_HOST`,
+`REMOTE_PORT`, `REMOTE_LINES`, `REMOTE_ASK_TIMEOUT`, `REMOTE_PAIR`,
 `REMOTE_MAX_BAD_TOKENS`, `REMOTE_LOCKOUT`.
 
 ---

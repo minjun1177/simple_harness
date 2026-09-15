@@ -51,7 +51,7 @@ def check(label, ok, extra=""):
     print(f"  [{'ok  ' if ok else 'FAIL'}] {label}{f'  {extra}' if extra else ''}")
 
 
-def request(path, token="", method="GET", payload=None, host=None):
+def request(path, token="", method="GET", payload=None, host=None, session=None):
     """One HTTP call. Returns (status, body) - a refusal is an answer too."""
     url = f"http://127.0.0.1:{remote.status()['port']}{path}"
     if token:
@@ -62,6 +62,8 @@ def request(path, token="", method="GET", payload=None, host=None):
         req.add_header("Content-Type", "application/json")
     if host:
         req.add_header("Host", host)
+    if session:
+        req.add_header("X-Remote-Session", session)
     try:
         with urllib.request.urlopen(req, timeout=10) as answer:
             return answer.status, answer.read().decode("utf-8", "replace")
@@ -81,6 +83,11 @@ def socket_for_a_free_port() -> int:
 def state(token, since=0):
     code, body = request(f"/state?since={since}", token)
     return code, json.loads(body) if code == 200 else {}
+
+
+def state_with(session):
+    """The transcript, asked for the way a paired browser asks for it."""
+    return request("/state", TOKEN, session=session)
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +430,73 @@ remote.take_notices()
 check("who opened it is known", any(row["address"] == "127.0.0.1"
                                     for row in remote.clients()),
       str(remote.clients()))
+
+# ---------------------------------------------------------------------------
+print("\n--- over a network the link is not enough on its own ---")
+
+check("loopback asks for nothing more by default",
+      not remote.pairing_required() and state(TOKEN)[0] == 200,
+      f"REMOTE_PAIR is {config.REMOTE_PAIR!r}")
+
+config.REMOTE_PAIR = "always"
+check("...and that is a setting", remote.pairing_required())
+code, body = request("/state", TOKEN)
+check("the transcript is behind the second factor",
+      code == 403 and "pair" in body, f"{code} {body}")
+code, _ = request("/say", TOKEN, "POST", {"text": "let me in"})
+check("so is typing", code == 403, str(code))
+code, page = request("/", TOKEN)
+check("but the page still loads - it is what asks for the code",
+      code == 200 and "<!doctype html>" in page, str(code))
+
+remote.take_notices()
+code, body = request("/pair", TOKEN, "POST", {})
+check("asking to pair is accepted", code == 200 and json.loads(body)["wanted"], body)
+check("and the answer does not contain the code",
+      not any(ch.isdigit() for ch in json.loads(body).get("code", "")), body)
+notices = remote.take_notices()
+check("the code is printed here instead - which is the whole point",
+      any("wants to drive this session" in text and "Code:" in text for text in notices),
+      str(notices))
+
+secret = "".join(ch for ch in notices[-1].split("Code:")[1] if ch.isdigit())[:6]
+check("it is six digits", len(secret) == 6 and secret.isdigit(), secret)
+
+wrong = "".join("0" if ch != "0" else "1" for ch in secret)
+code, _ = request("/pair", TOKEN, "POST", {"code": wrong})
+check("a wrong code is refused", code == 403, str(code))
+for _ in range(2):
+    request("/pair", TOKEN, "POST", {"code": wrong})
+code, _ = request("/pair", TOKEN, "POST", {"code": secret})
+check("and three wrong ones kill the code, right answer or not",
+      code == 403, str(code))
+notices = remote.take_notices()
+check("which is said at the prompt too",
+      any("wrong" in text for text in notices), str(notices))
+
+request("/pair", TOKEN, "POST", {})                    # a fresh code
+secret = "".join(ch for ch in remote.take_notices()[-1].split("Code:")[1]
+                 if ch.isdigit())[:6]
+code, body = request("/pair", TOKEN, "POST", {"code": secret})
+SESSION = json.loads(body).get("session", "")
+check("the code off the terminal is what opens it", code == 200 and len(SESSION) > 20,
+      str(code))
+
+check("the transcript opens with the session", state_with(SESSION)[0] == 200)
+code, _ = request("/say", TOKEN, "POST", {"text": "now let me in"}, session=SESSION)
+check("and so does typing", code == 200 and remote.take_line() == "now let me in")
+check("without it, still nothing", state(TOKEN)[0] == 403)
+check("and the session belongs to the address it was issued to",
+      not remote.paired(SESSION, "10.9.9.9") and remote.paired(SESSION, "127.0.0.1"))
+check("the pairing is listed", len(remote.sessions()) == 1, str(remote.sessions()))
+
+check("/remote forget drops it", remote.forget_sessions() == 1)
+check("...and the browser is outside again", state_with(SESSION)[0] == 403)
+check("the link itself still works", request("/", TOKEN)[0] == 200)
+
+config.REMOTE_PAIR = "never"
+check("a door can be told not to ask", state(TOKEN)[0] == 200)
+config.REMOTE_PAIR = "lan"
 
 # ---------------------------------------------------------------------------
 print("\n--- and closing it closes it ---")

@@ -612,7 +612,28 @@ So the session can hand out one door into itself:
      http://127.0.0.1:8765/?k=Hn4Qk0Zt7rJ2vXbA9wLpMg
 ```
 
-Open that on anything with a browser and you are at the prompt. The page shows
+Nobody types forty-three random characters into a phone, so `/remote qr`
+draws the link as something to point a camera at - black modules on a white
+ground it paints itself, so it scans whatever theme the terminal is in:
+
+```
+❯ /remote qr
+
+    █▀▀▀▀▀█ ▀ ▀▄█▀██▄ ▀▀▄██ ▄█▄▀█ █▀▀▀▀▀█
+    █ ███ █ ▄ ▄█ ▀▄▀▄▀██▀▀▄█▀▄  ▀ █ ███ █
+    █ ▀▀▀ █ █ ▀▀▀█ █▀ ██▄ █▀▀▀█▀  █ ▀▀▀ █
+    ▀▀▀▀▀▀▀ █▄█ ▀ █▄▀▄█ ▀▄█ ▀ ▀ ▀ ▀▀▀▀▀▀▀
+    █▄▄ ▀▄▀▀█ ▀█  ▀▀▄▄▀█▄▄▀▄▀▀ █▄██▀█▀ ▄▀
+      … 
+```
+
+There is no library behind that: `qr.py` is a byte-mode encoder in the
+stdlib, because a wheel to draw one screen was the wrong trade. It is held to
+the standard by `tests/test_qr.py`, which reads each symbol back the way a
+scanner does and checks that every block still satisfies its own error
+correction.
+
+Open the link on anything with a browser and you are at the prompt. The page shows
 the transcript as it is printed here, a box that types into the same loop the
 keyboard types into - a message or a slash command, both - and, when something
 needs approving, the approval prompt itself with its buttons.
@@ -641,12 +662,24 @@ that opens is a shell - the link can type `!rm -rf ~` as easily as "hello". So:
   `REMOTE_MAX_BAD_TOKENS` of them from one address, that address is refused for
   `REMOTE_LOCKOUT` seconds. A 128-bit token is not guessable; a door somebody
   can knock on all afternoon without anyone hearing it is still the wrong door;
-- **you are told who is there.** The first request from an address, and the
-  first wrong token from one, appear at your prompt the way another agent's
-  message does:
+- **over a network, the link is not enough.** `/remote on lan` opens it, but a
+  browser that arrives over the network is shown a box, not the transcript:
+  six digits, printed in the terminal the harness is running in, expiring in
+  two minutes and surviving three wrong guesses. A phone that types them gets a
+  session of its own; anything else gets the box. That is what makes it a
+  second factor rather than a second copy of the first - the link crosses the
+  network and can be read off a shoulder, photographed or left in a history,
+  and the terminal does not. `REMOTE_PAIR` decides when it is asked for:
+  `lan` (the default), `always`, or `never`; `/remote forget` drops every
+  browser that has paired;
+- **you are told who is there.** The first request from an address, the first
+  wrong token from one, and every attempt to pair appear at your prompt the way
+  another agent's message does:
 
   ```
   ⚿ 192.168.0.14 opened the remote link.
+  ⚿ 192.168.0.14 wants to drive this session. Code: 418 205 - type it there
+    within 2 minutes. If this is not you, /remote off.
   ⚿ 192.168.0.23 tried the remote with a token that is not this one.
   ```
 
@@ -1634,6 +1667,7 @@ The settings worth knowing:
 | `REMOTE_PORT` | 8765 | The port it tries first; the next 19 are tried before it gives up |
 | `REMOTE_LINES` | 500 | Transcript lines kept for the remote to scroll back through |
 | `REMOTE_ASK_TIMEOUT` | 300 | Seconds a question waits on the remote before it counts as a no |
+| `REMOTE_PAIR` | `lan` | When a browser must also type a code shown on this terminal: `lan`, `always` or `never` |
 | `REMOTE_MAX_BAD_TOKENS` | 20 | Wrong tokens from one address before it is shut out |
 | `REMOTE_LOCKOUT` | 300 | Seconds it is shut out for. The first wrong token is reported at the prompt either way |
 | `AUTO_TITLE` | `True` | Let the model name each new session |
@@ -1746,6 +1780,8 @@ Two prefixes act on the message itself rather than being commands:
 | `/agents [on/off]` | Whether this session appears on the board at all |
 | `/remote [on/off]` | Whether this session can be driven from a browser. On its own it says which, and reprints the link |
 | `/remote on lan` | Open it to this machine's network rather than to this machine only |
+| `/remote qr` | The link as a QR code, for pointing a phone at |
+| `/remote forget` | Drop every browser that has paired; the link still works |
 | `/vm` | Show the `run_python` scratch process: whether it is up, what it has run, and the directory it runs in |
 | `/vm reset` | Throw away every variable the model left in it |
 | `/vm stop` | End the process; the next `run_python` starts a fresh one |
@@ -1771,6 +1807,7 @@ The codebase is organized cleanly around the following components:
 - **`llm_client.py`**: The conversation loop - streaming a reply, parsing the tool calls out of it, running them. Knows nothing about which provider answered.
 - **`tools.py`**: Tool implementations, and the table binding each one to its entry in `toolspec.py`.
 - **`toolspec.py`**: What every built-in tool is - name, description, parameters. The system prompt is rendered from it and dispatch binds arguments through it, so the two cannot drift apart.
+- **`qr.py`**: A QR encoder, stdlib only - byte mode, level M, versions 1 to 9 - and the half-block drawing `/remote qr` prints.
 - **`remote.py`**: The one door into a running session - the token-locked HTTP server, the transcript mirrored off `sys.stdout`, and the question that follows whoever is driving the turn.
 - **`channel.py`**: The board the harnesses running in one project share - who is here, what they have said, and which files each is in the middle of changing.
 - **`subagent.py`**: `spawn_agent` - a second model, hired for one self-contained job, working in its own context and handing back only its report.
@@ -1801,6 +1838,7 @@ The codebase is organized cleanly around the following components:
 - **`tests/test_resume.py`**: That `--resume` and `-c` open the conversation they name - and that neither hands back a blank one, or guesses, when they cannot.
 - **`tests/test_tool_reporting.py`**: That a tool result is judged by the marker it *starts* with, not one it happens to contain, and that no library writes an unasked-for paragraph to stderr while a tool is running.
 - **`tests/test_hashline_edit.py`**: That `38:ff7|print()` reaches the line it names, that a stale or mistyped anchor is refused rather than applied a few lines off, and that everything which is not an anchor still behaves as it did.
+- **`tests/test_qr.py`**: That a symbol is one a scanner can read - it reads each one back the way a scanner does, from the mask in its own format bits through the zigzag and the blocks, and checks that every block still satisfies its Reed-Solomon parity; plus what fits in which version, and that the drawing is the symbol.
 - **`tests/test_remote.py`**: That the remote refuses a request with no token, a token that is nearly right and a `Host` this machine was never called by, that a `.env` value on this terminal does not go out over it, that a question cannot be answered by a phone still showing the last one, and that closing it frees the port and puts `sys.stdout` back.
 - **`tests/test_channel.py`**: That a file one harness is changing cannot be written from another, that the refusal names who to ask, that a claim dies with the terminal that took it, and that several processes writing to the board at once lose nothing.
 - **`tests/test_mentions.py`**: What `@` attaches and what it must leave alone - an email address is not a file - that the completion menu reads the real directory, and that the command menu previews what each command does and what may follow it.

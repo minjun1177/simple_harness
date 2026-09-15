@@ -215,6 +215,8 @@ COMMANDS = (
                          "transcript, the prompt and the approvals, on your phone. "
                          "/remote on lan opens it to this machine's network rather "
                          "than to this machine only"),
+    ("/remote qr", "The link as a QR code, for pointing a phone at"),
+    ("/remote forget", "Drop every browser that has paired; the link still works"),
     ("/vm", "The Python scratch process run_python uses, and where it runs"),
     ("/vm reset", "Throw away every variable the model left in it"),
     ("/vm stop", "End the process; the next run_python starts a new one"),

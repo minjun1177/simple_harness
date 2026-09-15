@@ -19,6 +19,7 @@ from simple_harness import permissions
 from simple_harness import providers
 from simple_harness import connect
 from simple_harness import remote
+from simple_harness import qr
 from simple_harness import mentions
 from simple_harness import tools
 from simple_harness import vault
@@ -616,6 +617,9 @@ def _remote_lines() -> list:
     seen = ("nobody has opened it yet" if not state["seen"]
             else f"last read {channel.ago(state['seen'])}")
     rows = [f"│ bound to {state['host']}:{state['port']} - {seen}"]
+    if state["pairing"]:
+        rows.append(f"│ a browser must also type a code shown here before it can "
+                    f"drive anything ({state['paired']} paired)")
     if state["clients"]:
         who = ", ".join(row["address"] for row in remote.clients()[:4])
         rows.append(f"│ opened from {who}")
@@ -625,6 +629,7 @@ def _remote_lines() -> list:
         rows.append(f"│ {state['queued']} line(s) typed there, waiting for this prompt")
     rows.append("╰─ open this, and whoever holds it is at this prompt:")
     rows += [f"   {url}" for url in state["urls"]]
+    rows.append(f"   {'/remote qr shows it as something a camera can read.'}")
     return rows
 
 
@@ -649,6 +654,31 @@ def _open_saved_remote() -> None:
     print()
 
 
+def _show_remote_qr() -> None:
+    """`/remote qr`: the link as something a camera can read.
+
+    Forty-three random characters is not a thing anybody types into a phone,
+    and a link that is hard to open is a feature that goes unused. The last
+    address is the one drawn - on `lan` that is the one a phone can actually
+    reach, which is the whole point of pointing a phone at it.
+    """
+    if not remote.running():
+        print(f"  {S.ERR}✗ Nothing is open to scan.{S.MUTED} {S.GRAY}/remote on"
+              f"{S.MUTED} first.{S.R}\n")
+        return
+    link = remote.status()["urls"][-1]
+    if not qr.fits(link):
+        print(f"  {S.WARN}⚠ That link is too long to draw.{S.R}\n  {link}\n")
+        return
+    print()
+    print(qr.render(link, colour=bool(S.R)))
+    print(f"\n  {S.MUTED}{link}{S.R}")
+    if remote.status()["pairing"]:
+        print(f"  {S.MUTED}Scanning it opens the page; driving the session also "
+              f"needs the code this terminal prints when the page asks.{S.R}")
+    print()
+
+
 def _remote_command(rest: str) -> None:
     """`/remote`: the one door into this session, and whether it is open.
 
@@ -659,6 +689,17 @@ def _remote_command(rest: str) -> None:
     """
     verb, _, argument = rest.strip().partition(" ")
     verb, argument = verb.lower(), argument.strip().lower()
+
+    if verb in ("qr", "code"):
+        _show_remote_qr()
+        return
+
+    if verb == "forget":
+        dropped = remote.forget_sessions()
+        print(f"  {S.INFO}✓ {dropped or 'No'} paired browser"
+              f"{'' if dropped == 1 else 's'} dropped.{S.MUTED} The link still "
+              f"works; whoever opens it has to be told a new code.{S.R}\n")
+        return
 
     if verb == "on" and not remote.running():
         try:

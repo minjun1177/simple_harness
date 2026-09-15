@@ -443,6 +443,13 @@ REMOTE_HOST = "127.0.0.1"       # `/remote on lan` binds every interface instead
 REMOTE_PORT = 8765              # busy? the next 19 are tried before giving up
 REMOTE_LINES = 500              # transcript lines kept for a phone to scroll
 REMOTE_ASK_TIMEOUT = 300        # seconds a question waits before it counts as no
+REMOTE_PAIR = "lan"             # when a browser must also type a code shown on
+                                # this terminal before it can drive anything:
+                                # "lan" (only when opened to the network),
+                                # "always", or "never". The link crosses the
+                                # network; the terminal does not, which is what
+                                # makes the code a second factor rather than a
+                                # second copy of the first.
 REMOTE_MAX_BAD_TOKENS = 20      # wrong tokens from one address before it is shut out
 REMOTE_LOCKOUT = 300            # ...and for how long. The first wrong one is reported
                                 # at the prompt either way: on a network somebody

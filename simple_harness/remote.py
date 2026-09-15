@@ -25,6 +25,12 @@ risk, so:
     network somebody else is also on;
   * it binds **loopback** unless `/remote on lan` is typed, and that prints a
     warning naming what is now reachable;
+  * where it is reachable over a network, **the link is not enough**: the
+    browser is shown a box asking for six digits that were printed on *this
+    terminal*, and gets a session key only when it sends them back. The token
+    crosses the network to reach the phone and the terminal does not, which is
+    the entire difference between a second factor and a second copy of the
+    first. `REMOTE_PAIR` decides when it is asked for;
   * every request carries the token, compared with `secrets.compare_digest`;
   * wrong tokens are counted per address, and an address that has sent
     `REMOTE_MAX_BAD_TOKENS` of them is refused for `REMOTE_LOCKOUT` seconds -
@@ -112,6 +118,9 @@ _started = 0.0
 _clients = {}               # address -> {"first", "last", "requests"}
 _bad = {}                   # address -> {"count", "until"}
 _notices = collections.deque(maxlen=50)      # for the prompt to print
+
+_pairing = None             # the code a browser is being asked for, or None
+_sessions = {}              # key -> {"address", "since", "last"}
 
 _lines = collections.deque(maxlen=1)     # (seq, text); resized at start()
 _seq = 0
@@ -367,6 +376,119 @@ def clients() -> list:
 
 
 # ---------------------------------------------------------------------------
+# pairing: the second thing a browser has to have, and where it comes from
+# ---------------------------------------------------------------------------
+
+# How long a code is worth typing, and how many guesses it survives. Six digits
+# is a million, and three guesses inside two minutes is not a way in.
+PAIR_SECONDS = 120
+PAIR_TRIES = 3
+
+
+def pairing_required() -> bool:
+    """Is the token alone enough to drive this session?
+
+    Over `lan` it is not, and that is the whole of this feature. The link has
+    to cross a network to reach the phone - read aloud, photographed, sitting
+    in somebody's browser history - and the one thing an attacker who has the
+    link still cannot do is read the terminal it came from. So the second
+    factor is a code that only appears *there*: holding the link gets you a
+    box asking for six digits, and nothing else.
+    """
+    mode = str(_cfg("REMOTE_PAIR", "lan")).strip().lower()
+    if mode in ("always", "on", "true", "yes"):
+        return True
+    if mode in ("never", "off", "false", "no"):
+        return False
+    return _scope == "lan"
+
+
+def begin_pairing(who: str) -> dict:
+    """Put a code on the terminal for the browser at `who` to be told.
+
+    One at a time: a second browser asking while a code is outstanding gets
+    the same code rather than replacing it, because two codes on screen with
+    nothing to say which is which is how a person ends up typing the
+    attacker's one.
+    """
+    global _pairing
+    with _wake:
+        live = (_pairing and _pairing["until"] > time.time())
+        if live and _pairing["address"] == who:
+            return {"wanted": True, "seconds": int(_pairing["until"] - time.time())}
+        if live:
+            return {"wanted": True, "busy": True,
+                    "seconds": int(_pairing["until"] - time.time())}
+        code = f"{secrets.randbelow(1000000):06d}"
+        _pairing = {"code": code, "address": who, "tries": 0,
+                    "until": time.time() + PAIR_SECONDS}
+        _wake.notify_all()
+    _note(f"{who} wants to drive this session. Code: {code[:3]} {code[3:]} "
+          f"- type it there within {PAIR_SECONDS // 60} minutes. "
+          f"If this is not you, /remote off.")
+    return {"wanted": True, "seconds": PAIR_SECONDS}
+
+
+def complete_pairing(who: str, offered: str) -> str:
+    """The code, checked. Returns a session key, or "" for anything else."""
+    global _pairing
+    offered = "".join(ch for ch in str(offered) if ch.isdigit())
+    with _wake:
+        if not _pairing or _pairing["until"] <= time.time():
+            _pairing = None
+            return ""
+        if _pairing["address"] != who:
+            return ""
+        if not secrets.compare_digest(offered, _pairing["code"]):
+            _pairing["tries"] += 1
+            spent = _pairing["tries"]
+            if spent >= PAIR_TRIES:
+                _pairing = None
+            _wake.notify_all()
+            if spent >= PAIR_TRIES:
+                _note(f"{who} got the pairing code wrong {PAIR_TRIES} times. "
+                      f"The code is dead; they can ask for another.")
+            return ""
+        key = secrets.token_urlsafe(24)
+        _sessions[key] = {"address": who, "since": time.time(), "last": time.time()}
+        _pairing = None
+        _wake.notify_all()
+    _note(f"{who} paired and is now at this prompt. /remote forget drops it.")
+    return key
+
+
+def paired(key: str, who: str) -> bool:
+    """Is this a session key that was issued, to this address?"""
+    if not key:
+        return False
+    with _wake:
+        session = _sessions.get(key)
+        if not session or session["address"] != who:
+            return False
+        session["last"] = time.time()
+        return True
+
+
+def sessions() -> list:
+    """The browsers that have paired, newest first."""
+    with _wake:
+        return sorted(({"address": s["address"], "since": s["since"], "last": s["last"]}
+                       for s in _sessions.values()),
+                      key=lambda row: row["last"], reverse=True)
+
+
+def forget_sessions() -> int:
+    """Drop every paired browser. They can pair again; the link still works."""
+    global _pairing
+    with _wake:
+        count = len(_sessions)
+        _sessions.clear()
+        _pairing = None
+        _wake.notify_all()
+    return count
+
+
+# ---------------------------------------------------------------------------
 # questions, and where they are asked
 # ---------------------------------------------------------------------------
 
@@ -555,7 +677,7 @@ def _resize(kept: int) -> None:
 
 def stop() -> None:
     """Close the door, and forget the token that opened it."""
-    global _server, _thread, _token, _bound, _scope, _question, _last_seen
+    global _server, _thread, _token, _bound, _scope, _question, _last_seen, _pairing
     server, _server = _server, None
     _drop_mirror()
     with _wake:
@@ -588,6 +710,8 @@ def stop() -> None:
     with _wake:
         _clients.clear()
         _bad.clear()
+        _sessions.clear()
+        _pairing = None
         _last_seen = 0.0
 
 
@@ -615,6 +739,8 @@ def status() -> dict:
             "token": _token,
             "urls": urls(),
             "clients": len(_clients),
+            "pairing": pairing_required(),
+            "paired": len(_sessions),
             "refused": sorted(who for who, record in _bad.items()
                               if record["until"] > time.time()),
             "lines": len(_lines),
@@ -708,17 +834,23 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -- the four things it answers -----------------------------------------
 
-    def _refusal(self, fields):
+    def _who(self) -> str:
+        return self.client_address[0] if self.client_address else "?"
+
+    def _refusal(self, fields, needs_pairing: bool = True):
         """Everything a request has to get past, in the order it has to.
 
         The `Host` first, because a request from a page that resolved its own
         name here should not even get to spend a guess. Then the lockout, so
-        an address that is guessing cannot keep guessing. Then the token.
+        an address that is guessing cannot keep guessing. Then the token. Then
+        - where pairing is required - the session key that only a browser
+        which was told the code off the terminal can have.
+
         Returns `(code, message)` or `None`.
         """
         if not self._host_is_this_machine():
             return 403, "wrong host"
-        who = self.client_address[0] if self.client_address else "?"
+        who = self._who()
         waiting = locked_out(who)
         if waiting:
             return 429, f"too many wrong tokens - try again in {int(waiting) + 1}s"
@@ -726,11 +858,19 @@ class _Handler(BaseHTTPRequestHandler):
             note_bad_token(who)
             return 401, "a token is needed"
         note_client(who)
+        if needs_pairing and pairing_required():
+            key = self.headers.get("X-Remote-Session", "") or fields.get("s", "")
+            if not paired(key.strip(), who):
+                return 403, "pair"
         return None
 
     def do_GET(self):                                    # noqa: N802
         path, fields = self._path_and_query()
-        refused = self._refusal(fields)
+        # The page itself needs no pairing: it is the thing that asks for the
+        # code, and a browser that cannot load it cannot be told what to type.
+        # It carries nothing about this session - the transcript is behind
+        # `/state`, which does need one.
+        refused = self._refusal(fields, needs_pairing=path not in ("/", "/index.html"))
         if refused:
             return self._json(refused[0], {"error": refused[1]})
 
@@ -751,10 +891,21 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):                                   # noqa: N802
         path, fields = self._path_and_query()
-        refused = self._refusal(fields)
+        refused = self._refusal(fields, needs_pairing=path != "/pair")
         if refused:
             return self._json(refused[0], {"error": refused[1]})
         payload = self._body()
+
+        if path == "/pair":
+            if not pairing_required():
+                return self._json(200, {"ok": True, "session": ""})
+            offered = str(payload.get("code", "")).strip()
+            if not offered:
+                return self._json(200, begin_pairing(self._who()))
+            key = complete_pairing(self._who(), offered)
+            return self._json(200 if key else 403,
+                              {"ok": bool(key), "session": key,
+                               "error": "" if key else "that is not the code"})
 
         if path == "/say":
             text = str(payload.get("text", "")).strip()
@@ -876,9 +1027,29 @@ form { display:flex; gap:8px; padding:10px 14px calc(10px + env(safe-area-inset-
 input { flex:1; min-width:0; font:inherit; padding:11px 12px; border-radius:6px;
         border:1px solid var(--line); background:#111; color:var(--text); }
 input:focus { outline:1px solid var(--accent); }
+#pair { position:fixed; inset:0; background:var(--bg); display:none;
+        flex-direction:column; justify-content:center; align-items:center;
+        gap:14px; padding:24px; text-align:center; z-index:10; }
+#pair h2 { margin:0; font-size:16px; color:var(--accent); }
+#pair p { margin:0; color:var(--muted); max-width:28em; line-height:1.6; }
+#pair input { width:10ch; text-align:center; font-size:22px; letter-spacing:4px; }
+#pair .row { display:flex; gap:8px; align-items:center; }
+#pairnote { color:var(--err); min-height:1.2em; }
 </style></head><body>
 <header><i id="dot"></i><b>simple-harness</b><span id="where">connecting…</span></header>
 <div id="log"></div>
+<div id="pair">
+  <h2>Enter the code on the terminal</h2>
+  <p>This link reached you over a network. To drive the session you also need
+     the six digits the harness just printed in the terminal it is running in -
+     which is the part nobody else on the network can see.</p>
+  <div class="row">
+    <input id="code" inputmode="numeric" autocomplete="one-time-code"
+           maxlength="7" placeholder="000000">
+    <button id="pairgo">Pair</button>
+  </div>
+  <div id="pairnote"></div>
+</div>
 <div id="ask"><h3></h3><dl></dl><div class="row"></div></div>
 <form id="say"><input id="text" placeholder="message, or /command"
   autocomplete="off" autocapitalize="off" autocorrect="off"><button>Send</button></form>
@@ -886,7 +1057,58 @@ input:focus { outline:1px solid var(--accent); }
 const KEY = "__TOKEN__";
 const log = document.getElementById("log"), ask = document.getElementById("ask");
 const dot = document.getElementById("dot"), where = document.getElementById("where");
-let seq = 0, tailNode = null, asking = "";
+const pair = document.getElementById("pair"), pairnote = document.getElementById("pairnote");
+let seq = 0, tailNode = null, asking = "", pairing = false;
+
+// The session the harness issued after the code was typed. Per browser, and
+// only ever in this browser: the terminal is the other half of it.
+function session() { try { return localStorage.getItem("session") || ""; } catch (e) { return ""; } }
+function remember(key) { try { localStorage.setItem("session", key); } catch (e) {} }
+
+async function call(path, body) {
+  const options = { headers: { "X-Remote-Session": session() } };
+  if (body !== undefined) {
+    options.method = "POST";
+    options.headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(body);
+  }
+  const answer = await fetch(path + (path.includes("?") ? "&" : "?") + "k=" + KEY, options);
+  if (answer.status === 403) {
+    const said = await answer.clone().json().catch(() => ({}));
+    if (said.error === "pair") { askToPair(); throw new Error("pair"); }
+  }
+  return answer;
+}
+
+async function askToPair() {
+  if (pairing) return;
+  pairing = true;
+  pair.style.display = "flex";
+  await fetch("/pair?k=" + KEY, { method: "POST",
+    headers: { "Content-Type": "application/json" }, body: "{}" });
+  document.getElementById("code").focus();
+}
+
+document.getElementById("pairgo").onclick = async () => {
+  const box = document.getElementById("code");
+  const answer = await fetch("/pair?k=" + KEY, { method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code: box.value }) });
+  const said = await answer.json().catch(() => ({}));
+  if (said.session) {
+    remember(said.session);
+    pairing = false; pair.style.display = "none"; pairnote.textContent = "";
+    box.value = "";
+    poll();
+  } else {
+    pairnote.textContent = said.error || "that is not the code";
+    box.value = "";
+    box.focus();
+  }
+};
+document.getElementById("code").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") document.getElementById("pairgo").click();
+});
 
 function atBottom() { return log.scrollHeight - log.scrollTop - log.clientHeight < 60; }
 function add(text, cls) {
@@ -930,9 +1152,7 @@ function drawAsk(q) {
 
 async function reply(id, value) {
   ask.style.display = "none"; asking = "";
-  await fetch("/answer?k=" + KEY, { method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id, value }) });
+  await call("/answer", { id, value }).catch(() => {});
 }
 
 document.getElementById("say").onsubmit = async (e) => {
@@ -941,15 +1161,14 @@ document.getElementById("say").onsubmit = async (e) => {
   if (!text) return;
   box.value = "";
   add("\\u276f " + text);
-  await fetch("/say?k=" + KEY, { method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }) });
+  await call("/say", { text }).catch(() => {});
 };
 
 async function poll() {
   for (;;) {
+    if (pairing) return;                       // nothing to show until paired
     try {
-      const r = await fetch("/state?k=" + KEY + "&since=" + seq + "&wait=1");
+      const r = await call("/state?since=" + seq + "&wait=1");
       if (r.status === 401) { where.textContent = "this link is no longer valid"; return; }
       const s = await r.json();
       dot.className = s.busy ? "busy" : "live";
@@ -965,6 +1184,7 @@ async function poll() {
       }
       drawAsk(s.question);
     } catch (err) {
+      if (err && err.message === "pair") return;
       dot.className = ""; where.textContent = "reconnecting…";
       await new Promise(r => setTimeout(r, 2000));
     }

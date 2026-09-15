@@ -12,7 +12,7 @@ mistakes are.
 
 ## 1. What this is
 
-A terminal AI assistant, ~17,600 lines of Python, no framework. It talks to
+A terminal AI assistant, ~18,600 lines of Python, no framework. It talks to
 Ollama, Anthropic, OpenAI and Gemini over plain HTTP (no vendor SDKs), gives the
 model 40 tools, and runs them with the user's approval.
 
@@ -570,6 +570,7 @@ app.py            the loop, slash commands, session lifecycle
   └ subagent.py   spawn_agent's own conversation loop
   └ channel.py    the board the harnesses in one project share
   └ remote.py     the token-locked door a browser drives this session through
+      └ qr.py    a QR encoder, stdlib only, for the link that door prints
       └ vm.py     the Python scratch process behind run_python
       └ providers.py  four wire formats → one event shape
           └ sse.py    server-sent events, read as they arrive
@@ -593,6 +594,7 @@ app.py            the loop, slash commands, session lifecycle
 | `git_ops.py` | Commit, undo, diff. Never raises | Anything not about git |
 | `verify.py` | Which check a project declares, running it, and the wording of a failure | When to run it or how many times - that is `chat_turn` |
 | `channel.py` | Who else is running here, what they said, what they hold | Anything about one conversation |
+| `qr.py` | Byte-mode QR encoding and the half-block drawing of it. Nothing about the remote | What the link *is* - `remote.urls` decides that |
 | `remote.py` | The HTTP server, the token, the transcript mirrored off `sys.stdout`, and the question that follows the driver | Anything about *what* is being approved - it carries the question, it does not read it |
 | `context.py` | Token estimate, trimming, compression, and folding the token history into turns | |
 | `session.py` | Session files, the directory each was worked in, long-term memory, and the block the important ones make (5.15) | Where that block is put - `app` composes |
@@ -907,11 +909,23 @@ was waiting for a keystroke. No answer inside `REMOTE_ASK_TIMEOUT` returns
    it `REMOTE_LOCKOUT` seconds;
 3. the token must match, `compare_digest`, `token_urlsafe(16)` on loopback and
    `(32)` for `lan`. It is made at `start()` and never written to disk: no
-   setting holds it, which is the point.
+   setting holds it, which is the point;
+4. where `pairing_required()` says so - over `lan` by default - the request
+   must also carry a session key, and the only way to get one is to send back
+   six digits that were printed on *this terminal*. `/` and `/pair` are the
+   two paths exempt, because the page is what asks for the code and cannot ask
+   if it cannot load. The code lives two minutes, survives three wrong
+   guesses, and is bound to the address that asked for it.
 
-A wrong token and a new address each leave a line in `_notices`, drained at the
-prompt by `_show_remote_notices` - never printed from a handler thread, for the
-same reason the channel's messages are not. `stop()` forgets the addresses with
+That fourth gate is the one that answers "somebody else is on this network".
+The token has to cross it to reach the phone; the terminal does not, so a code
+that only appears there is a factor the wire never carried. `_sessions` holds
+the keys, per address, and dies with the door - `/remote forget` empties it
+without closing anything.
+
+A wrong token, a new address and every pairing attempt each leave a line in
+`_notices`, drained at the prompt by `_show_remote_notices` - never printed
+from a handler thread, for the same reason the channel's messages are not. `stop()` forgets the addresses with
 the door; they were only ever there to be told about.
 
 There is no TLS and no account here on purpose. Over `lan` this is plain HTTP
@@ -996,6 +1010,7 @@ for t in tests/*.py; do python "$t" || echo "FAILED: $t"; done
 | `test_resume.py` | That `--resume` and `-c` resolve on the command line, and refuse rather than guess |
 | `test_tool_reporting.py` | That the result markers are read as anchors (5.9), and that nothing warns onto stderr mid-tool |
 | `test_mentions.py` | What `@` attaches, what it refuses to, that the menu reads the real directory, and that the command menu previews what each command does and what may follow it |
+| `test_qr.py` | That a symbol is one a scanner can read: read back through its own format bits, zigzag and blocks, every block still satisfies its parity (§8c) |
 | `test_remote.py` | That no token, a nearly-right token and a foreign `Host` each get nothing, that a `.env` value does not go out over the wire, that a stale question cannot be answered, and that closing the door frees the port (§8c) |
 | `test_channel.py` | That another harness's file cannot be written from here, that a claim dies with its terminal, and that concurrent writes to the board lose nothing (5.11, §8) |
 | `test_hashline_edit.py` | That an anchor reaches the line it names, and that a stale one is refused rather than applied a few lines off (5.12) |
