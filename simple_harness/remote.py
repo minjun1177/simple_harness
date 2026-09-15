@@ -218,6 +218,22 @@ def ensure_mirror() -> None:
     sys.stdout = _tee
 
 
+def unmirrored_stdout():
+    """`sys.stdout` with the mirror taken off the front of it.
+
+    What prompt_toolkit draws - the prompt, its completion menu, the redraw
+    after every keystroke - is the terminal's own furniture, not transcript.
+    Mirrored, it reached the phone as a bare `\u276f` before every line typed
+    there. So the prompt is pointed at the real stream and the tee is put back
+    on *inside* `patch_stdout`, where it catches what the program prints and
+    not what the renderer draws.
+    """
+    out = sys.stdout
+    while isinstance(out, _Tee):
+        out = out.target
+    return out
+
+
 def _drop_mirror() -> None:
     global _tee
     if isinstance(sys.stdout, _Tee):
@@ -1231,9 +1247,15 @@ function atBottom() { return log.scrollHeight - log.scrollTop - log.clientHeight
 const BASIC = ["#1c1c1c", "#e06c75", "#98c379", "#e5b567", "#61afef", "#c678dd",
                "#56b6c2", "#e8e4dc"];
 
-function paint(target, text) {
+// Colour outlives a line on a terminal: the banner opens with one escape and
+// closes four lines later, and every line between them is painted by a state
+// nothing on that line mentions. Publishing by the line would lose all of it -
+// the logo came out white - so the state carries, exactly as it does there.
+let carried = [null, false];
+
+function paint(target, text, keep) {
   const parts = text.split(/\\x1b\\[([0-9;]*)m/);
-  let colour = null, bold = false;
+  let [colour, bold] = carried;
   for (let i = 0; i < parts.length; i++) {
     if (i % 2 === 1) { [colour, bold] = sgr(parts[i], colour, bold); continue; }
     if (!parts[i]) continue;
@@ -1243,6 +1265,9 @@ function paint(target, text) {
     if (bold) span.style.fontWeight = "600";
     target.appendChild(span);
   }
+  // The tail is the line being written and is redrawn from the same state
+  // every poll, so it must not advance it.
+  if (keep !== false) carried = [colour, bold];
 }
 
 function sgr(codes, colour, bold) {
@@ -1426,7 +1451,7 @@ async function poll() {
       if (s.tail) {
         const stick = atBottom();
         tailNode = document.createElement("div");
-        tailNode.className = "t"; paint(tailNode, s.tail);
+        tailNode.className = "t"; paint(tailNode, s.tail, false);
         log.appendChild(tailNode);
         if (stick) log.scrollTop = log.scrollHeight;
       }

@@ -342,7 +342,14 @@ asked, got = answered_with("mysql, actually", lambda: tools._ask_one(
 check("words typed there instead of a number are the answer",
       got == "mysql, actually", str(got))
 
+remote.set_driver("remote")
+check("a phone may not close the session it is driving",
+      app._refused_from_remote("/exit") and app._refused_from_remote("/quit"))
+check("...but anything else it types is its own business",
+      not app._refused_from_remote("/clear"))
 remote.set_driver("terminal")
+check("and at the keyboard /exit is /exit", not app._refused_from_remote("/exit"))
+
 request("/say", TOKEN, "POST", {"text": "carry on then"})
 line = asyncio.run(app._read_line(None))
 check("a queued line is what the prompt returns", line == "carry on then", line)

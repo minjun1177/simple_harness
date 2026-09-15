@@ -335,6 +335,24 @@ def _report_usage(messages: list[dict]) -> None:
         pass          # a number on a strip is never worth an exception
 
 
+# Commands the link does not get to run. One entry, and the reasoning is the
+# whole of it: everything else the remote can type it can also undo from there,
+# and this is the one that takes away the thing it would need to.
+_NOT_FROM_THE_REMOTE = ("/exit", "/quit")
+
+
+def _refused_from_remote(cmd: str) -> bool:
+    """Is this a command the phone may not run? Says why, on both screens."""
+    if cmd not in _NOT_FROM_THE_REMOTE or not remote.driven():
+        return False
+    print(f"  {S.WARN}◆ {cmd} is not taken from the remote.{S.MUTED} Closing the "
+          f"session from a phone leaves the phone with nothing to reconnect to - "
+          f"and this terminal with a prompt nobody asked to leave.{S.R}")
+    print(f"  {S.MUTED}Type it at the keyboard, or {S.GRAY}/remote off{S.MUTED} "
+          f"to hand the session back to it.{S.R}\n")
+    return True
+
+
 def _print_above(text: str) -> None:
     """Print a line that arrives while a prompt is open.
 
@@ -511,6 +529,10 @@ async def _read_line(session_pt) -> str:
         if keep_prompt_intact is None:
             return await _typed_or_remote(session_pt, message)
         with keep_prompt_intact(raw=True):
+            # Inside, not outside: `patch_stdout` replaces `sys.stdout` with a
+            # proxy of its own, and the tee has to sit over *that* to catch
+            # what is printed while the prompt is open.
+            remote.ensure_mirror()
             return await _typed_or_remote(session_pt, message)
     finally:
         watcher.cancel()
@@ -910,6 +932,11 @@ async def main(resume_id: str = "") -> None:
         session_pt = PromptSession(
             history=FileHistory(config.HISTORY_FILE),
             completer=completer,
+            # Pointed at the real stream rather than at whatever `sys.stdout`
+            # happens to be: with a remote already open, `sys.stdout` is the
+            # mirror, and everything this draws - the prompt itself included -
+            # went out to the phone. See `remote.unmirrored_stdout`.
+            output=config.create_output(stdout=remote.unmirrored_stdout()),
             # What colours the line itself once it starts with `!`. The banner
             # above comes from `_prompt_message`; between them, a command for
             # this machine never looks like a message for the model.
@@ -985,6 +1012,8 @@ async def main(resume_id: str = "") -> None:
             continue
 
         cmd = user_input.lower()
+        if _refused_from_remote(cmd):
+            continue
         if cmd in ("/exit", "/quit"):
             channel.leave()
             remote.stop()

@@ -68,6 +68,9 @@ try:
     # What lets another agent's message be printed *above* a prompt that is
     # already waiting for a line, instead of on top of what is being typed.
     from prompt_toolkit.patch_stdout import patch_stdout
+    # ...and what lets the prompt be told where to draw, so its own
+    # rendering can be kept out of what the remote mirrors.
+    from prompt_toolkit.output.defaults import create_output
     PROMPT_TOOLKIT_AVAILABLE = True
 
     from prompt_toolkit.completion import merge_completers

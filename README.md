@@ -638,8 +638,16 @@ the transcript as it is printed here, a box that types into the same loop the
 keyboard types into - a message or a slash command, both - and, when something
 needs approving, the approval prompt itself with its buttons.
 
+What the terminal *draws* stays out of it: the prompt, its completion menu,
+the redraw after every keystroke are that terminal's furniture, not transcript,
+and mirrored they reached the phone as a bare `❯` before every line typed
+there. The prompt is pointed at the real stream and the mirror sits over what
+the program prints instead.
+
 The transcript arrives with the terminal's own colours still on it and the
-page paints them, because half of what a terminal says is *how* it says it -
+page paints them - including colour that was opened on one line and closed
+three lines later, the way the banner does, which is carried across lines
+exactly as a terminal carries it - because half of what a terminal says is *how* it says it -
 a refusal in red, a tool call in grey, the answer in white - and a wall of
 identical text is harder to read on a phone than on the screen it came from.
 Only `ESC [ … m` ever reaches the browser; every other escape is taken out
@@ -743,6 +751,10 @@ and the transcript it can scroll back through is the last `REMOTE_LINES` lines
 rather than the whole conversation - `/export` is still how a transcript
 leaves this machine. Without `prompt_toolkit` installed, a remote line lands at
 the next Enter here instead of interrupting the prompt.
+
+`/exit` is the one command the link will not run: closing the session from a
+phone leaves the phone with nothing to reconnect to, and the terminal with a
+prompt nobody asked to leave. It says so and waits for the keyboard.
 
 `REMOTE_ENABLED = True` in your settings opens the door at every start, with a
 new token each time.

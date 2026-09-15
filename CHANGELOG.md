@@ -150,6 +150,17 @@ printed on the spot - rather than waiting for a restart.
   its way out; it now keeps the terminal's `ESC [ … m` and the page paints it.
   Every other escape is still removed before sending, and text only ever lands
   as `textContent`, so nothing that arrives can be markup.
+- **The prompt itself was being mirrored.** With a remote open before the
+  prompt was built, prompt_toolkit drew through the mirror, so every render -
+  the bare `❯`, the menu, the redraw after each keystroke - went to the phone.
+  The prompt is pointed at the real stream now and the tee sits inside
+  `patch_stdout`, where it catches what the program prints and not what the
+  renderer draws.
+- **Colour that spanned lines was lost.** The banner opens with one escape and
+  closes four lines later; published by the line, everything between came out
+  white. The page carries the state from line to line, as a terminal does.
+- **`/exit` from the page is refused.** It is the one command the link cannot
+  undo from where it is typed.
 - **A line sent from the page appeared twice** - once echoed locally and once
   when the harness printed it at the prompt and the mirror carried it back.
   The local echo is gone; the transcript's own copy is the one you see, exactly
