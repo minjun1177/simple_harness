@@ -249,6 +249,14 @@ try:
         check("an @ mention does too, which is what makes it discoverable",
               rows["look at @src"][0] and rows["look at @src"][1] >= 4,
               str(rows["look at @src"]))
+
+        # Typing while the model works already works - the terminal buffers the
+        # line and the next prompt picks it up. What it must never do is answer
+        # a question that appeared in the meantime, so the buffer is emptied
+        # before one is asked. Under a pipe there is no terminal to empty, and
+        # saying so without raising is the whole contract here.
+        check("with no terminal there is nothing to set aside",
+              tui._set_aside_type_ahead() is False)
     else:
         print("\n  [skip] prompt_toolkit is not installed; the menu is not testable here")
 

@@ -665,6 +665,40 @@ def _show_settings(only: str = "") -> None:
     print()
 
 
+def _set_aside_type_ahead() -> bool:
+    """Empty the keyboard buffer before a question. True if it held something.
+
+    Typing while the model works already works: the terminal buffers the line
+    and the next prompt picks it up. What it must not do is *answer* something.
+    A question asked in the middle of a turn - approve this command, pick one
+    of these - would otherwise be handed whatever sentence the person happened
+    to be typing at the moment it appeared, and they would never see it asked.
+
+    So the buffer is emptied first and the caller says so. Losing a half-typed
+    sentence is a small price; approving a `delete_file` with it is not.
+    """
+    try:
+        if not sys.stdin or not sys.stdin.isatty():
+            return False
+    except Exception:
+        return False
+    try:
+        if config.CURRENT_OS == "Windows":
+            import msvcrt
+            found = False
+            while msvcrt.kbhit():
+                msvcrt.getwch()
+                found = True
+            return found
+        import select
+        import termios
+        found = bool(select.select([sys.stdin], [], [], 0)[0])
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+        return found
+    except Exception:
+        return False          # no terminal to flush is not a failure
+
+
 def ask_the_driver(title: str, details, choices, prompt: str,
                    free_text: bool = False) -> str | None:
     """One question, put to whoever is actually driving this turn.
@@ -692,6 +726,9 @@ def ask_the_driver(title: str, details, choices, prompt: str,
             return None
         print(f"  {S.MUTED}⇠ the remote answered {S.GRAY}{answer}{S.R}")
         return answer
+    if _set_aside_type_ahead():
+        print(f"  {S.MUTED}◆ what you were typing was set aside - this question "
+              f"takes an answer of its own.{S.R}")
     try:
         return input(prompt).strip()
     except EOFError:

@@ -68,10 +68,6 @@ try:
     # What lets another agent's message be printed *above* a prompt that is
     # already waiting for a line, instead of on top of what is being typed.
     from prompt_toolkit.patch_stdout import patch_stdout
-    # ...and what makes that line keep its colours on Windows, where the text
-    # goes out through prompt_toolkit's own console writer rather than to a
-    # terminal interpreting escapes. See `app._print_above`.
-    from prompt_toolkit import print_formatted_text
     PROMPT_TOOLKIT_AVAILABLE = True
 
     from prompt_toolkit.completion import merge_completers

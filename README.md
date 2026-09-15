@@ -1489,6 +1489,8 @@ Until now the only gate was the approval prompt, and `/automode on` turned it
 off for everything at once - including `run_cmd` and `delete_file`. Rules give
 the middle ground.
 
+**Typing while it works.** Nothing stops you: the terminal buffers the line and the next prompt picks it up, so an answer can be written while the model is still finishing. The one thing it will not do is *answer* something - a question that appears mid-turn empties the keyboard buffer first and says so, because approving a `delete_file` with a half-typed sentence is not a thing that should be possible.
+
 Rules are read from `./.permissions.json` and `~/.localchat/permissions.json`;
 rules from both files apply. Copy `.permissions.json.example` to start.
 

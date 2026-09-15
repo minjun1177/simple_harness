@@ -129,6 +129,23 @@ printed on the spot - rather than waiting for a restart.
   every render, so it is earned now: a `Condition` says yes for a line that
   starts with `/` or carries an `@`, and nothing else. Tab still completes
   anything, any time.
+- **Everything printed above a live prompt lost its escapes**, on every
+  platform - `?[38;2;250;189;47m◆ …` - because `patch_stdout` sanitises what it
+  is handed unless it is opened `raw=True`. It is opened `raw=True` now. The
+  first pass at this blamed the Windows console and special-cased it; a pty
+  said otherwise.
+- **The menu's reserved rows outlived the `/` that earned them.** Deleting the
+  slash left the completion state open, and the reservation answers to either
+  that or the condition, so the band stayed until Escape. The buffer now closes
+  a menu the line has stopped asking for.
+- **A line typed while the model worked could answer a question.** It already
+  reached the next prompt - the terminal buffers it - but a mid-turn approval
+  prompt would take it as its answer, unseen. The keyboard buffer is emptied
+  before a question is asked, and the person is told their line was set aside.
+- **The tool-call-limit prompt asked the terminal even when a phone was
+  driving.** It is the one blocking question that never went through
+  `ask_the_driver`; a remote-driven turn stopped there with nothing on the
+  phone to say why. It goes through it now, with its two answers as buttons.
 - **Redaction was silent about itself.** A `.env` value that is also an
   ordinary word - `PROJECT_DIR=simple_harness` - is a secret by the only rule
   that never lets a key through, so `!dir` came back full of

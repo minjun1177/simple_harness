@@ -305,27 +305,31 @@ def _report_agents(agent_id: str) -> None:
           f"board.{S.R}\n")
 
 
-def _print_above(text: str) -> None:
-    """Print a line that arrives while a prompt is open, colours intact.
+def _close_menu_when_unwanted(buffer) -> None:
+    """Shut the completion menu the moment the line stops asking for one.
 
-    `patch_stdout` puts such a line above the prompt rather than through the
-    middle of it, and on Linux and macOS a plain `print` of ANSI text comes out
-    as ANSI text. On Windows it does not: prompt_toolkit writes through its own
-    console output, which passes escape sequences to the console as characters,
-    so the person sees `?[38;2;250;189;47m` in front of every message that
-    arrived while they were at the prompt. Handing prompt_toolkit the same
-    string as `ANSI(...)` lets it parse the escapes into its own styling and
-    render them the way that console actually takes.
-
-    Only on Windows, and only when prompt_toolkit is there: everywhere else the
-    plain print is already right, and it is the path that cannot fail.
+    A `Condition` decides whether a menu is coming; a completion *state* is
+    whether one is open. The reserved rows answer to either, so a menu left
+    open over a line that no longer starts with `/` keeps the band under the
+    prompt after the reason for it has been deleted.
     """
-    if config.CURRENT_OS == "Windows" and config.PROMPT_TOOLKIT_AVAILABLE:
-        try:
-            config.print_formatted_text(config.ANSI(text))
-            return
-        except Exception:
-            pass          # a message printed plainly beats a message lost
+    try:
+        if buffer.complete_state is not None and not config.COMPLETE_WHILE_TYPING():
+            buffer.cancel_completion()
+    except Exception:
+        pass          # a menu is a convenience; it never stops typing
+
+
+def _print_above(text: str) -> None:
+    """Print a line that arrives while a prompt is open.
+
+    One `print`, and one place saying why it is one `print`: what makes this
+    work is `patch_stdout(raw=True)` in `_read_line`, without which everything
+    routed through here loses its escapes to prompt_toolkit's sanitising and
+    arrives as `?[38;2;250;189;47m…`. Everything that prints above a live
+    prompt - another agent's message, the remote's notices, the echo of a line
+    typed there - comes through here, so that reason is written down once.
+    """
     print(text)
 
 
@@ -478,11 +482,20 @@ async def _read_line(session_pt) -> str:
     watcher = asyncio.ensure_future(_watch_channel())
     # `patch_stdout` is what lets the watcher print *above* the prompt rather
     # than through the middle of what is being typed.
+    #
+    # `raw=True` is not decoration. Without it prompt_toolkit sanitises what it
+    # is handed - `Output.write` turns every ESC into `?` to stop stray cursor
+    # movement corrupting its picture of the screen - so a coloured line
+    # printed while a prompt is open arrives as `?[38;2;250;189;47m◆ …`. That
+    # is every message from another agent and every notice from the remote, on
+    # every platform; it was only ever noticed on Windows because that is where
+    # somebody happened to be sitting when one arrived. What goes out this way
+    # is colour and nothing else, which is exactly what `raw` is safe for.
     keep_prompt_intact = getattr(config, "patch_stdout", None)
     try:
         if keep_prompt_intact is None:
             return await _typed_or_remote(session_pt, message)
-        with keep_prompt_intact():
+        with keep_prompt_intact(raw=True):
             return await _typed_or_remote(session_pt, message)
     finally:
         watcher.cancel()
@@ -893,6 +906,11 @@ async def main(resume_id: str = "") -> None:
             # `config._wants_the_menu`.
             complete_while_typing=config.COMPLETE_WHILE_TYPING,
         )
+        # Deleting the `/` has to take the menu - and the rows held for it -
+        # away again. prompt_toolkit keeps a completion state until something
+        # cancels it, and the height it reserves is `while_typing OR a state is
+        # open`, so without this the band outlives the line that earned it.
+        session_pt.default_buffer.on_text_changed += _close_menu_when_unwanted
 
     # Which MCP servers the system prompt was built for, so a load can be
     # noticed. Sorted, so the comparison is about the set and not the order.
