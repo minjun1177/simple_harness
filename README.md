@@ -31,6 +31,7 @@ exists to make small models genuinely usable rather than nearly usable.
 - **Undo**: every file an AI tool changes is committed on its own, so `/undo` takes it back. It commits only what the tool named, and refuses to undo over work it did not create.
 - **Auto-verify**: a turn that changes a file has the project's own check run against it - `pytest`, `npm test`, `cargo test`, `go test` - and a failure goes straight back to the model as the error it has to fix. Only a check the project already declares is ever run, four edits in one reply are one run of the suite, and after three failures in a row the harness stops guessing and asks the model to explain. This is most of the difference between a small model that needs checking and one that tells you when it is wrong.
 - **Several harnesses in one project**: people run three of these at once and, until now, none of them knew the others existed - two would read the same file and the second write would silently throw the first away. The instances working in one project now share a board: they can see each other, message each other, and a file one of them is in the middle of changing is refused to the others by name. See *The Agent Channel*.
+- **Remote control**: `/remote on` hands out one door into the session that is already running - a token-locked page you open on your phone. It shows the transcript as it is printed, types lines into the same prompt the keyboard types into, and answers the approval prompts, so a `/deepthink` pass no longer stops at "Allow? [y/n]" on a screen nobody is sitting in front of. It is off until you say otherwise, it binds this machine only unless you say `lan`, the token is made when the door opens and dies when it closes, and what a `.env` holds does not go out over it. See *Remote Control*.
 - **Sub-agents**: `spawn_agent` hires a second model for one self-contained job. It works in its own context and hands back only its report, so a twenty-tool-call search never enters the conversation.
 - **Crash-safe writes**: sessions, memory, permission rules and saved API keys are written to a temporary file and renamed into place, so being killed mid-write cannot empty one.
 - **ANSI Terminal User Interface**: Provides an ANSI-colored TUI with streaming text responses, live token-per-second (TPS) calculation, custom spinner animations, markdown rendering, syntax code blocks, and ASCII tables.
@@ -589,6 +590,76 @@ entirely, and `CHANNEL_ENABLED = False` in `config.py` never puts it on.
 
 Working alone, none of this happens: the board is empty, nothing is claimed,
 nothing is delivered, and the only cost is four extra tools in the prompt.
+
+### Remote Control
+
+A harness is a terminal, and a terminal is somewhere you have to be. That is
+fine while the answer takes four seconds. It stops being fine the moment the
+work takes four minutes - a `/deepthink` pass, a test suite the model is
+chasing, a sub-agent reading half a repository - because the two things you
+then need are *what is it doing* and *yes, go ahead*, and both of them are
+behind a keyboard you have walked away from.
+
+So the session can hand out one door into itself:
+
+```
+❯ /remote on
+
+  ✓ Remote control is ON. Whoever opens the link is at this prompt, with
+    everything it can do.
+  │ bound to 127.0.0.1:8765 - nobody has opened it yet
+  ╰─ open this, and whoever holds it is at this prompt:
+     http://127.0.0.1:8765/?k=Hn4Qk0Zt7rJ2vXbA9wLpMg
+```
+
+Open that on anything with a browser and you are at the prompt. The page shows
+the transcript as it is printed here, a box that types into the same loop the
+keyboard types into - a message or a slash command, both - and, when something
+needs approving, the approval prompt itself with its buttons.
+
+**Approvals follow whoever is driving.** A turn started from the phone has its
+questions asked on the phone; a turn started here is asked here. This is the
+part that makes it a remote control rather than a viewer: a run that stops at
+`Allow? [y/n]` on a screen nobody is looking at has hung, and there is no way
+to find that out from the train. Both are printed on the terminal either way,
+so the person at the desk can read what was asked and what came back. A
+question nobody answers within `REMOTE_ASK_TIMEOUT` is refused, because the
+safe end of an unanswered *may I delete this* is no.
+
+**What it costs to leave it open.** Nothing runs until `/remote on`, and what
+that opens is a shell - the link can type `!rm -rf ~` as easily as "hello". So:
+
+- it binds **127.0.0.1** and nothing else, unless you type `/remote on lan`,
+  which opens it to the network this machine is on and says so in as many
+  words;
+- the token is generated when the door opens, printed once, **never saved**,
+  and gone when the door closes. There is no long-lived credential here and no
+  setting that holds one;
+- every request carries it, compared whole rather than character by character;
+- a request whose `Host` is not this machine is refused before the token is
+  even looked at, which is what stops a page somewhere else on the internet
+  from resolving its own name to `127.0.0.1` and talking to what answers;
+- what is mirrored out goes through the same redaction the model gets, so a
+  `.env` value that is on this terminal because *you* ran `!cat .env` does not
+  go out over the wire;
+- `/remote off` closes the port, drops the token and ends every link that was
+  already open.
+
+Off the local network, there is deliberately no tunnel here and no account to
+sign in to: forward the port over something you already trust -
+`ssh -L 8765:127.0.0.1:8765 you@machine` - rather than opening a door on the
+internet with a harness on the other side of it.
+
+**What it does not do.** It does not run a second session; there is one
+conversation and the remote is another way into it. A line typed there arrives
+at the prompt, so it waits for the current turn exactly as a typed line would,
+and the transcript it can scroll back through is the last `REMOTE_LINES` lines
+rather than the whole conversation - `/export` is still how a transcript
+leaves this machine. Without `prompt_toolkit` installed, a remote line lands at
+the next Enter here instead of interrupting the prompt.
+
+`REMOTE_ENABLED = True` in your settings opens the door at every start, with a
+new token each time.
 
 ---
 
@@ -1531,6 +1602,11 @@ The settings worth knowing:
 | `CHANNEL_STALE` | 120 | Heartbeat age past which an agent is presumed gone |
 | `CHANNEL_POLL_SECONDS` | 2 | How often an idle prompt looks for a new message |
 | `MENTION_MAX_CHARS` | `40000` | Ceiling on what one `@path` may add to the context |
+| `REMOTE_ENABLED` | `False` | Open the remote-control door at every start. `/remote on` opens it for one session |
+| `REMOTE_HOST` | `127.0.0.1` | What the remote binds to. `/remote on lan` binds every interface for one session |
+| `REMOTE_PORT` | 8765 | The port it tries first; the next 19 are tried before it gives up |
+| `REMOTE_LINES` | 500 | Transcript lines kept for the remote to scroll back through |
+| `REMOTE_ASK_TIMEOUT` | 300 | Seconds a question waits on the remote before it counts as a no |
 | `AUTO_TITLE` | `True` | Let the model name each new session |
 | `SAVE_CHAT_HISTORY` | `True` | Write session files at all |
 | `CMD_TIMEOUT` | 120 | Seconds before a runaway command is killed |
@@ -1639,6 +1715,8 @@ Two prefixes act on the message itself rather than being commands:
 | `/agents say <text>` | Say something to all of them yourself |
 | `/agents release <path>` | Take a file back from the agent holding it |
 | `/agents [on/off]` | Whether this session appears on the board at all |
+| `/remote [on/off]` | Whether this session can be driven from a browser. On its own it says which, and reprints the link |
+| `/remote on lan` | Open it to this machine's network rather than to this machine only |
 | `/vm` | Show the `run_python` scratch process: whether it is up, what it has run, and the directory it runs in |
 | `/vm reset` | Throw away every variable the model left in it |
 | `/vm stop` | End the process; the next `run_python` starts a fresh one |
@@ -1664,6 +1742,7 @@ The codebase is organized cleanly around the following components:
 - **`llm_client.py`**: The conversation loop - streaming a reply, parsing the tool calls out of it, running them. Knows nothing about which provider answered.
 - **`tools.py`**: Tool implementations, and the table binding each one to its entry in `toolspec.py`.
 - **`toolspec.py`**: What every built-in tool is - name, description, parameters. The system prompt is rendered from it and dispatch binds arguments through it, so the two cannot drift apart.
+- **`remote.py`**: The one door into a running session - the token-locked HTTP server, the transcript mirrored off `sys.stdout`, and the question that follows whoever is driving the turn.
 - **`channel.py`**: The board the harnesses running in one project share - who is here, what they have said, and which files each is in the middle of changing.
 - **`subagent.py`**: `spawn_agent` - a second model, hired for one self-contained job, working in its own context and handing back only its report.
 - **`skills.py`**: Skill discovery, frontmatter parsing, and on-demand loading.
@@ -1693,6 +1772,7 @@ The codebase is organized cleanly around the following components:
 - **`tests/test_resume.py`**: That `--resume` and `-c` open the conversation they name - and that neither hands back a blank one, or guesses, when they cannot.
 - **`tests/test_tool_reporting.py`**: That a tool result is judged by the marker it *starts* with, not one it happens to contain, and that no library writes an unasked-for paragraph to stderr while a tool is running.
 - **`tests/test_hashline_edit.py`**: That `38:ff7|print()` reaches the line it names, that a stale or mistyped anchor is refused rather than applied a few lines off, and that everything which is not an anchor still behaves as it did.
+- **`tests/test_remote.py`**: That the remote refuses a request with no token, a token that is nearly right and a `Host` this machine was never called by, that a `.env` value on this terminal does not go out over it, that a question cannot be answered by a phone still showing the last one, and that closing it frees the port and puts `sys.stdout` back.
 - **`tests/test_channel.py`**: That a file one harness is changing cannot be written from another, that the refusal names who to ask, that a claim dies with the terminal that took it, and that several processes writing to the board at once lose nothing.
 - **`tests/test_mentions.py`**: What `@` attaches and what it must leave alone - an email address is not a file - that the completion menu reads the real directory, and that the command menu previews what each command does and what may follow it.
 - **`tests/test_images.py`**: That an image is detected by extension and by its first bytes, that one too large is resized rather than refused and relabelled as whatever it became, that each of the four providers is handed the shape it asks for with the cache breakpoint still on the text, that `@shot.png` attaches a picture instead of a wall of bytes, and that a model which cannot see is found out before the request rather than after.

@@ -18,6 +18,7 @@ from simple_harness import mcp_client
 from simple_harness import permissions
 from simple_harness import providers
 from simple_harness import connect
+from simple_harness import remote
 from simple_harness import mentions
 from simple_harness import tools
 from simple_harness import vault
@@ -350,10 +351,71 @@ def _prompt_message() -> str:
     return f"  {S.USER_CLR}{S.BOLD}❯{S.R} "
 
 
+async def _remote_line() -> str:
+    """A line typed on the remote, as soon as there is one."""
+    while True:
+        await asyncio.sleep(0.25)
+        line = remote.take_line()
+        if line:
+            return line
+
+
+def _echo_remote(line: str) -> str:
+    """Print a remotely typed line where a typed one would have been.
+
+    The person at this keyboard has to be able to read the transcript
+    downwards and see what was asked, even when it was asked from a train.
+    """
+    print(f"  {S.USER_CLR}{S.BOLD}❯{S.R} {line}  {S.MUTED}(from the remote){S.R}")
+    remote.set_driver("remote")
+    return line
+
+
+async def _typed_or_remote(session_pt, message) -> str:
+    """Whichever comes first: a line typed here, or one typed on the remote.
+
+    The prompt is cancelled when the remote wins, which costs whatever was
+    half-typed at this keyboard. That is the right way round: a person who is
+    at the keyboard is the one who can see the line disappear and type it
+    again, and the alternative - holding the remote's line until somebody
+    presses Enter here - is exactly the hang the remote exists to avoid.
+    """
+    typed = asyncio.ensure_future(session_pt.prompt_async(message))
+    if not remote.running():
+        return (await typed).strip()
+
+    waiting = asyncio.ensure_future(_remote_line())
+    done, _ = await asyncio.wait({typed, waiting},
+                                 return_when=asyncio.FIRST_COMPLETED)
+    if typed in done:
+        waiting.cancel()
+        remote.set_driver("terminal")
+        return typed.result().strip()
+
+    typed.cancel()
+    try:
+        await typed
+    except (asyncio.CancelledError, Exception):
+        # The CancelledError is the one just asked for; anything else is
+        # `prompt_toolkit` objecting to being stopped mid-line, which is not
+        # worth losing the line that arrived over.
+        pass
+    return _echo_remote(waiting.result())
+
+
 async def _read_line(session_pt) -> str:
     """One line from the person, with the channel watched while they type."""
+    remote.ensure_mirror()
+    remote.set_busy(False)
     if session_pt is None:
         _show_arrivals()
+        # Nothing here can race a blocking `input()`, so a remote line waits
+        # for the next Enter. `prompt_toolkit` is what makes the difference,
+        # and this is the path taken when it is not installed.
+        waiting = remote.take_line()
+        if waiting:
+            return _echo_remote(waiting)
+        remote.set_driver("terminal")
         return input(f"  {S.USER_CLR}{S.BOLD}❯{S.R} ").strip()
 
     _show_arrivals()
@@ -369,9 +431,9 @@ async def _read_line(session_pt) -> str:
     keep_prompt_intact = getattr(config, "patch_stdout", None)
     try:
         if keep_prompt_intact is None:
-            return (await session_pt.prompt_async(message)).strip()
+            return await _typed_or_remote(session_pt, message)
         with keep_prompt_intact():
-            return (await session_pt.prompt_async(message)).strip()
+            return await _typed_or_remote(session_pt, message)
     finally:
         watcher.cancel()
 
@@ -510,6 +572,86 @@ def _set_command(rest: str, messages: list[dict]) -> None:
     print()
 
 
+def _remote_lines() -> list:
+    """What `/remote` says about a door that is already open."""
+    if not remote.running():
+        return ["│ /remote on opens it here; /remote on lan opens it to this "
+                "machine's network as well.",
+                "╰─ the token is made when it opens, is never saved, and dies "
+                "with it."]
+    state = remote.status()
+    seen = ("nobody has opened it yet" if not state["seen"]
+            else f"last read {channel.ago(state['seen'])}")
+    rows = [f"│ bound to {state['host']}:{state['port']} - {seen}"]
+    if state["queued"]:
+        rows.append(f"│ {state['queued']} line(s) typed there, waiting for this prompt")
+    rows.append("╰─ open this, and whoever holds it is at this prompt:")
+    rows += [f"   {url}" for url in state["urls"]]
+    return rows
+
+
+def _open_saved_remote() -> None:
+    """Re-open the door for somebody who left it open in `settings.json`.
+
+    A new token every time, printed every time. `REMOTE_ENABLED` is a standing
+    answer to "should this session be reachable", not a saved key - there is
+    no saved key.
+    """
+    if not config.REMOTE_ENABLED or remote.running():
+        return
+    try:
+        remote.start()
+    except Exception as e:
+        print(f"  {S.WARN}⚠ Remote control is on in your settings but could not "
+              f"start: {e}{S.R}\n")
+        return
+    print(f"  {S.INFO}◆ Remote control is on.{S.R}")
+    for line in _remote_lines():
+        print(f"  {S.MUTED}{line}{S.R}")
+    print()
+
+
+def _remote_command(rest: str) -> None:
+    """`/remote`: the one door into this session, and whether it is open.
+
+    On is a deliberate act every time. What it opens is not a view of the
+    session but the session itself - the link types lines, and a line can be
+    `!rm -rf ~` - so the switch says so, the LAN case says it louder, and
+    neither the port nor the token survives the process.
+    """
+    verb, _, argument = rest.strip().partition(" ")
+    verb, argument = verb.lower(), argument.strip().lower()
+
+    if verb == "on" and not remote.running():
+        try:
+            remote.start("lan" if argument in ("lan", "network") else "")
+        except Exception as e:
+            print(f"  {S.ERR}✗ The remote could not be opened: {e}{S.R}\n")
+            return
+    elif verb == "off":
+        remote.stop()
+
+    chosen = _switch(
+        "/remote", verb, remote.running(), "Remote control",
+        "this session can be driven from a browser: the transcript, the prompt, "
+        "and the approvals that would otherwise wait for a keystroke",
+        on_note="Whoever opens the link is at this prompt, with everything it "
+                "can do.",
+        off_note="The port is closed and the token is gone. A link already open "
+                 "stops working.",
+        extra=_remote_lines())
+    if chosen is not None:
+        config.REMOTE_ENABLED = remote.running()
+    if verb == "on" and remote.running():
+        for line in _remote_lines():
+            print(f"  {S.MUTED}{line}{S.R}")
+        if remote.status()["host"] == "0.0.0.0":
+            print(f"  {S.WARN}⚠ This is open to every machine that can reach "
+                  f"yours.{S.MUTED} Only the link opens it, but the link is all "
+                  f"it takes.{S.R}")
+        print()
+
+
 def _vm_command(rest: str) -> None:
     """`/vm`: what the Python scratch process is holding, and how to clear it.
 
@@ -604,6 +746,7 @@ async def main(resume_id: str = "") -> None:
     _report_mcp_problems(failed_mcp)
     _report_strays()
     _report_agents(channel.join(_agent_label()))
+    _open_saved_remote()
 
     if resume_id:
         if resumed:
@@ -651,6 +794,7 @@ async def main(resume_id: str = "") -> None:
             user_input = config.safe_text(user_input)
         except (EOFError, KeyboardInterrupt):
             channel.leave()
+            remote.stop()
             mcp_client.shutdown()
             print(f"\n\n  {S.GRAY}Goodbye!{S.R}\n")
             break
@@ -683,6 +827,7 @@ async def main(resume_id: str = "") -> None:
         cmd = user_input.lower()
         if cmd in ("/exit", "/quit"):
             channel.leave()
+            remote.stop()
             mcp_client.shutdown()
             print(f"\n  {S.GRAY}Goodbye!{S.R}\n")
             break
@@ -1082,6 +1227,10 @@ async def main(resume_id: str = "") -> None:
             _agents_command(user_input[len("/agents"):])
             continue
 
+        if cmd == "/remote" or cmd.startswith("/remote "):
+            _remote_command(user_input[len("/remote"):])
+            continue
+
         if cmd == "/vm" or cmd.startswith("/vm "):
             _vm_command(user_input[len("/vm"):])
             continue
@@ -1172,6 +1321,9 @@ async def main(resume_id: str = "") -> None:
         # so `/usage` reports what the question cost rather than what its last
         # request cost.
         config.next_turn()
+        # The remote's own badge: a phone that cannot tell "thinking" from
+        # "finished and silent" is a phone you have to keep refreshing.
+        remote.set_busy(True)
         # Nothing should be waiting to be looked at when a turn begins. A
         # `view_image` whose turn died before its result was appended would
         # otherwise hang its picture on a later, unrelated message.
@@ -1215,6 +1367,7 @@ async def main(resume_id: str = "") -> None:
             print()
             connect._print_problem("Error", e)
         finally:
+            remote.set_busy(False)
             # `/tdd` is armed for one request and lifts itself here - including
             # when the turn ended in an error or the user interrupted it. A
             # lock that outlives what it was asked for is a lock nobody

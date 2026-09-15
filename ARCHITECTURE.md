@@ -12,7 +12,7 @@ mistakes are.
 
 ## 1. What this is
 
-A terminal AI assistant, ~16,600 lines of Python, no framework. It talks to
+A terminal AI assistant, ~17,600 lines of Python, no framework. It talks to
 Ollama, Anthropic, OpenAI and Gemini over plain HTTP (no vendor SDKs), gives the
 model 40 tools, and runs them with the user's approval.
 
@@ -569,6 +569,7 @@ app.py            the loop, slash commands, session lifecycle
   └ deepthink.py  the six-stage chain
   └ subagent.py   spawn_agent's own conversation loop
   └ channel.py    the board the harnesses in one project share
+  └ remote.py     the token-locked door a browser drives this session through
       └ vm.py     the Python scratch process behind run_python
       └ providers.py  four wire formats → one event shape
           └ sse.py    server-sent events, read as they arrive
@@ -592,6 +593,7 @@ app.py            the loop, slash commands, session lifecycle
 | `git_ops.py` | Commit, undo, diff. Never raises | Anything not about git |
 | `verify.py` | Which check a project declares, running it, and the wording of a failure | When to run it or how many times - that is `chat_turn` |
 | `channel.py` | Who else is running here, what they said, what they hold | Anything about one conversation |
+| `remote.py` | The HTTP server, the token, the transcript mirrored off `sys.stdout`, and the question that follows the driver | Anything about *what* is being approved - it carries the question, it does not read it |
 | `context.py` | Token estimate, trimming, compression, and folding the token history into turns | |
 | `session.py` | Session files, the directory each was worked in, long-term memory, and the block the important ones make (5.15) | Where that block is put - `app` composes |
 | `notes.py` | A project's markdown notes: where they live, the five tools over them, and the block of titles (5.16) | What counts as a project - `channel.workspace` answers that |
@@ -858,6 +860,60 @@ tried, with `PYTHONDONTWRITEBYTECODE` set so importing it leaves no
 
 ---
 
+## 8c. Remote control
+
+`remote.py`, behind `/remote`. One HTTP server on this machine, and what is on
+the other side of it is not a view of the session but the session itself: the
+link types lines into the prompt `app.main` is already sitting at.
+
+```
+  the browser                 this process
+  ───────────                 ────────────
+  GET  /            ←  one HTML file, no network, token in the URL
+  GET  /state?wait  ←  held open on a Condition until there is something:
+                       new lines, a question, a change of busy
+  POST /say         →  a line, onto the queue `_read_line` races against
+  POST /answer      →  the answer `ask()` is blocked waiting for
+```
+
+**The transcript is a tee, not a second rendering.** `ensure_mirror` wraps
+`sys.stdout`, so what the remote reads is what the terminal printed - one
+rendering, two places, and no second copy of the formatting to keep in step.
+It is installed at the top of every prompt rather than once, because
+`prompt_toolkit`'s `patch_stdout` replaces `sys.stdout` while a prompt is open
+and puts the original back afterwards; a tee installed underneath that is a
+tee that disappears. Lines go through `vault.redact` on the way in.
+
+**A line typed there is a line typed here.** `_typed_or_remote` runs the
+prompt and a watcher on the queue as two tasks and takes whichever finishes
+first, cancelling the other. The remote winning costs whatever was half-typed
+at the keyboard, which is the right way round: the person who can see that
+happen is the one at the keyboard.
+
+**The question follows the driver.** Every blocking question in the harness
+goes through `tui.ask_the_driver`, which asks `remote.driven()` - did the line
+being worked on come from the remote? - and puts the question wherever that
+person is. `_approval_prompt`, `get_input` and `submit_plan_for_approval` all
+reach it. `ask` blocks the main thread on the same `Condition` the server's
+threads notify, so an answer from a phone returns *into* the tool call that
+was waiting for a keystroke. No answer inside `REMOTE_ASK_TIMEOUT` returns
+`""`, and every caller reads that as a no.
+
+**What guards it.** The token is `secrets.token_urlsafe(16)`, made at
+`start()`, compared with `compare_digest`, never written to disk - there is no
+setting that holds it, which is the point. The bind is loopback unless
+`/remote on lan`. A `Host` header that is not this machine is refused before
+the token is read: the token stops guessing, and the `Host` check stops a page
+elsewhere from resolving its own name to `127.0.0.1` and talking to whatever
+answers. There is no tunnel and no account here on purpose; reaching it from
+outside is `ssh -L`, which is somebody else's audited code.
+
+`stop()` is called from the main thread and never from a handler - `shutdown`
+waits for the serving loop a handler is running inside - and it drops the tee,
+the token and the queue together.
+
+---
+
 ## 9. Recipes
 
 ### Add a tool
@@ -924,6 +980,7 @@ for t in tests/*.py; do python "$t" || echo "FAILED: $t"; done
 | `test_resume.py` | That `--resume` and `-c` resolve on the command line, and refuse rather than guess |
 | `test_tool_reporting.py` | That the result markers are read as anchors (5.9), and that nothing warns onto stderr mid-tool |
 | `test_mentions.py` | What `@` attaches, what it refuses to, that the menu reads the real directory, and that the command menu previews what each command does and what may follow it |
+| `test_remote.py` | That no token, a nearly-right token and a foreign `Host` each get nothing, that a `.env` value does not go out over the wire, that a stale question cannot be answered, and that closing the door frees the port (§8c) |
 | `test_channel.py` | That another harness's file cannot be written from here, that a claim dies with its terminal, and that concurrent writes to the board lose nothing (5.11, §8) |
 | `test_hashline_edit.py` | That an anchor reaches the line it names, and that a stale one is refused rather than applied a few lines off (5.12) |
 | `test_vm.py` | That `run_python` takes its code as a raw block, remembers between calls, and says the namespace is gone every way it can die (§8a) |

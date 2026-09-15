@@ -430,6 +430,20 @@ CHANNEL_WRITE_TTL = 300         # ...and one taken automatically by writing a fi
 CHANNEL_STALE = 120             # heartbeat age past which an agent is presumed gone
 CHANNEL_POLL_SECONDS = 2        # how often an idle prompt looks for a new message
 
+# --- remote control ----------------------------------------------------------
+# `/remote on` opens one door into this session: a token-locked HTTP server on
+# this machine, and anything that can open the URL it prints is at the prompt -
+# it reads the transcript, types lines, and answers the approval prompts that
+# would otherwise wait for somebody who has left the desk. Off by default, and
+# loopback unless `/remote on lan` says otherwise, because it is a door into a
+# shell. The token is made when the server starts and is deliberately not a
+# setting: there is nothing here for `settings.json` to keep. See remote.py.
+REMOTE_ENABLED = False
+REMOTE_HOST = "127.0.0.1"       # `/remote on lan` binds every interface instead
+REMOTE_PORT = 8765              # busy? the next 19 are tried before giving up
+REMOTE_LINES = 500              # transcript lines kept for a phone to scroll
+REMOTE_ASK_TIMEOUT = 300        # seconds a question waits before it counts as no
+
 # --- reasoning ("thinking") models -------------------------------------------
 # Reasoning models wrap their scratch work in <think> tags, or return it in
 # Ollama's separate `thinking` field. It is never the answer, so by default it

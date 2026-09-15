@@ -27,6 +27,46 @@ packages of their own rather than be imported from here.
 
 ---
 
+## Unreleased
+
+### Remote control: one door into the session that is already running
+
+A harness is a terminal, and a terminal is somewhere you have to be. The moment
+a request takes minutes rather than seconds - a `/deepthink` pass, a suite the
+model is chasing - the two things you need are *what is it doing* and *yes, go
+ahead*, and both are behind a keyboard you have walked away from. Worse than
+slow: a turn that stops at `Allow? [y/n]` on a screen nobody is looking at has
+hung, and nothing says so.
+
+`/remote on` prints a link. Open it on a phone and you are at the prompt - the
+transcript as it is printed, a box that types into the same loop the keyboard
+types into, and the approval prompts themselves, with buttons.
+
+The rule that makes it a control rather than a viewer: **a question is asked
+wherever the person driving the turn is.** A line typed on the phone marks the
+turn, and every blocking question in the harness - the approval prompt,
+`get_input`, `submit_plan_for_approval` - now goes through one place that knows
+which that is. Both are still printed on the terminal, so the person at the
+desk can read what was asked and what came back. Nobody answering inside
+`REMOTE_ASK_TIMEOUT` is a no.
+
+What is behind the link is a shell, so: off until `/remote on`; loopback unless
+`/remote on lan`, which says what it is doing in as many words; a token made
+when the door opens, printed once, never written to disk and gone when it
+closes; a `Host` that is not this machine refused before the token is read; and
+the mirrored transcript redacted the way the model's copy is, so a `.env` value
+that is on your screen because *you* ran `!cat .env` does not go out over the
+wire. There is deliberately no tunnel and no account - from outside, forward the
+port over `ssh -L`.
+
+The transcript is a tee on `sys.stdout` rather than a second rendering, which is
+why what the phone shows is exactly what the terminal shows, tool boxes and all.
+
+New: `/remote`, `remote.py`, `tests/test_remote.py`, and `REMOTE_ENABLED`,
+`REMOTE_HOST`, `REMOTE_PORT`, `REMOTE_LINES`, `REMOTE_ASK_TIMEOUT`.
+
+---
+
 ## 0.6.0 - 2026-09-08
 
 The release where the harness stopped trusting the model's account of its own
