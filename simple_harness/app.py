@@ -304,6 +304,22 @@ def _report_agents(agent_id: str) -> None:
           f"board.{S.R}\n")
 
 
+def _show_remote_notices() -> None:
+    """Who has been at the remote's door, printed as soon as the prompt is free.
+
+    Written by the server's own threads and read here, exactly as the channel's
+    messages are: a line printed from a request handler would land in the
+    middle of a streaming answer. "Somebody opened the link" and "somebody
+    tried a wrong token" are both things a person only finds useful while they
+    can still act on them, which is at a prompt.
+    """
+    try:
+        for text in remote.take_notices():
+            print(f"  {S.WARN}⚿ {text}{S.R}")
+    except Exception:
+        pass          # the door is a convenience; it never stops the prompt
+
+
 def _show_arrivals() -> None:
     """Print what other agents have said, as soon as the terminal is free.
 
@@ -331,6 +347,7 @@ async def _watch_channel() -> None:
         try:
             channel.heartbeat(_agent_label())
             _show_arrivals()
+            _show_remote_notices()
         except Exception:
             return
 
@@ -409,6 +426,7 @@ async def _read_line(session_pt) -> str:
     remote.set_busy(False)
     if session_pt is None:
         _show_arrivals()
+        _show_remote_notices()
         # Nothing here can race a blocking `input()`, so a remote line waits
         # for the next Enter. `prompt_toolkit` is what makes the difference,
         # and this is the path taken when it is not installed.
@@ -419,6 +437,7 @@ async def _read_line(session_pt) -> str:
         return input(f"  {S.USER_CLR}{S.BOLD}❯{S.R} ").strip()
 
     _show_arrivals()
+    _show_remote_notices()
     # `ANSI` lives behind the prompt_toolkit guard in `config`, so it is reached
     # the same way `main` reaches it rather than imported at module level.
     ANSI = config.ANSI
@@ -569,6 +588,20 @@ def _set_command(rest: str, messages: list[dict]) -> None:
     # the tool catalogue is in it at all - so it is rebuilt every time rather
     # than only for the ones somebody remembered to list here.
     _refresh_system_prompt(messages)
+    # A remote that is open was started from the settings as they were. Moving
+    # the port is the one somebody actually types mid-session, and a `/set`
+    # that quietly did nothing until the next restart would read as broken.
+    if name.startswith("REMOTE_"):
+        try:
+            changed = remote.reconfigure()
+        except Exception as e:
+            print(f"  {S.ERR}✗ The remote could not move there: {e}{S.R}\n")
+            return
+        if changed.get("rebound"):
+            print(f"  {S.INFO}◆ The remote moved, so its link changed. The old "
+                  f"one no longer opens anything.{S.R}")
+            for line in _remote_lines():
+                print(f"  {S.MUTED}{line}{S.R}")
     print()
 
 
@@ -583,6 +616,11 @@ def _remote_lines() -> list:
     seen = ("nobody has opened it yet" if not state["seen"]
             else f"last read {channel.ago(state['seen'])}")
     rows = [f"│ bound to {state['host']}:{state['port']} - {seen}"]
+    if state["clients"]:
+        who = ", ".join(row["address"] for row in remote.clients()[:4])
+        rows.append(f"│ opened from {who}")
+    if state["refused"]:
+        rows.append(f"│ refused for wrong tokens: {', '.join(state['refused'])}")
     if state["queued"]:
         rows.append(f"│ {state['queued']} line(s) typed there, waiting for this prompt")
     rows.append("╰─ open this, and whoever holds it is at this prompt:")

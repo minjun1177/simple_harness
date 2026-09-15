@@ -443,6 +443,13 @@ REMOTE_HOST = "127.0.0.1"       # `/remote on lan` binds every interface instead
 REMOTE_PORT = 8765              # busy? the next 19 are tried before giving up
 REMOTE_LINES = 500              # transcript lines kept for a phone to scroll
 REMOTE_ASK_TIMEOUT = 300        # seconds a question waits before it counts as no
+REMOTE_MAX_BAD_TOKENS = 20      # wrong tokens from one address before it is shut out
+REMOTE_LOCKOUT = 300            # ...and for how long. The first wrong one is reported
+                                # at the prompt either way: on a network somebody
+                                # else is on, that is the only warning there is.
+# Changing the host or the port while a remote is open moves it there and prints
+# the new link - a setting that takes effect only after something is turned off
+# and on again is a setting that looks broken.
 
 # --- reasoning ("thinking") models -------------------------------------------
 # Reasoning models wrap their scratch work in <think> tags, or return it in

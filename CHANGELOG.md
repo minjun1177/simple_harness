@@ -53,17 +53,33 @@ desk can read what was asked and what came back. Nobody answering inside
 What is behind the link is a shell, so: off until `/remote on`; loopback unless
 `/remote on lan`, which says what it is doing in as many words; a token made
 when the door opens, printed once, never written to disk and gone when it
-closes; a `Host` that is not this machine refused before the token is read; and
-the mirrored transcript redacted the way the model's copy is, so a `.env` value
-that is on your screen because *you* ran `!cat .env` does not go out over the
-wire. There is deliberately no tunnel and no account - from outside, forward the
-port over `ssh -L`.
+closes - 128 bits on loopback, 256 for `lan`, which is the one that crosses a
+network somebody else is also on; a `Host` that is not this machine refused
+before the token is read; wrong tokens counted per address and shut out after
+`REMOTE_MAX_BAD_TOKENS` of them; and the mirrored transcript redacted the way
+the model's copy is, so a `.env` value that is on your screen because *you* ran
+`!cat .env` does not go out over the wire.
+
+And you are told who is there. The first request from an address, and the first
+wrong token from one, arrive at your prompt the way another agent's message
+does - `⚿ 192.168.0.14 opened the remote link.` On a shared network the
+question worth answering is not whether somebody *could* get in but whether
+they did, and nothing else here can answer it.
+
+It is plain HTTP, which on loopback is the whole story and over `lan` is a
+network you are choosing to trust. There is deliberately no TLS and no account:
+from anywhere else, forward the port over `ssh -L`.
+
+`REMOTE_PORT` and `REMOTE_HOST` are ordinary settings, and `/set REMOTE_PORT
+9000` at a prompt with a remote already open *moves* it - new token, new link,
+printed on the spot - rather than waiting for a restart.
 
 The transcript is a tee on `sys.stdout` rather than a second rendering, which is
 why what the phone shows is exactly what the terminal shows, tool boxes and all.
 
 New: `/remote`, `remote.py`, `tests/test_remote.py`, and `REMOTE_ENABLED`,
-`REMOTE_HOST`, `REMOTE_PORT`, `REMOTE_LINES`, `REMOTE_ASK_TIMEOUT`.
+`REMOTE_HOST`, `REMOTE_PORT`, `REMOTE_LINES`, `REMOTE_ASK_TIMEOUT`,
+`REMOTE_MAX_BAD_TOKENS`, `REMOTE_LOCKOUT`.
 
 ---
 

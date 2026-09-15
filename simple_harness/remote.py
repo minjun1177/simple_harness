@@ -20,15 +20,31 @@ risk, so:
 
   * it is **off by default** and starts only on an explicit `/remote on`;
   * the token is generated per start, never saved, and never written into
-    `settings.json` - there is no long-lived credential to leak;
+    `settings.json` - there is no long-lived credential to leak. Loopback gets
+    128 bits of it; `lan` gets 256, because that token is one that crosses a
+    network somebody else is also on;
   * it binds **loopback** unless `/remote on lan` is typed, and that prints a
     warning naming what is now reachable;
   * every request carries the token, compared with `secrets.compare_digest`;
+  * wrong tokens are counted per address, and an address that has sent
+    `REMOTE_MAX_BAD_TOKENS` of them is refused for `REMOTE_LOCKOUT` seconds -
+    a 128-bit token is not guessable, but a door that lets somebody knock all
+    afternoon without anyone hearing it is still the wrong door;
+  * **the person is told who is there.** The first request from an address,
+    and every attempt with a wrong token, becomes a line at the prompt. On a
+    network you share, the useful question is not "could someone get in" but
+    "did they", and nothing else here can answer it;
   * the `Host` header has to name this machine, which is what stops a page on
     the internet from walking into `127.0.0.1` through a rebound DNS name;
   * what is mirrored out goes through `vault.redact` first, so a `.env` value
     that is on the terminal because the person ran `!cat .env` is not also on
     the wire.
+
+**What it is not.** This is plain HTTP. On loopback that is the whole story -
+the bytes never leave the machine. Over `lan` they cross a network, and anyone
+already on that network can read them: the transcript, and the token with it.
+So `lan` is for a network you trust, and everything else is `ssh -L`, which is
+somebody else's audited code and is why there is no tunnel and no TLS here.
 
 **What the remote sees.** The screen, as text. Everything the harness prints
 goes through `sys.stdout`, so mirroring is a tee installed on it rather than a
@@ -90,7 +106,12 @@ _server = None
 _thread = None
 _token = ""
 _bound = ()                 # (host, port) actually bound, after the OS chose
+_scope = ""                 # "lan" when it was opened to the network
 _started = 0.0
+
+_clients = {}               # address -> {"first", "last", "requests"}
+_bad = {}                   # address -> {"count", "until"}
+_notices = collections.deque(maxlen=50)      # for the prompt to print
 
 _lines = collections.deque(maxlen=1)     # (seq, text); resized at start()
 _seq = 0
@@ -268,6 +289,84 @@ def driven() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# who is at the door
+# ---------------------------------------------------------------------------
+
+def _note(text: str) -> None:
+    """Something the person should know, kept for the next free prompt.
+
+    Never printed from here. A handler thread printing would land in the
+    middle of a streaming answer, and the channel had this problem first: the
+    prompt is where a message from elsewhere belongs, which is where
+    `take_notices` is read.
+    """
+    with _wake:
+        _notices.append((time.time(), text))
+
+
+def take_notices() -> list:
+    """Drain what has happened at the door since this was last asked."""
+    with _wake:
+        found = list(_notices)
+        _notices.clear()
+    return [text for _, text in found]
+
+
+def locked_out(who: str) -> float:
+    """Seconds this address is still refused for, or 0."""
+    with _wake:
+        record = _bad.get(who)
+        if not record:
+            return 0.0
+        return max(0.0, record["until"] - time.time())
+
+
+def note_bad_token(who: str) -> None:
+    """Count a wrong token, and shut the address out if there are enough.
+
+    The first one is said out loud, because on a network somebody else is on,
+    one wrong token is the only warning there is going to be. The ones after
+    it are not: a locked-out script knocking four times a second must not be
+    able to fill the terminal with its own noise.
+    """
+    limit = max(1, int(_cfg("REMOTE_MAX_BAD_TOKENS", 20)))
+    for_how_long = max(1.0, float(_cfg("REMOTE_LOCKOUT", 300)))
+    with _wake:
+        record = _bad.setdefault(who, {"count": 0, "until": 0.0})
+        record["count"] += 1
+        count = record["count"]
+        if count >= limit:
+            record["until"] = time.time() + for_how_long
+            record["count"] = 0
+    if count == 1:
+        _note(f"{who} tried the remote with a token that is not this one.")
+    elif count >= limit:
+        _note(f"{who} has tried {limit} wrong tokens - refused for "
+              f"{int(for_how_long)}s. Somebody is guessing; /remote off closes it.")
+
+
+def note_client(who: str) -> None:
+    """A request that got past the token. The first from an address is news."""
+    global _last_seen
+    with _wake:
+        _last_seen = time.time()
+        _bad.pop(who, None)          # it is the holder of the link, fumbling
+        seen = _clients.get(who)
+        if seen:
+            seen["last"], seen["requests"] = _last_seen, seen["requests"] + 1
+            return
+        _clients[who] = {"first": _last_seen, "last": _last_seen, "requests": 1}
+    _note(f"{who} opened the remote link.")
+
+
+def clients() -> list:
+    """Who has been through the door, newest first."""
+    with _wake:
+        return sorted(({"address": who, **rest} for who, rest in _clients.items()),
+                      key=lambda row: row["last"], reverse=True)
+
+
+# ---------------------------------------------------------------------------
 # questions, and where they are asked
 # ---------------------------------------------------------------------------
 
@@ -376,14 +475,14 @@ def start(scope: str = "") -> dict:
     loopback is the default because the failure mode of getting this wrong is
     a shell on somebody else's network.
     """
-    global _server, _thread, _token, _bound, _started, _lines, _seq
+    global _server, _thread, _token, _bound, _scope, _started, _lines, _seq
     if running():
         return status()
 
     host = "0.0.0.0" if scope == "lan" else str(_cfg("REMOTE_HOST", "127.0.0.1"))
     first = int(_cfg("REMOTE_PORT", 8765))
     with _wake:
-        _lines = collections.deque(_lines, maxlen=max(50, int(_cfg("REMOTE_LINES", 500))))
+        _lines = collections.deque(_lines, maxlen=max(1, int(_cfg("REMOTE_LINES", 500))))
         _seq = _lines[-1][0] if _lines else 0
 
     server, problem = None, None
@@ -399,8 +498,14 @@ def start(scope: str = "") -> dict:
     if server is None:
         raise RuntimeError(f"could not open a port on {host}: {problem}")
 
-    _token = secrets.token_urlsafe(16)
+    # Twice the token for the network case. 128 bits is already not guessable,
+    # and the extra is not really about guessing: a token that leaves this
+    # machine is a token that can be written down, shoulder-read off a screen
+    # or left in somebody's browser history, and there is no reason to be
+    # stingy with the one that does.
+    _token = secrets.token_urlsafe(32 if scope == "lan" else 16)
     _bound = (host, server.server_address[1])
+    _scope = "lan" if scope == "lan" else ""
     _started = time.time()
     _server = server
     _thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.2},
@@ -410,9 +515,47 @@ def start(scope: str = "") -> dict:
     return status()
 
 
+def reconfigure() -> dict:
+    """Make a setting changed since `start()` true of the door that is open.
+
+    A setting that is changed while the thing it configures is running should
+    either take effect or say it has not, and `/set REMOTE_PORT 9000` at a
+    prompt with a remote already open is exactly somebody saying "move it".
+    So it moves - which means a new token and a dead link, and the caller is
+    told so it can print the new one.
+
+    Returns what changed: `{"rebound": (host, port)}` when the address moved,
+    `{"resized": n}` when only the transcript did, `{}` when nothing did.
+    """
+    if not running():
+        return {}
+    wanted = ("0.0.0.0" if _scope == "lan" else str(_cfg("REMOTE_HOST", "127.0.0.1")),
+              int(_cfg("REMOTE_PORT", 8765)))
+    # Port 0 means "any", and the OS already answered it: re-reading that as a
+    # change would move the door on every unrelated `/set`.
+    moved = wanted[0] != _bound[0] or (wanted[1] and wanted[1] != _bound[1])
+    if moved:
+        scope = _scope
+        stop()
+        start(scope)
+        return {"rebound": _bound}
+
+    kept = max(1, int(_cfg("REMOTE_LINES", 500)))
+    if kept != _lines.maxlen:
+        _resize(kept)
+        return {"resized": kept}
+    return {}
+
+
+def _resize(kept: int) -> None:
+    global _lines
+    with _wake:
+        _lines = collections.deque(_lines, maxlen=kept)
+
+
 def stop() -> None:
     """Close the door, and forget the token that opened it."""
-    global _server, _thread, _token, _bound, _question
+    global _server, _thread, _token, _bound, _scope, _question, _last_seen
     server, _server = _server, None
     _drop_mirror()
     with _wake:
@@ -436,6 +579,16 @@ def stop() -> None:
     _thread = None
     _token = ""
     _bound = ()
+    _scope = ""
+    # Who was at the door is forgotten with the door. The addresses were only
+    # ever here so the person could be told about them, and a list of who
+    # visited outliving the thing they visited is a record nobody asked for.
+    # `_last_seen` goes with them, or the next door would open claiming it had
+    # just been read by somebody who was at the last one.
+    with _wake:
+        _clients.clear()
+        _bad.clear()
+        _last_seen = 0.0
 
 
 def urls() -> list:
@@ -458,8 +611,12 @@ def status() -> dict:
             "running": _server is not None,
             "host": _bound[0] if _bound else "",
             "port": _bound[1] if _bound else 0,
+            "scope": _scope or "local",
             "token": _token,
             "urls": urls(),
+            "clients": len(_clients),
+            "refused": sorted(who for who, record in _bad.items()
+                              if record["until"] > time.time()),
             "lines": len(_lines),
             "queued": len(_typed),
             "driver": _driver,
@@ -551,15 +708,31 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -- the four things it answers -----------------------------------------
 
-    def do_GET(self):                                    # noqa: N802
-        global _last_seen
-        path, fields = self._path_and_query()
+    def _refusal(self, fields):
+        """Everything a request has to get past, in the order it has to.
+
+        The `Host` first, because a request from a page that resolved its own
+        name here should not even get to spend a guess. Then the lockout, so
+        an address that is guessing cannot keep guessing. Then the token.
+        Returns `(code, message)` or `None`.
+        """
         if not self._host_is_this_machine():
-            return self._json(403, {"error": "wrong host"})
+            return 403, "wrong host"
+        who = self.client_address[0] if self.client_address else "?"
+        waiting = locked_out(who)
+        if waiting:
+            return 429, f"too many wrong tokens - try again in {int(waiting) + 1}s"
         if not self._authorised(fields):
-            return self._json(401, {"error": "a token is needed"})
-        with _wake:
-            _last_seen = time.time()
+            note_bad_token(who)
+            return 401, "a token is needed"
+        note_client(who)
+        return None
+
+    def do_GET(self):                                    # noqa: N802
+        path, fields = self._path_and_query()
+        refused = self._refusal(fields)
+        if refused:
+            return self._json(refused[0], {"error": refused[1]})
 
         if path in ("/", "/index.html"):
             page = PAGE.replace("__TOKEN__", _token)
@@ -577,14 +750,10 @@ class _Handler(BaseHTTPRequestHandler):
         return self._json(404, {"error": "no such thing here"})
 
     def do_POST(self):                                   # noqa: N802
-        global _last_seen
         path, fields = self._path_and_query()
-        if not self._host_is_this_machine():
-            return self._json(403, {"error": "wrong host"})
-        if not self._authorised(fields):
-            return self._json(401, {"error": "a token is needed"})
-        with _wake:
-            _last_seen = time.time()
+        refused = self._refusal(fields)
+        if refused:
+            return self._json(refused[0], {"error": refused[1]})
         payload = self._body()
 
         if path == "/say":

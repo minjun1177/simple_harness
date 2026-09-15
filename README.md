@@ -634,21 +634,48 @@ that opens is a shell - the link can type `!rm -rf ~` as easily as "hello". So:
   words;
 - the token is generated when the door opens, printed once, **never saved**,
   and gone when the door closes. There is no long-lived credential here and no
-  setting that holds one;
+  setting that holds one. Loopback gets 128 bits of it; `lan` gets 256, because
+  that is the token that crosses a network somebody else is also on;
 - every request carries it, compared whole rather than character by character;
+- **wrong tokens are counted, and then shut out.** After
+  `REMOTE_MAX_BAD_TOKENS` of them from one address, that address is refused for
+  `REMOTE_LOCKOUT` seconds. A 128-bit token is not guessable; a door somebody
+  can knock on all afternoon without anyone hearing it is still the wrong door;
+- **you are told who is there.** The first request from an address, and the
+  first wrong token from one, appear at your prompt the way another agent's
+  message does:
+
+  ```
+  ⚿ 192.168.0.14 opened the remote link.
+  ⚿ 192.168.0.23 tried the remote with a token that is not this one.
+  ```
+
+  On a network you share, the question worth answering is not *could* somebody
+  get in but *did* they, and nothing else here can answer it. `/remote` lists
+  the same thing on demand;
 - a request whose `Host` is not this machine is refused before the token is
   even looked at, which is what stops a page somewhere else on the internet
   from resolving its own name to `127.0.0.1` and talking to what answers;
 - what is mirrored out goes through the same redaction the model gets, so a
   `.env` value that is on this terminal because *you* ran `!cat .env` does not
   go out over the wire;
-- `/remote off` closes the port, drops the token and ends every link that was
-  already open.
+- `/remote off` closes the port, drops the token, forgets who was there and
+  ends every link that was already open.
 
-Off the local network, there is deliberately no tunnel here and no account to
-sign in to: forward the port over something you already trust -
-`ssh -L 8765:127.0.0.1:8765 you@machine` - rather than opening a door on the
-internet with a harness on the other side of it.
+**What it is not.** This is plain HTTP. On loopback that is the whole story -
+the bytes never leave the machine. Over `lan` they cross a network, and whoever
+is already on that network can read them: the transcript, and the token with
+it. So `lan` is for a network you actually trust, and everything else is a
+tunnel you already trust - `ssh -L 8765:127.0.0.1:8765 you@machine`. There is
+deliberately no TLS and no account to sign in to here: a self-signed
+certificate teaches you to click through the warning, and the thing on the
+other side of this door is a shell.
+
+**Moving it.** `REMOTE_PORT` and `REMOTE_HOST` are ordinary settings, so
+`/set REMOTE_PORT 9000` works - and if a remote is open when you type it, it
+moves there rather than waiting for a restart. That means a new token and a new
+link, printed on the spot; the old link stops opening anything. If the port is
+busy, the next nineteen are tried before it gives up.
 
 **What it does not do.** It does not run a second session; there is one
 conversation and the remote is another way into it. A line typed there arrives
@@ -1607,6 +1634,8 @@ The settings worth knowing:
 | `REMOTE_PORT` | 8765 | The port it tries first; the next 19 are tried before it gives up |
 | `REMOTE_LINES` | 500 | Transcript lines kept for the remote to scroll back through |
 | `REMOTE_ASK_TIMEOUT` | 300 | Seconds a question waits on the remote before it counts as a no |
+| `REMOTE_MAX_BAD_TOKENS` | 20 | Wrong tokens from one address before it is shut out |
+| `REMOTE_LOCKOUT` | 300 | Seconds it is shut out for. The first wrong token is reported at the prompt either way |
 | `AUTO_TITLE` | `True` | Let the model name each new session |
 | `SAVE_CHAT_HISTORY` | `True` | Write session files at all |
 | `CMD_TIMEOUT` | 120 | Seconds before a runaway command is killed |

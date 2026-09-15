@@ -899,14 +899,30 @@ threads notify, so an answer from a phone returns *into* the tool call that
 was waiting for a keystroke. No answer inside `REMOTE_ASK_TIMEOUT` returns
 `""`, and every caller reads that as a no.
 
-**What guards it.** The token is `secrets.token_urlsafe(16)`, made at
-`start()`, compared with `compare_digest`, never written to disk - there is no
-setting that holds it, which is the point. The bind is loopback unless
-`/remote on lan`. A `Host` header that is not this machine is refused before
-the token is read: the token stops guessing, and the `Host` check stops a page
-elsewhere from resolving its own name to `127.0.0.1` and talking to whatever
-answers. There is no tunnel and no account here on purpose; reaching it from
-outside is `ssh -L`, which is somebody else's audited code.
+**What guards it**, in the order `_refusal` applies it:
+
+1. the `Host` header must name this machine - a page elsewhere that resolved
+   its own name to `127.0.0.1` does not get to spend a guess;
+2. the address must not be shut out - `REMOTE_MAX_BAD_TOKENS` wrong ones costs
+   it `REMOTE_LOCKOUT` seconds;
+3. the token must match, `compare_digest`, `token_urlsafe(16)` on loopback and
+   `(32)` for `lan`. It is made at `start()` and never written to disk: no
+   setting holds it, which is the point.
+
+A wrong token and a new address each leave a line in `_notices`, drained at the
+prompt by `_show_remote_notices` - never printed from a handler thread, for the
+same reason the channel's messages are not. `stop()` forgets the addresses with
+the door; they were only ever there to be told about.
+
+There is no TLS and no account here on purpose. Over `lan` this is plain HTTP
+on a network you are choosing to trust, and everything else is `ssh -L`, which
+is somebody else's audited code.
+
+**Settings take effect on the door that is open.** `reconfigure()` is called
+after any `/set REMOTE_*`: a changed host or port stops and restarts the server
+(a new token, and the caller prints the new link), and a changed `REMOTE_LINES`
+resizes the ring in place. A setting that needs the feature turned off and on
+again to mean anything is a setting that reads as broken.
 
 `stop()` is called from the main thread and never from a handler - `shutdown`
 waits for the serving loop a handler is running inside - and it drops the tee,

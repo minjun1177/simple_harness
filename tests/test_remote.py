@@ -18,6 +18,7 @@ its own, so a request from this one is already a request from somewhere else.
 """
 import json
 import os
+import socket
 import sys
 import tempfile
 import threading
@@ -68,6 +69,15 @@ def request(path, token="", method="GET", payload=None, host=None):
         return e.code, e.read().decode("utf-8", "replace")
 
 
+def socket_for_a_free_port() -> int:
+    """A port nothing is listening on, so moving the door has somewhere to go."""
+    holder = socket.socket()
+    holder.bind(("127.0.0.1", 0))
+    port = holder.getsockname()[1]
+    holder.close()
+    return port
+
+
 def state(token, since=0):
     code, body = request(f"/state?since={since}", token)
     return code, json.loads(body) if code == 200 else {}
@@ -91,7 +101,8 @@ remote._drop_mirror()
 check("the token is long enough to be worth having", len(TOKEN) >= 16, TOKEN[:4] + "…")
 check("and the URL carries it", opened["urls"] and TOKEN in opened["urls"][0])
 check("no setting holds the token",
-      not [name for name in config.settable() if "TOKEN" in name],
+      not hasattr(config, "REMOTE_TOKEN")
+      and TOKEN not in [str(value) for value in config.settable().values()],
       "a saved token would outlive the session that made it")
 
 # ---------------------------------------------------------------------------
@@ -349,6 +360,71 @@ check("what is printed lands in the transcript",
       "printed through the tee" in [text for _, text in remote.transcript()])
 
 # ---------------------------------------------------------------------------
+print("\n--- the port is a setting, and moving it moves the door ---")
+
+check("the port is something /set can change",
+      "REMOTE_PORT" in config.settable() and "REMOTE_HOST" in config.settable())
+
+free = socket_for_a_free_port()
+was_token, was_port = remote.token(), remote.status()["port"]
+config.REMOTE_PORT = free
+changed = remote.reconfigure()
+check("changing it while the remote is open moves it",
+      changed.get("rebound") and remote.status()["port"] == free,
+      f"{was_port} → {remote.status()['port']}")
+check("the transcript survives the move", len(remote.transcript()) > 0)
+TOKEN = remote.token()
+check("the link is a new one", TOKEN != was_token)
+code, _ = request("/", was_token)
+check("and the old one opens nothing", code == 401, str(code))
+code, _ = request("/", TOKEN)
+check("while the new one does", code == 200, str(code))
+
+config.REMOTE_LINES = 25
+changed = remote.reconfigure()
+check("changing how much is kept resizes it rather than moving anything",
+      changed.get("resized") == 25 and len(remote.transcript()) <= 25,
+      str(changed))
+check("and an unrelated /set moves nothing", remote.reconfigure() == {})
+
+# ---------------------------------------------------------------------------
+print("\n--- a wrong token is counted, said out loud, and then shut out ---")
+
+remote.take_notices()                    # start from a quiet board
+config.REMOTE_MAX_BAD_TOKENS = 3
+config.REMOTE_LOCKOUT = 1                # seconds, so the test can wait it out
+
+codes = [request("/", "not-the-token")[0] for _ in range(3)]
+check("each wrong token is refused", codes == [401, 401, 401], str(codes))
+code, body = request("/", TOKEN)
+check("and after enough of them even the right one is turned away",
+      code == 429, str(code))
+check("with how long to wait", "try again in" in body, body[:80])
+check("the address is named as refused",
+      remote.status()["refused"] == ["127.0.0.1"], str(remote.status()["refused"]))
+
+notices = remote.take_notices()
+check("the first wrong token is reported at the prompt",
+      any("token that is not this one" in text for text in notices), str(notices))
+check("and so is the shutting out",
+      any("wrong tokens" in text and "refused" in text for text in notices),
+      str(notices))
+check("but not one line per attempt - a script must not fill the terminal",
+      len(notices) <= 3, str(notices))
+
+time.sleep(1.1)
+code, _ = request("/", TOKEN)
+check("the lockout lifts by itself", code == 200, str(code))
+check("and holding the real link clears the count",
+      not remote.status()["refused"], str(remote.status()["refused"]))
+config.REMOTE_MAX_BAD_TOKENS = 20
+
+remote.take_notices()
+check("who opened it is known", any(row["address"] == "127.0.0.1"
+                                    for row in remote.clients()),
+      str(remote.clients()))
+
+# ---------------------------------------------------------------------------
 print("\n--- and closing it closes it ---")
 
 port = remote.status()["port"]
@@ -363,7 +439,6 @@ except Exception:
     reachable = False
 check("nothing answers on the port any more", not reachable)
 
-import socket                                                       # noqa: E402
 probe = socket.socket()
 # The same option the server itself is opened with: what would otherwise be in
 # the way is the TIME_WAIT left by the requests above, not the server.
@@ -380,6 +455,29 @@ check("and the port is free for the next thing", freed, f"port {port}")
 check("asking a stopped remote answers nothing",
       remote.ask("gone", [], [("y", "Allow")], timeout=1) == "")
 check("stopping twice is not an error", remote.stop() is None)
+
+# ---------------------------------------------------------------------------
+print("\n--- and the network case is not the local one ---")
+
+config.REMOTE_PORT = 0
+local = remote.start()
+remote._drop_mirror()
+local_token = local["token"]
+remote.stop()
+lan = remote.start("lan")
+remote._drop_mirror()
+check("opening it to the network binds every interface",
+      lan["host"] == "0.0.0.0" and lan["scope"] == "lan", str(lan["host"]))
+check("and issues a token of its own, longer than the local one",
+      len(lan["token"]) > len(local_token),
+      f"{len(local_token)} → {len(lan['token'])}")
+check("the link it prints is one a phone can reach",
+      any(not url.startswith("http://127.0.0.1") for url in lan["urls"])
+      or lan["urls"] == [],           # a machine with no network of its own
+      str(lan["urls"]))
+check("nothing about it is reachable without that token",
+      request("/", "")[0] == 401 and request("/", local_token)[0] == 401)
+remote.stop()
 
 print()
 if failures:
