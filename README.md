@@ -645,9 +645,11 @@ identical text is harder to read on a phone than on the screen it came from.
 Only `ESC [ … m` ever reaches the browser; every other escape is taken out
 before it is sent, and the text itself only ever goes in as `textContent`.
 
-Above the box is a strip saying what the conversation costs - tokens against
-the context window, and how many turns - which is the part of `/usage` that
-fits on a phone and the thing somebody driving from a train most wants to know.
+Above the box is a strip: the same spinner the terminal turns while it waits on
+the left, and what the conversation costs on the right - tokens against the
+context window, the share of it used, how many turns. That is the part of
+`/usage` that fits on a phone, and the spinner is where the eye already is,
+which on a phone is the box rather than the last line of the transcript.
 
 Typing `/` there lists the slash commands with what each one does, from the
 same table `/help` renders, and tapping one inserts it: a phone has not read

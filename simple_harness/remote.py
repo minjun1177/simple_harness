@@ -240,7 +240,12 @@ def publish(text: str) -> None:
     with _wake:
         buffer = _tail + text
         parts = buffer.split("\n")
-        _tail = parts.pop()
+        # The same rule for the line still being written as for the ones that
+        # are finished: a `\r` means the terminal was about to draw over what
+        # it had. Without it the spinner - which is one line, rewritten twenty
+        # times a second and never ended with a newline - reached the phone as
+        # every frame it had ever drawn, laid end to end.
+        _tail = parts.pop().rsplit("\r", 1)[-1]
         for line in parts:
             line = line.rsplit("\r", 1)[-1]
             _seq += 1
@@ -1117,8 +1122,11 @@ form { display:flex; gap:8px; padding:10px 14px calc(10px + env(safe-area-inset-
          border-top:1px solid var(--warn); font-size:12px; }
 #cost { display:flex; align-items:center; gap:8px; padding:4px 14px 0;
         font-size:11px; color:var(--muted); }
-#cost .bar { flex:1; height:3px; border-radius:2px; background:#2a2a2a;
-             overflow:hidden; }
+#cost .grow { flex:1; }
+#spin { color:var(--accent); min-width:1.2em; }
+#spin b { color:var(--muted); font-weight:400; margin-left:4px; }
+#cost .bar { width:72px; flex:none; height:3px; border-radius:2px;
+             background:#2a2a2a; overflow:hidden; }
 #cost .bar i { display:block; height:100%; width:0; background:var(--ok); }
 #cost.warm .bar i { background:var(--warn); }
 #cost.full .bar i { background:var(--err); }
@@ -1152,7 +1160,8 @@ input:focus { outline:1px solid var(--accent); }
 <div id="ask"><h3></h3><dl></dl><div class="row"></div></div>
 <div id="menu"></div>
 <div id="shell"><b>Shell</b> - runs on that machine as you; not sent to the model</div>
-<div id="cost" hidden><span id="costtext"></span><span class="bar"><i></i></span></div>
+<div id="cost" hidden><span id="spin"></span><span class="grow"></span>
+  <span id="costtext"></span><span class="bar"><i></i></span></div>
 <form id="say"><input id="text" placeholder="message, or /command"
   autocomplete="off" autocapitalize="off" autocorrect="off"><button>Send</button></form>
 <script>
@@ -1362,15 +1371,39 @@ document.getElementById("say").onsubmit = async (e) => {
 };
 
 const cost = document.getElementById("cost"), costtext = document.getElementById("costtext");
+const spin = document.getElementById("spin");
+
+// The frames the terminal turns while it waits, turned here too. The mirrored
+// line says `thinking…` in the transcript; this says the same thing where the
+// eye already is, which on a phone is the box rather than the last line.
+const FRAMES = ["\\u00b7", "\\u2722", "*", "\\u2736", "\\u273b", "\\u273d"];
+let spinAt = 0, spinTimer = null;
+
+function turn(busy) {
+  if (busy && !spinTimer) {
+    spinTimer = setInterval(() => {
+      spinAt = (spinAt + 1) % FRAMES.length;
+      spin.innerHTML = "";
+      spin.append(FRAMES[spinAt]);
+      const word = document.createElement("b");
+      word.textContent = "working";
+      spin.append(word);
+    }, 260);
+  } else if (!busy && spinTimer) {
+    clearInterval(spinTimer); spinTimer = null; spin.textContent = "";
+  }
+}
 
 function short(n) {
   return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n);
 }
 
-function drawCost(usage) {
-  if (!usage || !usage.budget) { cost.hidden = true; return; }
+function drawCost(usage, busy) {
+  turn(busy);
+  const known = usage && usage.budget;
+  cost.hidden = !known && !busy;
+  if (!known) { costtext.textContent = ""; return; }
   const share = Math.min(1, usage.used / usage.budget);
-  cost.hidden = false;
   cost.className = share > 0.9 ? "full" : (share > 0.7 ? "warm" : "");
   costtext.textContent = `${short(usage.used)} / ${short(usage.budget)} context`
     + `  ${Math.round(share * 100)}%`
@@ -1386,7 +1419,7 @@ async function poll() {
       if (r.status === 401) { where.textContent = "this link is no longer valid"; return; }
       const s = await r.json();
       dot.className = s.busy ? "busy" : "live";
-      drawCost(s.usage);
+      drawCost(s.usage, s.busy);
       where.textContent = (s.title || s.cwd) + "  ·  " + s.model;
       for (const [n, text] of s.lines) { add(text); seq = n; }
       if (tailNode) { tailNode.remove(); tailNode = null; }
@@ -1400,6 +1433,7 @@ async function poll() {
       drawAsk(s.question);
     } catch (err) {
       if (err && err.message === "pair") return;
+      turn(false);
       dot.className = ""; where.textContent = "reconnecting…";
       await new Promise(r => setTimeout(r, 2000));
     }

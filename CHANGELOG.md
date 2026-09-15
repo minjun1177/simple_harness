@@ -155,8 +155,14 @@ printed on the spot - rather than waiting for a restart.
   The local echo is gone; the transcript's own copy is the one you see, exactly
   as the terminal shows it.
 - **The page now says what the conversation costs**: tokens against the context
-  window and the number of turns, on a strip above the box. It is the half of
-  `/usage` that fits on a phone.
+  window and the number of turns, on a strip above the box, with the spinner
+  the terminal turns on the left of it. It is the half of `/usage` that fits on
+  a phone.
+- **The spinner reached the phone as every frame it had ever drawn.** It is one
+  line, rewritten many times a second and never ended with a newline, and the
+  `\r` rule was applied to finished lines but not to the one still being
+  written - so the buffer held the lot, laid end to end. It holds the frame it
+  is on, and nothing once it stops.
 - **Redaction was silent about itself.** A `.env` value that is also an
   ordinary word - `PROJECT_DIR=simple_harness` - is a secret by the only rule
   that never lets a key through, so `!dir` came back full of

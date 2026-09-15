@@ -158,6 +158,21 @@ check("an overwritten line arrives as what was left",
 check("a line still being printed is the tail, not a line",
       body["tail"] == "half a line, still" and
       "half a line, still" not in lines, body["tail"])
+
+# The spinner is one line, rewritten twenty times a second and never ended
+# with a newline: every frame it has ever drawn sits in that buffer unless the
+# `\r` is honoured there too. It reached the phone as a paragraph of them.
+remote.publish("\n")
+for frame in ("\u00b7", "\u2722", "*", "\u2736"):
+    remote.publish(f"\r  {frame} thinking\u2026  ")
+code, body = state(TOKEN)
+check("a spinner is the frame it is on, not every frame it has been",
+      body["tail"].strip() == "\u2736 thinking\u2026", repr(body["tail"]))
+remote.publish("\r\x1b[K")
+code, body = state(TOKEN)
+check("and it leaves nothing behind when it stops", body["tail"] == "",
+      repr(body["tail"]))
+remote.publish("half a line, still")
 remote.publish("\n")            # finish it, so the ring is left tidy
 
 seq = body["seq"]
