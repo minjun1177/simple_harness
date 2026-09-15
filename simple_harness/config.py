@@ -169,6 +169,30 @@ try:
         except Exception:
             return False        # no application running: it is not being typed
 
+    from prompt_toolkit.filters import Condition
+
+    def _wants_the_menu() -> bool:
+        """Whether the line being typed is one the completion menu speaks to.
+
+        `complete_while_typing` is what makes `/` and `@` open their menus
+        without anybody pressing Tab, and it is also what makes prompt_toolkit
+        keep `reserve_space_for_menu` rows free *under the prompt at all times*
+        - eight blank lines below the cursor, whether or not a menu is coming,
+        for the whole time you are sitting there typing an ordinary sentence.
+
+        The reservation is read on every render, so it can be earned rather
+        than held: this says yes only for a line that starts with `/` or has an
+        `@` word in it, which is exactly when a menu is about to appear. Tab
+        still completes anything, any time - that is a different path.
+        """
+        try:
+            text = get_app().current_buffer.document.text_before_cursor
+        except Exception:
+            return False
+        return text.lstrip().startswith("/") or bool(_AT_WORD.search(text))
+
+    COMPLETE_WHILE_TYPING = Condition(_wants_the_menu)
+
     class ShellLineLexer(Lexer):
         """Colour the whole line while it is a shell command.
 

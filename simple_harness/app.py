@@ -887,7 +887,11 @@ async def main(resume_id: str = "") -> None:
             lexer=config.ShellLineLexer(SHELL_STYLE),
             # The menu has to open on its own for `@` to be discoverable: nobody
             # presses Tab after a character they have not been told completes.
-            complete_while_typing=True,
+            # A condition rather than `True`, because `True` also means "keep
+            # eight rows free under the prompt at all times" - a blank band
+            # under every ordinary sentence anybody types. See
+            # `config._wants_the_menu`.
+            complete_while_typing=config.COMPLETE_WHILE_TYPING,
         )
 
     # Which MCP servers the system prompt was built for, so a load can be

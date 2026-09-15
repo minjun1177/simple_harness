@@ -211,6 +211,44 @@ try:
         # raise from inside a redraw.
         check("with no application, nothing is being typed", not config.typing_shell())
         check("so the prompt is the ordinary one", "Shell" not in app._prompt_message())
+
+        # `complete_while_typing=True` is also what makes prompt_toolkit hold
+        # `reserve_space_for_menu` rows free *under the prompt at all times* -
+        # eight blank lines below the cursor for the whole time somebody types
+        # an ordinary sentence. It is read on every render, so the condition
+        # earns it: the band belongs to the lines a menu is actually coming for.
+        import asyncio                                             # noqa: E402
+        from prompt_toolkit.application.current import set_app     # noqa: E402
+
+        async def band():
+            session = config.PromptSession(
+                completer=config.merge_completers([
+                    config.SlashCommandCompleter(tui.complete_command),
+                    config.PathMentionCompleter()]),
+                complete_while_typing=config.COMPLETE_WHILE_TYPING)
+            rows = {}
+            with set_app(session.app):
+                for line in ("", "hello there", "!dir", "/", "/re", "look at @src"):
+                    session.default_buffer.text = line
+                    session.default_buffer.cursor_position = len(line)
+                    rows[line] = (
+                        bool(session.default_buffer.complete_while_typing()),
+                        session._get_default_buffer_control_height().min or 0)
+            return rows
+
+        rows = asyncio.run(band())
+        check("an ordinary sentence reserves nothing under the prompt",
+              rows["hello there"] == (False, 0), str(rows["hello there"]))
+        check("nor does an empty line, or a shell command",
+              rows[""] == (False, 0) and rows["!dir"] == (False, 0),
+              f'{rows[""]} {rows["!dir"]}')
+        check("a slash opens the menu and takes the room for it",
+              rows["/"][0] and rows["/"][1] >= 4, str(rows["/"]))
+        check("...and so does a half-typed command",
+              rows["/re"][0] and rows["/re"][1] >= 4, str(rows["/re"]))
+        check("an @ mention does too, which is what makes it discoverable",
+              rows["look at @src"][0] and rows["look at @src"][1] >= 4,
+              str(rows["look at @src"]))
     else:
         print("\n  [skip] prompt_toolkit is not installed; the menu is not testable here")
 

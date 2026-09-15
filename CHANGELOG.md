@@ -121,6 +121,14 @@ printed on the spot - rather than waiting for a restart.
   `/commands` - and tapping one inserts it. `!` turns the box amber and says
   it runs on that machine as you, which is the warning the terminal has had
   over its own prompt since the shell escape existed.
+- **Eight blank lines sat under the prompt, all the time.**
+  `complete_while_typing=True` is what opens the `/` and `@` menus without a
+  Tab, and it is also what makes prompt_toolkit hold `reserve_space_for_menu`
+  rows free below the cursor - for the whole time somebody is typing an
+  ordinary sentence that will never have a menu. The reservation is read on
+  every render, so it is earned now: a `Condition` says yes for a line that
+  starts with `/` or carries an `@`, and nothing else. Tab still completes
+  anything, any time.
 - **Redaction was silent about itself.** A `.env` value that is also an
   ordinary word - `PROJECT_DIR=simple_harness` - is a secret by the only rule
   that never lets a key through, so `!dir` came back full of
